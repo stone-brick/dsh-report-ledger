@@ -37,11 +37,17 @@ const childText = partnershipText(child)
 // ---- the protocol names every tool ---------------------------------------
 for (const tool of [
   'report_author', 'report_contribute', 'report_send', 'report_cc',
-  'report_forward', 'report_read', 'report_list', 'report_ack', 'report_close',
+  'report_forward', 'report_read', 'report_list', 'report_ack', 'report_amend', 'report_close',
   'peer_list', 'peer_start',
 ]) {
   check(`protocol documents ${tool}`, PROTOCOL.includes(tool))
 }
+
+// ---- the correction rule is stated ---------------------------------------
+check('protocol points at report_amend instead of re-authoring', PROTOCOL.includes('不要重开一份新汇报'))
+check('protocol says only owners may amend', PROTOCOL.includes('只有发起者或共写者'))
+check('protocol distinguishes append from replace for the body', PROTOCOL.includes('replace_body'))
+check('protocol tells the agent not to fear leaving a correction trail', PROTOCOL.includes('别怕留痕'))
 
 // ---- the lifecycle distinction is stated ---------------------------------
 check('protocol separates a receipt from a conclusion', PROTOCOL.includes('是两件事'))
