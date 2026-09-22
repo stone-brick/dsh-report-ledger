@@ -195,6 +195,100 @@ check('an unmatched task label finds nothing', (await service.list({ task: 'no-s
 check('a report with a different task is not matched',
   !(await service.list({ task: 'billing' })).some((r) => r.report === authored.front.report))
 
+// ---- 14. amendment: corrections are recorded, never silent -----------------
+const target = await service.author({
+  subject: 'amendemnt target',           // deliberate typo
+  body: 'original body text',
+  actor: 'session-a',
+  to: ['session-b'],
+  cc: ['session-c'],
+  task: 'old-task',
+  artifacts: ['a.ts'],
+})
+
+let refusedAmend = ''
+try {
+  await service.amend(target.front.report, 'session-b', { subject: 'not mine to fix' })
+} catch (error) {
+  refusedAmend = error instanceof Error ? error.message : String(error)
+}
+check('a recipient may not amend a report', refusedAmend.includes('may not amend'), refusedAmend)
+check('the refusal names who may amend it', refusedAmend.includes('session-a'), refusedAmend)
+
+const fixedSubject = await service.amend(target.front.report, 'session-a', { subject: 'amendment target' })
+check('an owner may fix the subject', fixedSubject.front.subject === 'amendment target', fixedSubject.front.subject)
+const amendHops = await readHops(target.front.report)
+const amendHop = amendHops.find((hop) => hop.action === 'amended')
+check('the correction is recorded as a hop', amendHop !== undefined)
+check('the hop records the old and new value verbatim',
+  amendHop?.note?.includes('"amendemnt target"') === true && amendHop?.note?.includes('"amendment target"') === true,
+  String(amendHop?.note))
+check('co-authorship is not a thing amendment can rewrite',
+  (await readReport(target.front.report))?.front.authors.join() === 'session-a')
+
+let noopAmend = ''
+try {
+  await service.amend(target.front.report, 'session-a', { subject: 'amendment target' })
+} catch (error) {
+  noopAmend = error instanceof Error ? error.message : String(error)
+}
+check('an amendment that changes nothing is refused', noopAmend.includes('nothing to amend'), noopAmend)
+
+let blankAmend = ''
+try {
+  await service.amend(target.front.report, 'session-a', { subject: '   ' })
+} catch (error) {
+  blankAmend = error instanceof Error ? error.message : String(error)
+}
+check('an amendment cannot blank the subject', blankAmend.includes('cannot blank'), blankAmend)
+
+// Body: appended by default, so nobody's words are rewritten.
+await service.amend(target.front.report, 'session-a', { body: 'corrected: the figure is 42.' })
+const appended = await readReport(target.front.report)
+check('an appended amendment keeps the original text', appended?.body.includes('original body text') === true)
+check('an appended amendment adds its own section', appended?.body.includes('### amendment by') === true)
+check('an appended amendment carries the new text', appended?.body.includes('the figure is 42') === true)
+check('the hop says the body was appended, not replaced',
+  (await readHops(target.front.report)).filter((h) => h.action === 'amended').some((h) => h.note?.includes('appended')))
+
+// Body: a true rewrite is possible but must be asked for, and is recorded.
+await service.amend(target.front.report, 'session-a', { body: 'rewritten body only', replaceBody: true })
+const replaced = await readReport(target.front.report)
+check('replace_body rewrites the body outright', replaced?.body.includes('original body text') === false)
+check('replace_body keeps the new text', replaced?.body.includes('rewritten body only') === true)
+check('the hop records that the body was replaced, not appended',
+  (await readHops(target.front.report)).filter((h) => h.action === 'amended').some((h) => h.note?.includes('body replaced')))
+
+let orphanReplace = ''
+try {
+  await service.amend(target.front.report, 'session-a', { replaceBody: true })
+} catch (error) {
+  orphanReplace = error instanceof Error ? error.message : String(error)
+}
+check('replace_body without a body is refused', orphanReplace.includes('without a body'), orphanReplace)
+
+// Digest fields: task and artifacts.
+await service.amend(target.front.report, 'session-a', { artifacts: ['b.ts', 'c.ts'] })
+check('artifacts are replaced as a whole list',
+  (await readReport(target.front.report))?.front.artifacts.join() === 'b.ts,c.ts')
+await service.amend(target.front.report, 'session-a', { task: '' })
+check('an empty task clears the label', (await readReport(target.front.report))?.front.task === undefined)
+check('a cleared label no longer matches a task filter',
+  !(await service.list({ task: 'old-task' })).some((r) => r.report === target.front.report))
+
+// A correction is activity, so it brings a concluded report back to life.
+await service.close(target.front.report, 'session-a', 'concluded for the amendment test')
+check('the report closes before the reopen test', (await readReport(target.front.report))?.front.status === 'closed')
+const amendedAfterClose = await service.amend(target.front.report, 'session-a', { subject: 'amended after closing' })
+check('amending a closed report reopens it', amendedAfterClose.front.status === 'open', amendedAfterClose.front.status)
+const reopenAfterAmend = await readHops(target.front.report)
+const reopenedAt = reopenAfterAmend.findIndex((h) => h.action === 'reopened')
+// Earlier amendments predate the close, so the invariant is about the FIRST
+// amendment that follows the reopen — not the first one in the file.
+const amendedAfterReopenAt = reopenAfterAmend.findIndex((h, index) => index > reopenedAt && h.action === 'amended')
+check('the reopen precedes the amendment that caused it', reopenedAt >= 0 && amendedAfterReopenAt > reopenedAt,
+  `reopen@${reopenedAt} -> amended@${amendedAfterReopenAt}`)
+
 let failed = 0
 for (const [label, ok, detail] of checks) {
   if (!ok) failed++

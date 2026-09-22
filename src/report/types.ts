@@ -25,8 +25,9 @@ export type ReportStatus = 'open' | 'acked' | 'closed'
  * `authored` and `contributed` establish co-authorship; `sent`/`delivered` are
  * the addressed hand-off and its arrival; `cc` is a quiet copy; `forwarded` and
  * `copied` are onward transfer and duplication; `read`/`acked` close the loop for
- * one reader; `closed` concludes the matter, and `reopened` records that fresh
- * activity brought it back to life.
+ * one reader; `amended` records a correction to the digest or the body; `closed`
+ * concludes the matter, and `reopened` records that fresh activity brought it back
+ * to life.
  */
 export type HopAction =
   | 'authored'
@@ -38,6 +39,7 @@ export type HopAction =
   | 'copied'
   | 'read'
   | 'acked'
+  | 'amended'
   | 'closed'
   | 'reopened'
 

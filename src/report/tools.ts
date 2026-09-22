@@ -264,6 +264,41 @@ export function registerReportTools(
   })))
 
   disposers.push(ctx.tools.register(defineTool({
+    name: 'report_amend',
+    description: 'Correct a report you own — fix a wrong subject, retag the collaboration, or amend the body — instead of opening a replacement report and losing the original transfer path. Correcting is the OWNER\'s act: only the originator or a co-author may amend, and a refusal names who to ask. What can change is deliberately narrow. The digest fields (subject, task, artifacts) are current state and are replaced, with the hop recording the old and new values verbatim. The body is a record of what agents actually said, so by default your text is APPENDED as an amendment section rather than rewriting anyone\'s words; set replace_body: true to rewrite it outright, and the hop records that you did. Recipients, co-authorship, and thread links can never be edited here — they come from the transfer path itself, so the only way to change them is another send/cc/contribute. Amending a closed report reopens it. Amending changes nothing when the values you pass already match, and says so.',
+    parameters: {
+      report: { type: 'string', required: true, description: 'Report id to correct.' },
+      subject: { type: 'string', description: 'Replacement subject. An empty value is refused, since a report must keep a title.' },
+      task: { type: 'string', description: 'Replacement collaboration label; an empty value clears the label.' },
+      artifacts: { type: 'array', items: { type: 'string' }, description: 'Replacement artifact list — the WHOLE list, not additions to it.' },
+      body: { type: 'string', description: 'New body text: appended as an amendment section, or used to replace the body when replace_body is true.' },
+      replace_body: { type: 'boolean', description: 'Rewrite the body instead of appending. Requires body, and is recorded on the hop so later readers know the text was rewritten.' },
+      note: { type: 'string', description: 'Extra note appended to the recorded change summary.' },
+    },
+    output: stringOutput,
+    execute: async (args, exec) => {
+      const input = args as {
+        report: string
+        subject?: string
+        task?: string
+        artifacts?: string[]
+        body?: string
+        replace_body?: boolean
+        note?: string
+      }
+      const result = await service.amend(input.report, actorOf(exec as ExecLike), {
+        ...(input.subject === undefined ? {} : { subject: input.subject }),
+        ...(input.task === undefined ? {} : { task: input.task }),
+        ...(input.artifacts === undefined ? {} : { artifacts: input.artifacts }),
+        ...(input.body === undefined ? {} : { body: input.body }),
+        ...(input.replace_body === undefined ? {} : { replaceBody: input.replace_body }),
+        ...(input.note === undefined ? {} : { note: input.note }),
+      })
+      return `${renderMutation(result.front, result.outcomes)}\nthe correction is recorded as a hop, with the old and new values`
+    },
+  })))
+
+  disposers.push(ctx.tools.register(defineTool({
     name: 'peer_list',
     description: 'List the agents you can work with, and how each one relates to you: your parent and ancestors, the agents you delegated to, your siblings, the peers you started, and the agents the ledger shows you have exchanged reports with. Each row tells you whether that agent is resident right now — a resident one receives a report immediately, an absent one has the hand-off held for it. Use this to find the session id you need before addressing a report, instead of guessing or giving up because you do not know who is around.',
     parameters: {

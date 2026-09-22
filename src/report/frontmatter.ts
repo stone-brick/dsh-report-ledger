@@ -31,6 +31,7 @@ const ACTIONS: readonly HopAction[] = [
   'copied',
   'read',
   'acked',
+  'amended',
   'closed',
   'reopened',
 ]

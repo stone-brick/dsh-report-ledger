@@ -74,6 +74,32 @@ export interface MutationResult {
   readonly outcomes: readonly DeliveryOutcome[]
 }
 
+/**
+ * One correction applied to a report.
+ *
+ * Only the digest fields an owner may legitimately correct appear here. Recipients
+ * and co-authorship are absent on purpose: they are derived from the hop stream, so
+ * the single way to change them is to append another hop.
+ */
+export interface AmendInput {
+  /** Replacement subject. An empty value is refused rather than blanking the title. */
+  readonly subject?: string
+  /** Replacement collaboration label; an empty value clears it. */
+  readonly task?: string
+  /** Replacement artifact list (whole-list, not additive). */
+  readonly artifacts?: readonly string[]
+  /** New body text: appended as an amendment, or used to replace the body. */
+  readonly body?: string
+  /**
+   * Replace the body outright instead of appending an amendment. Requires
+   * `body`, and is recorded on the hop so a later reader knows the text was
+   * rewritten rather than only added to.
+   */
+  readonly replaceBody?: boolean
+  /** Extra note appended to the recorded change summary. */
+  readonly note?: string
+}
+
 /** One row of a digest listing. */
 export interface DigestRow {
   /** Report identifier. */
@@ -265,17 +291,17 @@ export class ReportService {
   }
 
   /**
-   * Decide whether one session may conclude a report.
+   * Decide whether one session owns a report.
    *
-   * Closing is the owner's act, not the reader's: an author may conclude the
-   * matter, a recipient may not. `from` is accepted alongside `authors` because a
+   * Owning is what lets an agent conclude the matter *or* correct what it says —
+   * a recipient may do neither. `from` is accepted alongside `authors` because a
    * hand-edited ledger could in principle carry the originator without the
    * matching hop, and refusing the obvious owner would strand the report.
    * @param front - the report digest.
-   * @param actor - the session attempting to close.
+   * @param actor - the session asserting ownership.
    * @returns true when the actor owns the report.
    */
-  static mayClose(front: ReportFrontMatter, actor: string): boolean {
+  static owns(front: ReportFrontMatter, actor: string): boolean {
     return actor === front.from || front.authors.includes(actor)
   }
 
@@ -527,7 +553,7 @@ export class ReportService {
   async close(report: string, actor: string, note?: string): Promise<MutationResult> {
     return this.#withLock(report, async () => {
       const current = await this.#require(report)
-      if (!ReportService.mayClose(current.front, actor)) {
+      if (!ReportService.owns(current.front, actor)) {
         const owners = [...new Set([current.front.from, ...current.front.authors])]
         throw new Error(
           `report-ledger: ${actor} may not close ${report} — closing is the owner's act, not a reader's. `
@@ -544,6 +570,118 @@ export class ReportService {
       const fresh = await this.#require(report)
       await writeReport({ front: { ...fresh.front, status: 'closed', updated: Date.now() }, body: fresh.body })
       return { front: (await this.#require(report)).front, outcomes: [] }
+    })
+  }
+
+  /**
+   * Correct a report: the digest fields and/or the body, as the owner's act.
+   *
+   * The tension this resolves is real. A ledger's value comes from history being
+   * append-only, so an agent that could silently rewrite the record would destroy
+   * the thing the ledger is for. But an agent that cannot correct a wrong subject
+   * has only bad options: author a new report and lose the transfer path, or leave
+   * the error standing. So corrections are **recorded, never silent**:
+   *
+   *  - digest fields (`subject`, `task`, `artifacts`) are current state and are
+   *    replaced, with the hop carrying the old and new values verbatim;
+   *  - the body is a record of what people *said*, so by default an amendment
+   *    **appends** a new section instead of rewriting anyone's words;
+   *  - replacing the body outright is possible but must be asked for explicitly
+   *    (`replaceBody`), and the hop records that it happened — a later reader is
+   *    told the text was rewritten and by whom, rather than being misled.
+   *
+   * Recipients and co-authorship can never be edited here: they are derived from
+   * the hop stream, so the only way to change them is to append another hop.
+   * @param report - report identifier.
+   * @param actor - the correcting session.
+   * @param patch - the fields to change.
+   * @returns the refreshed digest.
+   * @throws when the actor does not own the report, or the patch changes nothing.
+   */
+  async amend(report: string, actor: string, patch: AmendInput): Promise<MutationResult> {
+    return this.#withLock(report, async () => {
+      const current = await this.#require(report)
+      if (!ReportService.owns(current.front, actor)) {
+        const owners = [...new Set([current.front.from, ...current.front.authors])]
+        throw new Error(
+          `report-ledger: ${actor} may not amend ${report} — correcting a report is its owner's act. `
+          + `Ask one of its authors to amend it: ${owners.join(', ')}`,
+        )
+      }
+
+      const changes: string[] = []
+      const next: { subject?: string; task?: string; artifacts?: readonly string[] } = {}
+
+      if (patch.subject !== undefined) {
+        const subject = patch.subject.trim()
+        if (subject === '') throw new Error('report-ledger: an amendment cannot blank the subject')
+        if (subject !== current.front.subject) {
+          next.subject = subject
+          changes.push(`subject ${JSON.stringify(current.front.subject)} -> ${JSON.stringify(subject)}`)
+        }
+      }
+      if (patch.task !== undefined) {
+        const task = patch.task.trim()
+        const before = current.front.task
+        if (task !== (before ?? '')) {
+          next.task = task
+          changes.push(`task ${JSON.stringify(before ?? '')} -> ${JSON.stringify(task)}`)
+        }
+      }
+      if (patch.artifacts !== undefined) {
+        const before = current.front.artifacts
+        const after = patch.artifacts.map((entry) => entry.trim()).filter((entry) => entry !== '')
+        if (before.join('\n') !== after.join('\n')) {
+          next.artifacts = after
+          changes.push(`artifacts ${before.length} -> ${after.length}`)
+        }
+      }
+
+      const replacingBody = patch.replaceBody === true
+      if (patch.body !== undefined) {
+        if (patch.body.trim() === '') throw new Error('report-ledger: an amendment cannot send an empty body')
+        changes.push(replacingBody ? 'body replaced' : 'body amended (appended)')
+      } else if (replacingBody) {
+        throw new Error('report-ledger: replaceBody was set without a body')
+      }
+
+      if (changes.length === 0) {
+        throw new Error(`report-ledger: nothing to amend on ${report} — the provided values already match`)
+      }
+
+      await this.#reopenIfClosed(report, actor)
+
+      if (patch.body !== undefined) {
+        if (replacingBody) {
+          // A true rewrite, recorded as such on the hop.
+          await writeReport({ front: (await this.#require(report)).front, body: patch.body })
+        } else {
+          const name = await this.#host.describe(actor)
+          const header = `\n\n---\n\n### amendment by ${name ?? actor} at ${new Date().toISOString()}\n\n`
+          await appendFile(reportPath(report), `${header}${patch.body.trim()}\n`, 'utf8')
+        }
+      }
+
+      if (next.subject !== undefined || next.task !== undefined || next.artifacts !== undefined) {
+        const base = await this.#require(report)
+        // `task` is destructured out and re-added only when it survives, so an empty
+        // value clears the label instead of storing an empty string — that keeps
+        // `task === undefined` the single meaning of "no label".
+        const { task: previousTask, ...rest } = base.front
+        const task = next.task === undefined ? previousTask : (next.task === '' ? undefined : next.task)
+        const amended: ReportFrontMatter = {
+          ...rest,
+          ...(next.subject === undefined ? {} : { subject: next.subject }),
+          ...(next.artifacts === undefined ? {} : { artifacts: next.artifacts }),
+          updated: Date.now(),
+          ...(task === undefined ? {} : { task }),
+        }
+        await writeReport({ front: amended, body: base.body })
+      }
+
+      const summary = [...changes, ...(patch.note === undefined ? [] : [patch.note])].join('; ')
+      const front = await this.#record(report, { at: Date.now(), actor, action: 'amended', to: [], note: summary })
+      return { front, outcomes: [] }
     })
   }
 
