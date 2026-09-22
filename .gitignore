@@ -1,0 +1,21 @@
+# 依赖与工具产物
+
+# node_modules 里有一个指向官方包层的 junction：
+#   node_modules/@deepseek-ai -> C:\Users\stone\.dsh\profiles\node_modules\@deepseek-ai
+# 它让本包能在运行时解析 @deepseek-ai/*（Node 按 realpath 解析，插件的真实路径在工作区，
+# 所以必须在这里放一个代理目录）。里面是 226 个官方包 / 约 53 MB——
+# 绝不能被提交，也不要删掉这个 ignore 规则。
+node_modules/
+
+# pnpm 的本地 store（本机为绕开沙箱限制而落在工作区内，约 57 MB）
+.pnpm-store/
+
+# 构建输出：pnpm build 可重现（lib/index.js 是内联了 yaml 的 host 半，
+# lib/client.js 是浏览器闭包工厂产物）。不提交以免每次改代码都产生大体积 diff。
+lib/
+
+# 其它
+*.log
+*.tsbuildinfo
+.DS_Store
+Thumbs.db

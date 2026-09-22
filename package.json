@@ -1,0 +1,42 @@
+{
+  "name": "dsh-report-ledger",
+  "description": "Report-and-ledger plugin for DSH: front-matter 汇报 as the first-class agent-to-agent interaction primitive, with upward/downward delivery, co-authorship, CC, and a complete transfer-path audit trail; plus a conversation timeline tab.",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./src/*": "./src/*",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime"
+      ]
+    }
+  },
+  "scripts": {
+    "build": "tsdown",
+    "watch": "tsdown --watch",
+    "test": "node scripts/smoke.ts && node scripts/guidance-check.ts && node scripts/timeline-check.ts && node scripts/roster-check.ts && node scripts/client-filter-check.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.2",
+    "@types/react": "~18.3.1",
+    "tsdown": "0.22.2",
+    "typescript": "~5.7.2",
+    "yaml": "^2.9.1"
+  }
+}

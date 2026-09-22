@@ -1,0 +1,4 @@
+# 行尾统一为 LF，且不依赖各机器的 core.autocrlf 设置。
+# 本仓库的 front matter 解析器要处理 \r（手改账本时可能出现），但源码与文档本身
+# 保持单一 LF，避免 Windows 上混用行尾造成无意义 diff。
+* text=auto eol=lf

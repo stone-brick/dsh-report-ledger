@@ -1,0 +1,11 @@
+# Bundle patch for dsh-report-ledger: inserts its plugin row into whichever
+# profile roster composes this package (the `dsh.bundle.patch` manifest field).
+#
+# The host half is a single row. The client half needs no row of its own: the
+# loader scans enabled rows for the package's `dsh.client` manifest and serves
+# the built `lib/client.js` over /plugins/<entryId>/client.js.
+- insert:
+    - id: report-ledger
+      name: 'dsh-report-ledger'
+      config:
+        announceToAgent: true

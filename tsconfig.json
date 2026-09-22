@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "ES2024",
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "jsx": "react-jsx",
+    "types": ["node"],
+    "paths": {
+      "@deepseek-ai/*": ["C:/Users/stone/.dsh/profiles/node_modules/@deepseek-ai/*"]
+    }
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx", "tsdown.config.ts"]
+}
