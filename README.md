@@ -222,15 +222,20 @@ pnpm typecheck    # 对部署中的 harness 类型做全量类型检查
         announceToAgent: true
 ```
 
-**开发回路与限制：**
+**开发回路：**
 
-- profile 的 `cordis.patch.yml` 支持 `patchReload: live`，但那只重载**配置**，不重载模块；且 `dsh-base` 里的 `hmr` 行默认 `disabled: true`。**改动宿主代码必须重启进程才能生效。**
-- 因此集成验证走独立的 headless profile（`~/.dsh/profiles/reports-dev/`），它一次性跑任务、可随时重启、不干扰正在服务的 GUI：
+- **宿主半：保存即生效。** web profile 的 `cordis.patch.yml` 里把 `dsh-base` 默认禁用的 `hmr` 行打开，并把 `root` 扩到本仓库的 `lib/`（因为插件经 junction 挂载、真实路径在 profile 之外）。配合 `pnpm watch`，回路是：**保存 → tsdown 重建（约 0.2s）→ HMR 就地重载该插件条目**。进程不重启、端口不断、正在进行的会话不中断。
+  - 已实测确认：改 `lib/index.js` 后新代码即刻生效，**且宿主进程 PID 不变**。本插件被判定为"直接变更"走局部重载，不会触发 `loader.exit()`（那是 **CLI 入口静态依赖树**里文件改动才会走的路径；插件由 Loader 动态 `import()` 加载，不属于那棵树）。
+  - 重载是安全的：插件的持久状态全在磁盘账本上，内存里只有一个互斥锁表，重载不丢数据。
+  - ⚠️ **启用 `hmr` 需要一次重启才生效。** 通过 `patchReload: live` 在运行中启用只会"启用行"而**不应用 `config`**——实测服务自己报 `root: []`（空监视）与 schema 默认 `debounce: 100`。组合树本身是对的（`dsh --profile web --dump-config` 可见完整 config），只是生效时机问题。
+- **客户端半：重建 + 页面刷新。** HMR 不覆盖 `lib/client.js`（由 `dsh-client-modules` 提供）。"无需刷新自动重载"未验证——不确定 `dsh-client-hmr` 的监视根是否覆盖 profile 之外的包。
+- **`pnpm watch` 的生命周期**：它是个前台常驻进程。由代理会话启动的那种只在该会话存活期间有效；要长期常驻请在自己的终端里跑。
+- 离线/批量集成验证仍可走独立的 headless profile（`~/.dsh/profiles/reports-dev/`），它一次性跑任务、不干扰正在服务的 GUI：
   ```sh
   $env:DSH_REPORT_LEDGER_ROOT = "$env:TEMP\report-ledger-it"
   dsh --profile reports-dev "<task>"
   ```
-  该 profile 的补丁里同时把 `hmr` 打开并把 `root` 扩到 `lib/`，于是之后无需重启即可热重载。
+  该 profile 的补丁里同样把 `hmr` 打开并把 `root` 扩到 `lib/`。
 - **验证浏览器侧能力时，在隔离的 DSH_HOME 里另起一个 web profile**，不要动正在服务的那个：DSH 明确声明两个 harness 进程不协调共享同一持久化 store，共用会威胁正在运行的实例。
   ```sh
   # 只把包解析层 junction 进去，会话/账本留在临时 home 里
