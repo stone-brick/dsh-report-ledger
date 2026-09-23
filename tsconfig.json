@@ -17,5 +17,5 @@
       "@deepseek-ai/*": ["C:/Users/stone/.dsh/profiles/node_modules/@deepseek-ai/*"]
     }
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "tsdown.config.ts"]
+  "include": ["src/**/*.ts", "src/**/*.tsx", "scripts/**/*.ts", "tsdown.config.ts"]
 }

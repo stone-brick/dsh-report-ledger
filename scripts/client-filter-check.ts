@@ -1,3 +1,8 @@
+// A module, not a global script: without an import/export this file shares the
+// global scope with its siblings, so top-level names like `checks` collide
+// across scripts and `filter` silently resolves to the DOM's window.filter.
+// Emitted as nothing; it exists so `tsc` treats the file as its own module.
+export {}
 /**
  * Deterministic checks for the timeline's data model.
  *
@@ -58,7 +63,7 @@ const payload = {
       fromName: 'the auditor',
     }),
   ],
-} as never
+} as unknown as Parameters<typeof buildRows>[0]
 
 // ---------------------------------------------------------------------------
 // Row assembly
@@ -125,7 +130,7 @@ check('a contradictory combination yields no reports', contradictory.filter((r) 
 check('filtering preserves order', filterRows(rows, { status: 'all', text: 'session' })
   .every((row, index, all) => index === 0 || all[index - 1].at <= row.at))
 
-const counts = statusCounts(payload.reports as never)
+const counts = statusCounts(payload.reports)
 check('counts total every report', counts.all === 4, String(counts.all))
 check('counts split by state', counts.open === 2 && counts.acked === 1 && counts.closed === 1, JSON.stringify(counts))
 

@@ -1,3 +1,8 @@
+// A module, not a global script: without an import/export this file shares the
+// global scope with its siblings, so top-level names like `checks` collide
+// across scripts and `filter` silently resolves to the DOM's window.filter.
+// Emitted as nothing; it exists so `tsc` treats the file as its own module.
+export {}
 /**
  * Deterministic checks for the timeline assembly and the read-only HTTP surface.
  *
