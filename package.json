@@ -1,8 +1,7 @@
 {
   "name": "dsh-report-ledger",
-  "description": "Report-and-ledger plugin for DSH: front-matter 汇报 as the first-class agent-to-agent interaction primitive, with upward/downward delivery, co-authorship, CC, and a complete transfer-path audit trail; plus a conversation timeline tab.",
   "version": "0.1.0",
-  "private": true,
+  "description": "Report-and-ledger plugin for DSH: front-matter 汇报 as the first-class agent-to-agent interaction primitive, with upward/downward delivery, co-authorship, CC, and a complete transfer-path audit trail; plus a conversation timeline tab.",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -14,6 +13,27 @@
     },
     "./src/*": "./src/*",
     "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "THIRD-PARTY-NOTICES.md"
+  ],
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis",
+    "agent",
+    "multi-agent",
+    "subagent",
+    "report",
+    "ledger",
+    "collaboration"
+  ],
+  "publishConfig": {
+    "access": "public"
   },
   "dsh": {
     "bundle": {
@@ -27,7 +47,10 @@
     "build": "tsdown",
     "watch": "tsdown --watch",
     "test": "node scripts/smoke.ts && node scripts/guidance-check.ts && node scripts/timeline-check.ts && node scripts/roster-check.ts && node scripts/client-filter-check.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "check": "pnpm run typecheck && pnpm run test",
+    "prepare": "pnpm run build",
+    "prepublishOnly": "pnpm run check && pnpm run build"
   },
   "devDependencies": {
     "@types/node": "^26.6.2",

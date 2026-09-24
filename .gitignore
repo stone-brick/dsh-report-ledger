@@ -19,3 +19,6 @@ lib/
 *.tsbuildinfo
 .DS_Store
 Thumbs.db
+
+# npm / pnpm 打包产物（pnpm pack 按 files 字段生成，可重现）
+*.tgz

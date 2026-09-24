@@ -2,6 +2,63 @@
 
 一个 DSH 插件：把「**汇报**」做成代理之间的一等交互原语，并为长期协作留下可追溯的账本。
 
+## 安装
+
+```sh
+dsh plugin --profile web add dsh-report-ledger
+```
+
+这条命令把包装进该 profile 的 `node_modules`；因为包声明了 `dsh.bundle.patch`，
+`dsh plugin` 会**自动**把 `dsh-report-ledger` 追加进 profile 的 `dsh.profile.bundles`，
+不需要手改任何配置文件。装完**重启 profile**（`dsh web`）即可生效。
+
+不启动也能验证装上了：
+
+```sh
+dsh --profile web --dump-config     # 配置树里应出现 report-ledger 这一行
+```
+
+卸载走同一条通道，依赖与该配置层会一起移除：
+
+```sh
+dsh plugin --profile web remove dsh-report-ledger
+```
+
+### 装完你会得到什么
+
+- **宿主半**（任何 profile）：十个 `report_*` 工具 + `peer_list` / `peer_start`、
+  两段 `systemPrompt` 段，以及 web profile 下的两个只读 HTTP 端点；
+- **浏览器半**（仅 web profile）：会话头部多一个「汇报」标签页 —— 时间线、状态芯片、
+  搜索、线程跳转与就地展开的传递路径。
+
+### 兼容性、权限与数据
+
+- **DSH 0.1.5-rc.3 实测可用**（构建产物与该版本的平台模块表对齐）。宿主半的运行时
+  外部依赖只有一个：`@deepseek-ai/dsh-tools`，由 profile 提供；浏览器半只 require
+  `react` 与 `react/jsx-runtime`，其余全部内联。宿主半在 headless profile 里同样可用
+  （没有 web server 时只是少了那两个端点）。
+- **账本是本机文件**：`$DSH_HOME/report-ledger/`（可用 `DSH_REPORT_LEDGER_ROOT`
+  覆盖），不上传任何地方。
+- **浏览器读数据走两个 GET 路由**，注册在 DSH 的 web server 上，守卫仅放行 loopback
+  对端与 loopback `Host`；细节与信任假设见下文「守卫与信任假设」。
+- **同伴工具会新建根会话**（在你自己的工作目录下），这是本插件唯一会新增活代理的能力，
+  每次创建都记进名册日志，并受 `maxPeersPerAgent`（默认 8）约束。
+
+### English quick start
+
+```sh
+dsh plugin --profile web add dsh-report-ledger   # install + register the bundle layer
+dsh --profile web --dump-config                  # verify: a `report-ledger` row appears
+dsh web                                          # restart the profile to load it
+```
+
+Tested against DSH 0.1.5-rc.3. The ledger is plain files under
+`$DSH_HOME/report-ledger/` and nothing leaves the machine. The host half works in
+any profile; the web profile additionally gets a **Reports** tab in the GUI.
+
+> 下面是**用户安装**。本仓库自身的开发装法（junction + `hmr` 热重载）见末尾
+> 「开发与验证」。
+
 ## 为什么需要它
 
 DSH 原本的代理间通信是**相邻 Agent 的 steer 投递**（`ctx.subagents.sendMessage`），它明确承认这些缺口：
@@ -273,6 +330,36 @@ pnpm typecheck    # 对部署中的 harness 类型做全量类型检查
   启动会打印一个带 `?token=` 的 URL —— **web profile 用 URL token 鉴权**，带上它就能让自动化浏览器登录这个隔离实例，从而验证真实渲染。用完**先删 junction 再递归删除**临时 home，否则删除会顺着 junction 冲进真实 profile 层。
   另外：**已注册的 exact 路由先于 `/api` 鉴权栅栏匹配**，所以自查端点时可以不带 token 直接 curl。
 - 补丁语法：插新行用 `- insert:`；**按 id 修改已有行必须写成顶层 `- id:`**，把已有行放进 `insert` 会新建一条同 id 的行并报 `duplicate loader entry id`。
+
+### 发布（维护者）
+
+分发形态是**预构建的 bundle**：`lib/` 在发布前构建好，用户安装时不跑任何构建脚本，因此不需要 `allowBuilds` 授权。
+
+```sh
+pnpm check          # 类型检查 + 五套确定性检查
+pnpm pack           # 先出 tarball 核对产物（prepare 会顺带构建）
+npm publish         # ⚠ 本机 registry 若是镜像站，必须显式 --registry=https://registry.npmjs.org
+```
+
+`pnpm pack` 的产物清单**缺一项的表现都是「装上了不生效」而不是报错**，逐条核对：
+
+| 检查项 | 本包取值 |
+|---|---|
+| `main` / `exports` 指向构建产物而非 `src/` | `lib/index.js` / `lib/client.js` |
+| `files` 含入口**与 `cordis.patch.yml`** | `["lib", "cordis.patch.yml", "THIRD-PARTY-NOTICES.md"]` |
+| `dsh.bundle.patch` 指向该 patch | `./cordis.patch.yml` |
+| `version` 已递增 | npm 不允许覆盖已发布版本 |
+
+发布后**在干净环境里验证**（本仓库已按此验证过 0.1.0 的 tarball）：
+
+```sh
+dsh plugin --profile demo add dsh-report-ledger   # 空 DSH_HOME 里
+dsh --profile demo --dump-config                  # 应出现 `# == dsh-report-ledger` 这一层
+```
+
+`dsh plugin add` 会因包声明了 `dsh.bundle` 而**自动**把包名追加进 `dsh.profile.bundles`，用户不需要手改配置。
+另外注意 **git 安装与 npm 安装不是一回事**：`add github:<你>/dsh-report-ledger#<sha>` 拉到的是源码，
+要靠仓库里的 `prepare` 构建，且 pnpm ≥10 需要用户放行 `allowBuilds`——所以**对外推荐 npm 安装**。
 
 ## 已知限制
 
