@@ -1,0 +1,46 @@
+name: mirror to gitee
+
+# 每次推送到 GitHub 后，把 main 与 tags 镜像到 Gitee（国内可直达）。
+#
+# 为什么不用 Gitee 自带的「仓库镜像管理」：该功能在账号上不可用
+# （GET /repos/{owner}/{repo}/mirror 返回 404 Not Found Project），
+# 所以同步方向反过来由 GitHub 主动推。
+#
+# 需要仓库 Secret：GITEE_TOKEN
+#   —— Gitee 私人令牌，权限只需 projects（仓库读写），有效期尽量短，
+#      过期后重新生成并更新这个 Secret 即可。
+#
+# 令牌只经凭据助手按需提供给 git，不写进 remote URL，
+# 因此它既不会出现在 runner 的 git 输出里，也不会落到 .git/config。
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 全量历史，否则 --all / --tags 推不出完整对象图。
+          fetch-depth: 0
+
+      - name: Push main and tags to Gitee
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GITEE_TOKEN:-}" ]; then
+            echo "::error::GITEE_TOKEN secret is not set for this repository"
+            exit 1
+          fi
+          git remote add gitee https://gitee.com/stone_zhan/dsh-report-ledger.git
+          helper='!f() { echo username=stone_zhan; echo password=$GITEE_TOKEN; }; f'
+          git -c credential.helper="$helper" push gitee --all
+          git -c credential.helper="$helper" push gitee --tags
+          echo "mirrored $(git rev-parse --short HEAD) to Gitee"
