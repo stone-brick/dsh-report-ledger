@@ -9,7 +9,7 @@
  *    never from this repo's install.
  *
  *  - `lib/client.js` — the BROWSER half. The dsh client-modules service serves
- *    it from /plugins/report-ledger/client.js and evaluates it as a
+ *    it from /plugins/dsh-report-ledger/client.js and evaluates it as a
  *    closure-factory artifact: the banner opens `window.__ModuleLoader__.load`
  *    and the injected `require` answers every platform-module specifier from the
  *    shell's frozen module table. That is why the format is `cjs`, why the
@@ -27,7 +27,23 @@ const ID = 'dsh-report-ledger'
 
 /**
  * The module specifiers the web shell shares into its frozen module table.
- * Mirrors `@deepseek-ai/dsh-client-web/src/platform`; these MUST stay external.
+ *
+ * This is the `staticModules` seed the shell hands to `__ModuleLoader__.create()`,
+ * which the browser module system answers before any registered factory
+ * (`seed → memoized record → factory`). It is read from the deployed shell —
+ * `@deepseek-ai/dsh-web-frontend`'s `dist` bundle, function `by()` — not from a
+ * published package, so it can only be verified against a running install.
+ *
+ * The list below matches DSH 0.1.5-rc.3. The 0.1.5-rc.3 update moved three
+ * entries: `@deepseek-ai/dsh-client-web-react`,
+ * `@deepseek-ai/dsh-client-schema-form` and the subpath
+ * `@deepseek-ai/dsh-client-runtime/client` are gone, replaced by
+ * `@deepseek-ai/dsh-client-store` (the inlined snapshot-store engine) and
+ * `@deepseek-ai/dsh-client-ui-dockkit`.
+ *
+ * These MUST stay external: an inlined copy would carry the wrong identity, and
+ * the shell's `require` throws outright on a specifier neither seeded nor
+ * registered.
  */
 const PLATFORM_MODULES = [
   'react',
@@ -35,21 +51,14 @@ const PLATFORM_MODULES = [
   'react-dom',
   'react-dom/client',
   '@deepseek-ai/cordis',
+  '@deepseek-ai/dsh-client-store',
   '@deepseek-ai/dsh-client-ui-slots',
-  '@deepseek-ai/dsh-client-web-react',
   '@deepseek-ai/dsh-client-ui-primitives',
-  '@deepseek-ai/dsh-client-schema-form',
+  '@deepseek-ai/dsh-client-ui-dockkit',
 ] as const
 
-/**
- * Documented temporary exemption of the family preset: the snapshot-store engine
- * lives in the client runtime pending rehoming, and the lazy CJS table answers
- * this require natively.
- */
-const RUNTIME_STORE_EXEMPTION = '@deepseek-ai/dsh-client-runtime/client'
-
 /** Externals resolved from the loader module table. */
-const CLIENT_EXTERNALS: readonly string[] = [...PLATFORM_MODULES, RUNTIME_STORE_EXEMPTION]
+const CLIENT_EXTERNALS: readonly string[] = [...PLATFORM_MODULES]
 
 /**
  * Wire/type layers a client bundle may inline: browser-safe contract surfaces
