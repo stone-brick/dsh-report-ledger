@@ -24,6 +24,24 @@ dsh --profile web --dump-config     # 配置树里应出现 report-ledger 这一
 dsh plugin --profile web remove dsh-report-ledger
 ```
 
+### 国内镜像（Gitee）
+
+源码与发行版同步在 [gitee.com/stone_zhan/dsh-report-ledger](https://gitee.com/stone_zhan/dsh-report-ledger)，
+**不经过 GitHub** 也能装：
+
+```sh
+# 1) 下载发行版附件（预构建产物，不需要构建工具链）
+#    https://gitee.com/stone_zhan/dsh-report-ledger/releases/download/v0.1.0/dsh-report-ledger-0.1.0.tgz
+dsh plugin --profile web add ./dsh-report-ledger-0.1.0.tgz
+
+# 2) 或直接从 Gitee 安装（安装时自动构建，约 15 秒）
+dsh plugin --profile web add git+https://gitee.com/stone_zhan/dsh-report-ledger.git
+```
+
+GitHub 每次推送后由 `.github/workflows/mirror-to-gitee.yml` 自动镜像 `main` 与 tags。
+注意：**npm 安装走的是 npm 镜像站而不是 GitHub**，所以 `npm publish` 之后上面这条一行命令
+才是国内用户最省事的路；Gitee 镜像解决的是「拿不到 GitHub」时的源码与产物可达性。
+
 ### 装完你会得到什么
 
 - **宿主半**（任何 profile）：十个 `report_*` 工具 + `peer_list` / `peer_start`、
@@ -358,8 +376,29 @@ dsh --profile demo --dump-config                  # 应出现 `# == dsh-report-l
 ```
 
 `dsh plugin add` 会因包声明了 `dsh.bundle` 而**自动**把包名追加进 `dsh.profile.bundles`，用户不需要手改配置。
-另外注意 **git 安装与 npm 安装不是一回事**：`add github:<你>/dsh-report-ledger#<sha>` 拉到的是源码，
-要靠仓库里的 `prepare` 构建，且 pnpm ≥10 需要用户放行 `allowBuilds`——所以**对外推荐 npm 安装**。
+
+**git 安装与 npm 安装不是一回事**：`add github:<你>/dsh-report-ledger#<sha>`（或 Gitee 地址）拉到的是**源码**，
+靠仓库里的 `prepare` 构建出 `lib/` 才能跑——本仓库实测在 pnpm 10.14 上直接通过、未要求 `allowBuilds`，
+但部分 pnpm 版本会拦截依赖的构建脚本，届时 `dsh` 会打印出要写进 profile 的 `pnpm-workspace.yaml` 的包键。
+**对外仍推荐 npm 安装**：预构建产物、不触发任何构建脚本、不需要授权。
+
+#### Gitee 镜像
+
+Gitee 自带的「仓库镜像管理」在本账号不可用（`GET /api/v5/repos/{owner}/{repo}/mirror` 返回
+`404 Not Found Project`），所以同步方向反过来：GitHub 主动推。
+
+- 工作流 `.github/workflows/mirror-to-gitee.yml`，在 `main` 与 `v*` tag 的 push 后镜像 `main` + tags；
+- 凭据是 GitHub 仓库 Secret `GITEE_TOKEN`（Gitee 私人令牌，只需 `projects` 权限）。
+  **令牌有有效期，过期后要重新生成并 `gh secret set GITEE_TOKEN`**，否则工作流会认证失败；
+- 令牌只经 `credential.helper` 按需交给 git，不写进 remote URL，所以不会落进 `.git/config` 或命令输出。
+
+发行版附件**不在自动同步范围内**，需要单独上传；注意附件接口要求令牌放在 **query** 上，
+放 form 里会得到 `401 登录失效`（实测）：
+
+```sh
+curl -X POST "https://gitee.com/api/v5/repos/stone_zhan/dsh-report-ledger/releases/<release_id>/attach_files?access_token=<token>" \
+     -F "file=@dsh-report-ledger-0.1.0.tgz"
+```
 
 ## 已知限制
 
