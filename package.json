@@ -20,6 +20,14 @@
     "THIRD-PARTY-NOTICES.md"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stone-brick/dsh-report-ledger.git"
+  },
+  "homepage": "https://github.com/stone-brick/dsh-report-ledger#readme",
+  "bugs": {
+    "url": "https://github.com/stone-brick/dsh-report-ledger/issues"
+  },
   "keywords": [
     "dsh",
     "dsh-plugin",
