@@ -24,7 +24,7 @@ permissions:
 jobs:
   mirror:
     runs-on: ubuntu-latest
-    # 卡住的任务比失败的任务糟：给整job 一个硬上限，超时就红，不要悬着。
+    # 卡住的任务比失败的任务糟：给整个 job 一个硬上限，超时就红，不要悬着。
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
@@ -32,11 +32,18 @@ jobs:
           # 全量历史，否则 --all / --tags 推不出完整对象图。
           fetch-depth: 0
 
+      # 先探连通性：这样一旦失败，日志能直接区分「网络不通」与「认证被拒」，
+      # 不必再从 git 的沉默里猜。（首次实测踩到过 push 静默挂起 5 分钟以上。）
+      - name: Probe Gitee reachability
+        run: |
+          curl -sS -o /dev/null -w 'gitee.com HTTP %{http_code} in %{time_total}s\n' \
+            --max-time 20 --retry 2 \
+            https://gitee.com/stone_zhan/dsh-report-ledger
+
       - name: Push main and tags to Gitee
         env:
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
           # CI 里没有 TTY：万一需要交互式输入凭据，立刻失败而不是无限等待。
-          # （首次实测踩到过：push 步骤静默挂起 5 分钟以上，就是这个原因。）
           GIT_TERMINAL_PROMPT: '0'
         run: |
           set -euo pipefail
@@ -44,10 +51,19 @@ jobs:
             echo "::error::GITEE_TOKEN secret is not set for this repository"
             exit 1
           fi
+
           git remote add gitee https://gitee.com/stone_zhan/dsh-report-ledger.git
-          helper='!f() { echo username=stone_zhan; echo password=$GITEE_TOKEN; }; f'
-          # http.lowSpeedLimit/Time 让「连着但不传数据」的连接超时中止，而不是挂到 job 上限。
-          push='git -c credential.helper='"$helper"' -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 push'
-          $push gitee --all
-          $push gitee --tags
+
+          # 用函数而不是把整条命令塞进变量：helper 里含空格与分号，
+          # 变量展开会被 word-split 拆坏（踩过：git: '{' is not a git command）。
+          gp() {
+            git \
+              -c credential.helper='!f() { echo username=stone_zhan; echo password=$GITEE_TOKEN; }; f' \
+              -c http.lowSpeedLimit=1000 \
+              -c http.lowSpeedTime=60 \
+              push "$@"
+          }
+
+          gp gitee --all
+          gp gitee --tags
           echo "mirrored $(git rev-parse --short HEAD) to Gitee"
