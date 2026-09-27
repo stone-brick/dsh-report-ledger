@@ -17,18 +17,28 @@
  * @module dsh-report-ledger/client/TopologyView
  */
 
-import { useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import type { ReactElement } from 'react'
 import { Pill, StateDot, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ReportFrontMatter } from '../shared/wire.ts'
-import type { TopologyEdge, TopologyLayout, TopologyNode } from './topology-model.ts'
-import { STATUS_DOT } from './locales.ts'
-import { DIM_CLASS } from './styles.ts'
+import type { TopologyEdge, TopologyEdgeKind, TopologyLayout, TopologyNode } from './topology-model.ts'
+import { STATUS_DOT, EDGE_LABEL } from './locales.ts'
+import { DIM_CLASS, arrowClass, edgeClass } from './styles.ts'
 import type { Translate } from './ReportsView.tsx'
 
 /** How much of an edge to hide behind its endpoints, so lines stop at the chips. */
-const SOURCE_INSET = 40
-const TARGET_INSET = 12
+/**
+ * Clearance around a node chip.
+ *
+ * The model's coordinates are the centres of the things being connected; these
+ * are what the drawing subtracts so a line starts past its source chip and stops
+ * at its target's edge instead of disappearing underneath either.
+ */
+const CHIP_HALF_X = 36
+const CHIP_HALF_Y = 12
+
+/** Corner radius of an orthogonal run, so a handoff does not look like plumbing. */
+const CORNER = 6
 
 /** Props for one topology drawing. */
 export interface TopologyViewProps {
@@ -57,65 +67,154 @@ function stamp(at: number | undefined): string {
   return new Date(at).toLocaleString()
 }
 
-/** Where one edge is drawn, and which way its arrowhead points. */
+/** Where one edge is drawn, and where its word goes. */
 interface EdgeGeometry {
   readonly path: string
-  readonly arrow: string
+  /** Anchor for the hover label, at the middle of the longest segment. */
+  readonly labelX: number
+  readonly labelY: number
+}
+
+/** The kinds in the order the legend and the merged paths list them. */
+const EDGE_KINDS: readonly TopologyEdgeKind[] = ['to', 'cc', 'author', 'thread']
+
+/** Marker id for one edge kind, so the path and its arrowhead cannot disagree. */
+function markerId(kind: TopologyEdgeKind): string {
+  return `report-ledger-arrow-${kind}`
+}
+
+/** Muted caption text, at module scope so it does not invalidate memos. */
+const caption: Record<string, string | number> = {
+  color: 'var(--dsw-alias-label-caption, #999)',
+  fontSize: 'var(--dsw-font-xxxs-11, 11)',
+  whiteSpace: 'nowrap',
+}
+
+/** Keeps a chip's status dot on its text baseline. */
+const dotCell: Record<string, string | number> = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  marginRight: '4px',
+}
+
+/**
+ * An orthogonal run with rounded corners.
+ *
+ * Thread connectors are routed as axis-aligned segments, so they need corners
+ * that do not look like a mistake. Each interior corner is cut with a quadratic
+ * whose radius shrinks to fit the shorter of its two segments — a corner cannot
+ * be rounded further than the segment it sits on.
+ * @param points - the polyline, in order.
+ * @param radius - the preferred corner radius.
+ * @returns the SVG path.
+ */
+function orthogonal(points: readonly { x: number; y: number }[], radius: number): string {
+  const [first, ...rest] = points
+  if (first === undefined) return ''
+  let path = `M ${first.x} ${first.y}`
+  for (let index = 0; index < rest.length; index++) {
+    const point = rest[index]
+    if (point === undefined) continue
+    if (index === rest.length - 1) {
+      path += ` L ${point.x} ${point.y}`
+      continue
+    }
+    const before = points[index] as { x: number; y: number }
+    const after = rest[index + 1] as { x: number; y: number }
+    const inLength = Math.hypot(point.x - before.x, point.y - before.y)
+    const outLength = Math.hypot(after.x - point.x, after.y - point.y)
+    const r = Math.min(radius, inLength / 2, outLength / 2)
+    const fromX = point.x + (before.x - point.x) / (inLength || 1) * r
+    const fromY = point.y + (before.y - point.y) / (inLength || 1) * r
+    const toX = point.x + (after.x - point.x) / (outLength || 1) * r
+    const toY = point.y + (after.y - point.y) / (outLength || 1) * r
+    path += ` L ${fromX} ${fromY} Q ${point.x} ${point.y} ${toX} ${toY}`
+  }
+  return path
 }
 
 /**
  * Turn an edge's canonical endpoints into a drawable path.
  *
- * The model's coordinates are the *centres* of the things being connected, and
- * this is where the drawing gives them room: an edge starts past the source chip
- * and stops short of the target, so a line never disappears under a node. That
- * is presentation, so it lives here rather than in the tested geometry.
+ * Two shapes, because the two relations are not the same kind of thing:
+ *
+ *  - a **delivery** stays on its own row — the digest has no per-hop times (those
+ *    live in the route sidecar), so the arrow reads "this report was handed to
+ *    that column" at the report's own time;
+ *  - a **thread** spans rows, so it is routed down a lane boundary and only then
+ *    turned into the child. Drawing it as a direct curve made it cross whatever
+ *    sat between parent and child; the boundary is half a column from any node,
+ *    so the connector keeps off the nodes entirely.
  * @param edge - one edge.
- * @returns the path and the arrowhead polygon.
+ * @returns the path and a label anchor.
  */
 function edgeGeometry(edge: TopologyEdge): EdgeGeometry {
-  const dx = edge.toX - edge.fromX
-  const dy = edge.toY - edge.fromY
-  const length = Math.hypot(dx, dy) || 1
-  const ux = dx / length
-  const uy = dy / length
-
-  // A thread connector always arrives from above, because the parent is drawn on
-  // an earlier row; drawing it as a chord would tilt the arrowhead sideways into
-  // the node.
-  if (edge.kind === 'thread') {
-    const tipX = edge.toX
-    const tipY = edge.toY - TARGET_INSET
-    const startY = edge.fromY + TARGET_INSET
-    const midY = (startY + tipY) / 2
+  if (edge.kind === 'thread' && edge.viaX !== undefined) {
+    const viaX = edge.viaX
+    // Leave the parent downward, turn into the boundary, run down it, then turn
+    // into the child's side.
+    const startX = edge.fromX + (viaX > edge.fromX ? CHIP_HALF_X : -CHIP_HALF_X)
+    const startY = edge.fromY + CHIP_HALF_Y
+    const side = viaX > edge.toX ? 1 : -1
+    const endX = edge.toX + side * CHIP_HALF_X
+    const endY = edge.toY
     return {
-      path: `M ${edge.fromX} ${startY} C ${edge.fromX} ${midY} ${tipX} ${midY} ${tipX} ${tipY}`,
-      arrow: arrowHead(tipX, tipY, 0, 1),
+      path: orthogonal([
+        { x: startX, y: startY },
+        { x: viaX, y: startY },
+        { x: viaX, y: endY },
+        { x: endX, y: endY },
+      ], CORNER),
+      labelX: viaX,
+      labelY: (startY + endY) / 2,
     }
   }
 
-  // A delivery stays on its own row: the digest has no per-hop times (those live
-  // in the route sidecar), so the arrow reads "this report was handed to that
-  // column", and its row is the report's own time.
-  const startX = edge.fromX + ux * SOURCE_INSET
-  const tipX = edge.toX - ux * TARGET_INSET
+  const dx = edge.toX - edge.fromX
+  const startX = edge.fromX + Math.sign(dx) * CHIP_HALF_X
+  const tipX = edge.toX - Math.sign(dx) * CHIP_HALF_X
   return {
     path: `M ${startX} ${edge.fromY} L ${tipX} ${edge.toY}`,
-    arrow: arrowHead(tipX, edge.toY, ux, uy),
+    labelX: (startX + tipX) / 2,
+    labelY: edge.toY - 9,
   }
 }
 
-/** A small triangle pointing along `(ux, uy)`, with its tip at `(x, y)`. */
-function arrowHead(x: number, y: number, ux: number, uy: number, size = 4): string {
-  const px = -uy
-  const py = ux
-  const back = size
-  const wide = size * 0.8
-  return [
-    `${x},${y}`,
-    `${x - ux * back + px * wide},${y - uy * back + py * wide}`,
-    `${x - ux * back - px * wide},${y - uy * back - py * wide}`,
-  ].join(' ')
+/**
+ * The key to the drawing's line styles.
+ *
+ * Built from the same classes the drawing uses, so a change to how 抄送 looks
+ * cannot leave the legend claiming something else. Without it a reader has to
+ * guess what four line styles mean, and guessing is exactly what an audit view
+ * should not ask for.
+ * @param props - the locale seat.
+ * @returns the legend strip.
+ */
+export function TopologyLegend(props: { readonly t: Translate }): ReactElement {
+  const { t } = props
+  const kinds = EDGE_KINDS
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+      {kinds.map((kind) => (
+        <span
+          key={kind}
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '4px',
+            fontSize: 'var(--dsw-font-xxxs-11, 11px)',
+            color: 'var(--dsw-alias-label-caption, #999)',
+          }}
+        >
+          <svg width="22" height="8" aria-hidden="true">
+            {/* A thread is drawn orthogonally, so its sample bends too. */}
+            <path className={edgeClass(kind)} d={kind === 'thread' ? 'M 1 1 L 9 1 L 9 7 L 21 7' : 'M 1 4 L 21 4'} />
+          </svg>
+          {t(EDGE_LABEL[kind])}
+        </span>
+      ))}
+    </span>
+  )
 }
 
 /**
@@ -126,31 +225,77 @@ function arrowHead(x: number, y: number, ux: number, uy: number, size = 4): stri
 export function TopologyView(props: TopologyViewProps): ReactElement {
   const { layout, reports, t, idHint, openReport, onOpen } = props
   const [hot, setHot] = useState<string | undefined>(undefined)
-  const fronts = new Map(reports.map((front) => [front.report, front]))
-  /** Everything that is not the hovered report's path fades back. */
-  const dim = (report: string): string | undefined => (hot === undefined || hot === report ? undefined : DIM_CLASS)
-  const caption: Record<string, string | number> = {
-    color: 'var(--dsw-alias-label-caption, #999)',
-    fontSize: 'var(--dsw-font-xxxs-11, 11)',
-    whiteSpace: 'nowrap',
-  }
-  const dotCell: Record<string, string | number> = {
-    display: 'inline-flex',
-    alignItems: 'center',
-    marginRight: '4px',
-  }
+  const fronts = useMemo(() => new Map(reports.map((front) => [front.report, front])), [reports])
+  /**
+   * All edges of one kind concatenated into a single path.
+   *
+   * They share a style and none of them is clickable, so a path per edge bought
+   * nothing and cost a DOM element plus a repaint each — at 300 reports that was
+   * ~840 paths and ~840 arrowheads.
+   */
+  const mergedEdges = useMemo(
+    () => EDGE_KINDS.map((kind) => ({
+      kind,
+      d: layout.edges.filter((edge) => edge.kind === kind).map((edge) => edgeGeometry(edge).path).join(' '),
+    })),
+    [layout],
+  )
 
   /** Hover label for one node: what it is, who sent it, where it went. */
-  const nodeHint = (node: TopologyNode, front: ReportFrontMatter | undefined): string => {
+  const nodeHint = useCallback((node: TopologyNode, front: ReportFrontMatter | undefined): string => {
     if (front === undefined) return node.report
     const parts = [front.subject, `from ${idHint(front.from)}`]
     if (front.to.length > 0) parts.push(`to ${front.to.map(idHint).join(', ')}`)
     if (front.cc.length > 0) parts.push(`cc ${front.cc.map(idHint).join(', ')}`)
     parts.push(t('topology.openHint'))
     return parts.join(' · ')
-  }
+  }, [t, idHint])
 
-  const lane = (index: number): number => layout.lanes[index]?.x ?? 0
+  /**
+   * The gutter's timestamps and the node chips.
+   *
+   * Both are memoised on everything **except** the hover state: a hover must not
+   * rebuild three hundred chips, and none of them depends on which one the
+   * pointer is over — the pointer callback re-renders the wrapper element, which
+   * React reconciles against the same memoised children.
+   */
+  const clocks = useMemo(
+    () => layout.nodes.map((node) => {
+      const front = fronts.get(node.report)
+      return (
+        <div
+          key={`clock-${node.report}`}
+          style={{ ...caption, position: 'absolute', left: 0, top: node.y - 8, width: layout.gutterWidth - 12, textAlign: 'right' }}
+        >
+          <Tooltip label={stamp(front?.updated)} side="right" delayMs={400}>
+            <span>{clock(front?.updated)}</span>
+          </Tooltip>
+        </div>
+      )
+    }),
+    [layout, fronts],
+  )
+
+  const nodes = useMemo(
+    () => layout.nodes.map((node) => (
+      <div
+        key={`node-${node.report}`}
+        className="report-ledger-node"
+        style={{ position: 'absolute', left: node.x, top: node.y, transform: 'translate(-50%, -50%)' }}
+        onMouseEnter={() => { setHot(node.report) }}
+        onMouseLeave={() => { setHot(undefined) }}
+      >
+        <Tooltip label={nodeHint(node, fronts.get(node.report))} side="bottom" delayMs={300} maxWidth={360}>
+          <Pill active={openReport === node.report} onClick={() => { onOpen(node.report) }}>
+            <span style={dotCell}><StateDot state={STATUS_DOT[node.status]} size={6} /></span>
+            {node.report}
+          </Pill>
+        </Tooltip>
+      </div>
+    )),
+    [layout, fronts, openReport, nodeHint, onOpen],
+  )
+
   /** One row's height, recovered from the drawing box the model gave us. */
   const rowHeight = layout.rows > 0 ? layout.height / layout.rows : 0
 
@@ -196,68 +341,92 @@ export function TopologyView(props: TopologyViewProps): ReactElement {
         ))}
       </div>
 
-      <div style={{ position: 'relative', width: layout.width, height: layout.height }}>
+      <div style={{ position: 'relative', width: layout.width, height: layout.height }} className="report-ledger-canvas">
         <svg width={layout.width} height={layout.height} style={{ position: 'absolute', left: 0, top: 0, pointerEvents: 'none' }} aria-hidden="true">
-          {/* Row separators first, so edges sit on top of the rules. */}
-          {Array.from({ length: layout.rows }, (_, row) => (
-            <line
-              key={`row-${row}`}
-              className="report-ledger-rowsep"
-              x1={0}
-              y1={row * rowHeight}
-              x2={layout.width}
-              y2={row * rowHeight}
-            />
-          ))}
-          {layout.lanes.map((column) => (
-            <line key={`rail-${column.id ?? 'external'}`} className="report-ledger-rail" x1={column.x} y1={0} x2={column.x} y2={layout.height} />
-          ))}
-          {layout.edges.map((edge, index) => {
-            const geometry = edgeGeometry(edge)
-            return (
-              <g key={`edge-${edge.report}-${edge.kind}-${index}`} className={dim(edge.report)}>
-                <path className={`report-ledger-edge report-ledger-edge-${edge.kind}`} d={geometry.path} />
-                <polygon className={`report-ledger-arrow-${edge.kind}`} points={geometry.arrow} />
-              </g>
-            )
-          })}
+          {/* One marker per kind instead of a polygon per edge. An arrowhead is a
+              decoration of the path, not a node: as markers they cost nothing in
+              the DOM and the browser orients them for us. */}
+          <defs>
+            {EDGE_KINDS.map((kind) => (
+              <marker
+                key={kind}
+                id={markerId(kind)}
+                viewBox="0 0 10 10"
+                refX="9"
+                refY="5"
+                markerWidth="7"
+                markerHeight="7"
+                markerUnits="userSpaceOnUse"
+                orient="auto"
+              >
+                <path className={arrowClass(kind)} d="M 0 1 L 9 5 L 0 9 Z" />
+              </marker>
+            ))}
+          </defs>
+
+          {/* Rules first, so edges sit on top of them — and one path each, because
+              three hundred <line>s are three hundred shapes to paint. */}
+          <path
+            className="report-ledger-rowsep"
+            d={Array.from({ length: layout.rows }, (_, row) => `M 0 ${row * rowHeight} H ${layout.width}`).join(' ')}
+          />
+          <path
+            className="report-ledger-rail"
+            d={layout.lanes.map((column) => `M ${column.x} 0 V ${layout.height}`).join(' ')}
+          />
+
+          {/* Every edge of a kind in a single path: they share one style and none
+              of them is interactive, so per-edge elements bought nothing and cost
+              a repaint each. The hovered report is drawn again below, on top. */}
+          <g className={`report-ledger-edges${hot === undefined ? '' : ` ${DIM_CLASS}`}`}>
+            {mergedEdges.map(({ kind, d }) => (
+              <path key={kind} className={edgeClass(kind)} d={d} markerEnd={`url(#${markerId(kind)})`} />
+            ))}
+          </g>
+
+          {/* The hovered report's own path, at full strength, over the dimmed layer. */}
+          {hot === undefined ? null : (
+            <g>
+              {layout.edges.flatMap((edge, index) => {
+                if (edge.report !== hot) return []
+                const geometry = edgeGeometry(edge)
+                return [(
+                  <path
+                    key={`hot-${edge.report}-${edge.kind}-${index}`}
+                    className={edgeClass(edge.kind)}
+                    d={geometry.path}
+                    markerEnd={`url(#${markerId(edge.kind)})`}
+                  />
+                )]
+              })}
+            </g>
+          )}
         </svg>
 
-        {/* The gutter is the time axis: one timestamp per row. */}
-        {layout.nodes.map((node) => {
-          const front = fronts.get(node.report)
-          return (
+        {/* Words for the hovered report's edges only.
+            The line style already says 主送 vs 抄送, so permanent labels would
+            repeat it on every row; showing them on hover answers the question at
+            the moment somebody is actually tracing one path. */}
+        {layout.edges.flatMap((edge, index) => {
+          if (hot === undefined || edge.report !== hot) return []
+          const geometry = edgeGeometry(edge)
+          return [(
             <div
-              key={`clock-${node.report}`}
-              style={{ ...caption, position: 'absolute', left: 0, top: node.y - 8, width: layout.gutterWidth - 12, textAlign: 'right' }}
+              key={`label-${edge.report}-${edge.kind}-${index}`}
+              className="report-ledger-edge-label"
+              style={{ position: 'absolute', left: geometry.labelX, top: geometry.labelY, transform: 'translate(-50%, -50%)' }}
             >
-              <Tooltip label={stamp(front?.updated)} side="right" delayMs={400}>
-                <span>{clock(front?.updated)}</span>
-              </Tooltip>
+              {t(EDGE_LABEL[edge.kind])}
             </div>
-          )
+          )]
         })}
 
-        {layout.nodes.map((node) => {
-          const front = fronts.get(node.report)
-          const isOpen = openReport === node.report
-          return (
-            <div
-              key={`node-${node.report}`}
-              className={dim(node.report)}
-              style={{ position: 'absolute', left: node.x, top: node.y, transform: 'translate(-50%, -50%)' }}
-              onMouseEnter={() => { setHot(node.report) }}
-              onMouseLeave={() => { setHot(undefined) }}
-            >
-              <Tooltip label={nodeHint(node, front)} side="bottom" delayMs={300} maxWidth={360}>
-                <Pill active={isOpen} onClick={() => { onOpen(node.report) }}>
-                  <span style={dotCell}><StateDot state={STATUS_DOT[node.status]} size={6} /></span>
-                  {node.report}
-                </Pill>
-              </Tooltip>
-            </div>
-          )
-        })}
+        {/* The gutter is the time axis: one timestamp per row. */}
+        {clocks}
+
+        {/* Nodes, memoised on everything except the hover state: hovering must not
+            rebuild three hundred chips, and none of them changes when it does. */}
+        {nodes}
       </div>
     </div>
   )

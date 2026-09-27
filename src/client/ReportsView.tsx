@@ -53,7 +53,7 @@ import {
   type StatusFilter,
 } from './timeline-model.ts'
 import { buildTopology } from './topology-model.ts'
-import { TopologyView } from './TopologyView.tsx'
+import { TopologyView, TopologyLegend } from './TopologyView.tsx'
 import { HOP_LABEL, STATUS_DOT, STATUS_LABEL, STATUS_TONE, type ReportLedgerKey } from './locales.ts'
 import { SEARCH_CLASS } from './styles.ts'
 
@@ -545,6 +545,7 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
         <section style={topoSection}>
           <div style={topoHead}>
             <strong>{t('topology.title')}</strong>
+            <TopologyLegend t={t} />
             <span style={summary}>
               {t('topology.summary', { lanes: topology.lanes.length, reports: topology.rows })}
             </span>

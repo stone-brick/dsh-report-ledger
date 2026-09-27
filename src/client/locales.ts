@@ -9,6 +9,7 @@
  */
 
 import type { HopAction, ReportStatus } from '../shared/wire.ts'
+import type { TopologyEdgeKind } from './topology-model.ts'
 
 /** Chinese dictionary — the source of truth for the key set. */
 export const zh = {
@@ -185,6 +186,20 @@ export const STATUS_DOT: Record<ReportStatus, 'ongoing' | 'done' | 'idle'> = {
   open: 'ongoing',
   acked: 'done',
   closed: 'idle',
+}
+
+/**
+ * Edge kind → the word the drawing calls it.
+ *
+ * The topology borrows the transfer path's own vocabulary rather than inventing
+ * a second one: an arrow in the graph and a row in the panel name the same
+ * relation, so they say the same thing.
+ */
+export const EDGE_LABEL: Record<TopologyEdgeKind, ReportLedgerKey> = {
+  to: 'hop.sent',
+  cc: 'hop.cc',
+  author: 'hop.contributed',
+  thread: 'detail.thread',
 }
 
 /**

@@ -94,6 +94,15 @@ export interface TopologyEdge {
   readonly toY: number
   /** Whether either endpoint is an out-of-tree session. */
   readonly external: boolean
+  /**
+   * The x a thread connector runs down, in the gap beside a column.
+   *
+   * Only thread edges have one. A thread spans rows, so drawing it as a direct
+   * curve made it cross whatever sat between parent and child; routing it down a
+   * **lane boundary** keeps it off every node, because nodes are centred in their
+   * column and the boundary is half a column away from any of them.
+   */
+  readonly viaX?: number
 }
 
 /** One report node. */
@@ -271,6 +280,16 @@ export function buildTopology(
     // is filtered out or lives in another tree is the detail panel's business.
     const parent = front.parent === undefined ? undefined : placed.get(front.parent)
     if (parent !== undefined) {
+      // Run down the boundary on the side the target is on. A same-column thread
+      // (a session answering itself) loops out to the right, except in the last
+      // column where that would leave the drawing.
+      const boundaryRight = (lanes[parent.laneIndex]?.x ?? 0) + opts.laneWidth / 2
+      const boundaryLeft = (lanes[parent.laneIndex]?.x ?? 0) - opts.laneWidth / 2
+      const viaX = node.laneIndex > parent.laneIndex
+        ? boundaryRight
+        : node.laneIndex < parent.laneIndex
+          ? boundaryLeft
+          : parent.laneIndex < lanes.length - 1 ? boundaryRight : boundaryLeft
       edges.push({
         report: front.report,
         kind: 'thread',
@@ -281,6 +300,7 @@ export function buildTopology(
         toX: node.x,
         toY: node.y,
         external: parent.laneIndex === externalIndex || node.laneIndex === externalIndex,
+        viaX,
       })
     }
   }

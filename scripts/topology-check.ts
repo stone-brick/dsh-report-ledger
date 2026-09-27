@@ -123,6 +123,26 @@ check('the thread edge runs downward', (threads[0]?.fromY ?? 0) < (threads[0]?.t
 check('an unplotted parent draws no thread edge',
   buildTopology(payload, [report('R-0002', { from: 'session-child', parent: 'R-9999' })]).edges.length === 0)
 
+// A thread spans rows, so it is routed down a lane boundary instead of across
+// whatever sits between its ends. The boundary must therefore never coincide with
+// a column centre, or the connector would run through the nodes it is avoiding.
+const routed = buildTopology(payload, [
+  report('R-0010', { from: 'session-root', created: at(4) }),
+  report('R-0011', { from: 'session-peer', parent: 'R-0010', created: at(5) }),
+])
+const threadOf = (layout: ReturnType<typeof buildTopology>, id: string) =>
+  layout.edges.find((e) => e.kind === 'thread' && e.report === id)
+const crossLane = threadOf(routed, 'R-0011')
+check('a cross-column thread carries a routing boundary', crossLane?.viaX !== undefined)
+check('the boundary sits strictly between the two columns',
+  (crossLane?.viaX ?? 0) > Math.min(crossLane?.fromX ?? 0, crossLane?.toX ?? 0)
+  && (crossLane?.viaX ?? 0) < Math.max(crossLane?.fromX ?? 0, crossLane?.toX ?? 0))
+check('the boundary is never on a column centre',
+  routed.edges.filter((e) => e.viaX !== undefined).every((e) => routed.lanes.every((l) => l.x !== e.viaX)))
+check('a boundary that would leave the drawing is not used',
+  routed.edges.filter((e) => e.viaX !== undefined).every((e) => (e.viaX ?? 0) >= 0 && (e.viaX ?? 0) <= routed.width))
+check('delivery edges carry no boundary', layout.edges.filter((e) => e.kind !== 'thread').every((e) => e.viaX === undefined))
+
 // ---------------------------------------------------------------------------
 // Size, emptiness and determinism
 // ---------------------------------------------------------------------------
