@@ -52,8 +52,7 @@ import {
   type Row,
   type StatusFilter,
 } from './timeline-model.ts'
-import { buildTopology } from './topology-model.ts'
-import { TopologyView, TopologyLegend } from './TopologyView.tsx'
+import { CardgraphView } from './CardgraphView.tsx'
 import { HOP_LABEL, STATUS_DOT, STATUS_LABEL, STATUS_TONE, type ReportLedgerKey } from './locales.ts'
 import { SEARCH_CLASS } from './styles.ts'
 
@@ -291,10 +290,6 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
     () => filterRows(rows, filter).flatMap((row) => (row.kind === 'report' ? [row.front] : [])),
     [rows, filter],
   )
-  const topology = useMemo(
-    () => (payload === undefined ? undefined : buildTopology(payload, plotted)),
-    [payload, plotted],
-  )
   /**
    * One session id the way a dense row shows it: shortened, with the full value
    * and the session title on hover. The hover is not decoration — it is where
@@ -531,14 +526,10 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
       {empty === 'no-reports' ? <div style={muted}>{t('view.empty')}</div> : null}
       {empty === 'filtered-out' ? <div style={muted}>{t('filter.none')}</div> : null}
 
-      {topology !== undefined && topology.rows > 0 ? (
+      {payload !== undefined && plotted.length > 0 ? (
         <section style={topoSection}>
           <div style={topoHead}>
             <strong>{t('topology.title')}</strong>
-            <TopologyLegend t={t} />
-            <span style={summary}>
-              {t('topology.summary', { lanes: topology.lanes.length, reports: topology.rows })}
-            </span>
             <Button
               variant="ghost"
               size="sm"
@@ -549,8 +540,8 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
             </Button>
           </div>
           {showTopology ? (
-            <TopologyView
-              layout={topology}
+            <CardgraphView
+              payload={payload}
               reports={plotted}
               t={t}
               idHint={idHint}

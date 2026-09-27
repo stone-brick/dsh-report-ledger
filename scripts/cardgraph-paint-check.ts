@@ -131,6 +131,16 @@ class Recorder {
     this.calls.push(`fillText(${text})`)
     this.texts.push({ seq: this.seq(), text, x, y, style: this.fillStyle })
   }
+
+  /** Forget everything recorded so far, so one layer can be asserted on its own. */
+  reset(): void {
+    this.calls.length = 0
+    this.fills.length = 0
+    this.strokes.length = 0
+    this.rects.length = 0
+    this.texts.length = 0
+    this.path = []
+  }
 }
 
 /** A canvas stand-in: the painter only ever touches these four things. */
@@ -157,6 +167,11 @@ const tokens: Record<string, string> = {
   '--dsw-alias-bg-base': '#101010',
   '--dsw-alias-bg-layer-3': '#202020',
   '--dsw-alias-state-warn-primary': '#ffaa00',
+  // Distinct from every wire colour on purpose: the fallback theme happens to give
+  // the accent and the thread colour the same value, which would make "is this
+  // stroke a wire or a frame outline" unanswerable for the recorder.
+  '--dsw-alias-brand-primary': '#ff00ff',
+  '--dsw-alias-state-business-primary': '#00aa88',
   '--dsw-font-xs-13-font-size': '13px',
   '--dsw-font-xs-13-font-weight': '600',
   '--dsw-font-xs-13-line-height': '18px',
@@ -367,29 +382,69 @@ check('every arrowhead lands on its wire\'s target', heads.every((head) =>
     head.box.x <= edge.to.x + 0.001 && edge.to.x <= head.box.x + head.box.width + 0.001
       && head.box.y <= edge.to.y + 0.001 && edge.to.y <= head.box.y + head.box.height + 0.001)))
 
-check('a focused report keeps its own wires at full strength', (() => {
-  const { recorder } = paint({ focus: { report: 'R-0001' } })
+// ---------------------------------------------------------------------------
+// The interaction layer
+// ---------------------------------------------------------------------------
+/** Paint the base layer, forget it, then paint the interaction layer alone. */
+const overlay = (scene: Record<string, unknown> = {}): Recorder => {
+  const recorder = new Recorder()
+  const painter = createCanvasPainter(mount(recorder))
+  painter.resize(1400, 900, 1)
+  painter.paint(full as never)
+  recorder.reset()
+  painter.paintPath({ ...full, ...scene } as never)
+  return recorder
+}
+
+check('with nothing focused the interaction layer draws nothing', (() => {
+  const blank = overlay()
+  return blank.fills.length === 0 && blank.strokes.length === 0 && blank.texts.length === 0
+})())
+check('the base layer is drawn at full strength whatever is focused',
+  paint({ focus: { report: 'R-0001' } }).recorder.strokes.every((stroke) => stroke.alpha === 1))
+check('focusing a report lays a scrim over the visible world', (() => {
+  const scrim = overlay({ focus: { report: 'R-0001' } }).rects[0]
+  return scrim !== undefined && scrim.style === themed.canvas
+    && Math.abs(scrim.alpha - 0.55) < 0.001
+    && near(scrim.box, { x: 0, y: 0, width: 1400, height: 900 }, 1)
+})())
+// The scrim has to leave the rest of the drawing legible: it is a canvas-wide wash,
+// so anything close to opaque takes the frames and titles with it.
+check('the scrim leaves more than a third of the drawing showing', 1 - 0.55 > 0.35)
+check('only the focused report\'s wires are drawn over the scrim', (() => {
+  const recorder = overlay({ focus: { report: 'R-0001' } })
   const mine = layout.edges.filter((edge) => edge.report === 'R-0001')
-  return mine.length > 0 && mine.every((edge) =>
-    wireStrokes(recorder).some((stroke) => near(stroke.box, edge.bounds, 2) && stroke.alpha === 1))
+  const drawn = wireStrokes(recorder).filter((stroke) => stroke.alpha === 1)
+  return drawn.length === mine.length
+    && mine.every((edge) => drawn.some((stroke) => near(stroke.box, edge.bounds, 2)))
 })())
-check('every other wire is dimmed while one report is focused', (() => {
-  const { recorder } = paint({ focus: { report: 'R-0001' } })
-  const dimmed = wireStrokes(recorder).filter((stroke) => stroke.alpha < 1)
-  return dimmed.length === layout.edges.filter((edge) => edge.report !== 'R-0001').length
-    && dimmed.every((stroke) => Math.abs(stroke.alpha - 0.18) < 0.001)
+check('every drawn wire over the scrim is at full strength',
+  wireStrokes(overlay({ focus: { report: 'R-0001' } })).every((stroke) => stroke.alpha === 1))
+check('the focused card is redrawn in the accent', (() => {
+  const recorder = overlay({ focus: { report: 'R-0001' } })
+  return recorder.texts.some((text) => text.text === 'R-0001' && text.style === themed.accent)
+    && recorder.strokes.some((stroke) => stroke.style === themed.accent
+      && near(stroke.box, layout.cards.find((card) => card.report === 'R-0001')?.bounds as Box, 6))
 })())
-check('nothing is dimmed when nothing is focused', wireStrokes(whole.recorder).every((stroke) => stroke.alpha === 1))
-check('a focused frame takes the accent', (() => {
-  const { recorder } = paint({ focus: { frame: 0 } })
-  return recorder.strokes.some((stroke) => stroke.style === themed.accent && near(stroke.box, layout.frames[0]?.bounds as Box))
+check('the frames the path touches are re-outlined', (() => {
+  const recorder = overlay({ focus: { report: 'R-0001' } })
+  const touched = new Set<number>()
+  for (const edge of layout.edges.filter((candidate) => candidate.report === 'R-0001')) {
+    if (edge.from.kind === 'frame') touched.add(edge.from.index)
+    if (edge.to.kind === 'frame') touched.add(edge.to.index)
+  }
+  const outlines = recorder.strokes.filter((stroke) => stroke.style === themed.accent)
+    .filter((stroke) => layout.frames.some((frame) => near(stroke.box, frame.bounds, 2)))
+  return outlines.length === touched.size
 })())
-check('an unfocused frame does not', (() => {
-  const { recorder } = paint({ focus: { frame: 1 } })
-  const frame = recorder.strokes.filter((stroke) => near(stroke.box, layout.frames[0]?.bounds as Box))
-  return frame.length === 1 && frame[0]?.style === themed.frameBorder
+check('focusing a frame outlines it without a scrim', (() => {
+  const recorder = overlay({ focus: { frame: 0 } })
+  return recorder.rects.length === 0
+    && recorder.strokes.length === 1
+    && recorder.strokes[0]?.style === themed.accent
+    && near(recorder.strokes[0]?.box as Box, layout.frames[0]?.bounds as Box, 2)
 })())
-check('the open card is named in the accent',
+check('the open card is named in the accent on the base layer',
   paint({ focus: { selected: 'R-0001' } }).recorder.texts
     .some((text) => text.text === 'R-0001' && text.style === themed.accent))
 

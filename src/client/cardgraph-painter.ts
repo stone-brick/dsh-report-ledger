@@ -347,8 +347,19 @@ export interface PaintScene {
 export interface CardgraphPainter {
   /** Size the paint box, in CSS pixels, and the device pixel ratio to paint at. */
   resize(width: number, height: number, dpr: number): void
-  /** Draw one frame. */
+  /** Draw the whole drawing, at full strength and with nothing focused. */
   paint(scene: PaintScene): void
+  /**
+   * Draw one report's path over a scrim of everything else — the interaction
+   * layer.
+   *
+   * This is why the drawing is split across two surfaces: a hover changes the
+   * scrim and a handful of wires, never the hundreds of shapes underneath, so the
+   * cost of a hover is the same on a 10-report drawing and a 3000-report one.
+   * Passing no focus wipes the layer.
+   * @param scene - the same scene the base layer was drawn from.
+   */
+  paintPath(scene: PaintScene): void
   /** Forget the text-measurement cache, e.g. when the font tokens changed. */
   reset(): void
 }
@@ -364,8 +375,20 @@ const STRIPE = 3
 /** Arrowhead length and half-width. */
 const ARROW_LENGTH = 7
 const ARROW_HALF = 3.5
-/** How far a dimmed wire fades when something else is focused. */
-const DIM_ALPHA = 0.18
+/**
+ * How far the scrim pushes everything but the focused path back.
+ *
+ * **Measured, then corrected.** The first version reused the swimlane's dim value
+ * (0.18 left showing) and a screenshot of the real tab showed why that was wrong
+ * there and wrong here: at 0.18 the frames, their titles and every other card
+ * become unreadable, so tracing one path costs the reader the context the drawing
+ * exists to provide. The swimlane had already learned the same thing from the other
+ * side — *the relations recede, the participants stay* — and a canvas scrim is
+ * blunter than a per-shape dim, so it has to be gentler: 0.45 showing keeps every
+ * frame and card legible while the focused path, drawn back on top at full
+ * strength, still reads as the thing being pointed at.
+ */
+const SCRIM_ALPHA = 0.55
 /** Subject lines a full card has room for. */
 const SUBJECT_LINES = 2
 
@@ -376,12 +399,36 @@ function statusColour(status: string, theme: PaintTheme): string {
   return theme.tertiary
 }
 
-/** How one kind of wire is drawn: colour and dash. */
-function wireStyle(kind: CardgraphEdgeKind, theme: PaintTheme): { stroke: string; dash: readonly number[] } {
-  if (kind === 'to') return { stroke: theme.secondary, dash: [] }
-  if (kind === 'cc') return { stroke: theme.caption, dash: [2, 3] }
-  if (kind === 'author') return { stroke: theme.caption, dash: [1, 3] }
-  return { stroke: theme.business, dash: [] }
+/**
+ * How each kind of wire is drawn: the token its colour comes from, its dash
+ * pattern, and its weight.
+ *
+ * Exported because the wires are canvas and the legend is DOM — the only way the
+ * two cannot drift is for the legend to read this table instead of restating it in
+ * CSS. The colour is a **token name**, not a value, so it resolves through the
+ * theme like everything else.
+ */
+export const WIRE_TOKENS: Readonly<Record<CardgraphEdgeKind, {
+  readonly colour: string
+  readonly dash: readonly number[]
+  readonly width: number
+}>> = {
+  to: { colour: '--dsw-alias-label-secondary', dash: [], width: 1.4 },
+  cc: { colour: '--dsw-alias-label-caption', dash: [2, 3], width: 1 },
+  author: { colour: '--dsw-alias-label-caption', dash: [1, 3], width: 1 },
+  thread: { colour: '--dsw-alias-state-business-primary', dash: [], width: 1.4 },
+}
+
+/** Reverse lookup: which theme field a token fills. */
+const FIELD_OF_TOKEN = new Map<string, keyof Omit<PaintTheme, 'fonts'>>(
+  TOKENS.map(([field, token]) => [token, field]),
+)
+
+/** How one kind of wire is drawn, resolved against a theme. */
+function wireStyle(kind: CardgraphEdgeKind, theme: PaintTheme): { stroke: string; dash: readonly number[]; width: number } {
+  const spec = WIRE_TOKENS[kind]
+  const field = FIELD_OF_TOKEN.get(spec.colour)
+  return { stroke: field === undefined ? theme.secondary : theme[field], dash: spec.dash, width: spec.width }
 }
 
 /**
@@ -456,14 +503,23 @@ export function createCanvasPainter(canvas: HTMLCanvasElement): CardgraphPainter
     ctx.stroke()
   }
 
-  const drawFrame = (frame: CardgraphFrame, scene: PaintScene, focused: boolean): void => {
+  /** The frame's outline alone, for the interaction layer: the box is already drawn. */
+  const drawFrameOutline = (frame: CardgraphFrame, scene: PaintScene): void => {
+    ctx.globalAlpha = 1
+    pathRoundRect(ctx, frame.bounds, FRAME_RADIUS)
+    ctx.strokeStyle = scene.theme.accent
+    ctx.lineWidth = 1.6
+    ctx.stroke()
+  }
+
+  const drawFrame = (frame: CardgraphFrame, scene: PaintScene): void => {
     const { theme } = scene
     ctx.globalAlpha = 1
     pathRoundRect(ctx, frame.bounds, FRAME_RADIUS)
     ctx.fillStyle = theme.frame
     ctx.fill()
-    ctx.strokeStyle = focused ? theme.accent : theme.frameBorder
-    ctx.lineWidth = focused ? 1.6 : 1
+    ctx.strokeStyle = theme.frameBorder
+    ctx.lineWidth = 1
     ctx.stroke()
 
     // Title bar: a band across the top, clipped to the frame so its square corners
@@ -514,7 +570,7 @@ export function createCanvasPainter(canvas: HTMLCanvasElement): CardgraphPainter
     const points = wirePoints(edge)
     ctx.globalAlpha = alpha
     ctx.strokeStyle = style.stroke
-    ctx.lineWidth = edge.kind === 'to' || edge.kind === 'thread' ? 1.4 : 1
+    ctx.lineWidth = style.width
     ctx.setLineDash(style.dash)
     ctx.beginPath()
     points.forEach((point, index) => {
@@ -541,7 +597,7 @@ export function createCanvasPainter(canvas: HTMLCanvasElement): CardgraphPainter
     ctx.fill()
   }
 
-  const drawCard = (card: CardgraphCard, scene: PaintScene, focused: boolean): void => {
+  const drawCard = (card: CardgraphCard, scene: PaintScene, accent: boolean): void => {
     const { theme } = scene
     const box = card.bounds
     ctx.globalAlpha = 1
@@ -550,8 +606,8 @@ export function createCanvasPainter(canvas: HTMLCanvasElement): CardgraphPainter
     ctx.fill()
     if (card.lod === 'chip') return
 
-    ctx.strokeStyle = focused ? theme.accent : theme.border
-    ctx.lineWidth = focused ? 1.6 : 1
+    ctx.strokeStyle = accent ? theme.accent : theme.border
+    ctx.lineWidth = accent ? 1.6 : 1
     ctx.stroke()
 
     // Status stripe, in the tone the tab's Tag uses for the same status.
@@ -568,7 +624,7 @@ export function createCanvasPainter(canvas: HTMLCanvasElement): CardgraphPainter
     ctx.textBaseline = 'top'
 
     ctx.font = fontString(theme.fonts.id)
-    ctx.fillStyle = card.report === scene.focus?.selected ? theme.accent : theme.secondary
+    ctx.fillStyle = accent ? theme.accent : theme.secondary
     if (card.lod === 'compact') {
       // One line: the id, then as much subject as is left of the card.
       const id = card.report
@@ -638,27 +694,68 @@ export function createCanvasPainter(canvas: HTMLCanvasElement): CardgraphPainter
       ctx.translate(viewport.offsetX, viewport.offsetY)
       ctx.scale(viewport.scale, viewport.scale)
 
-      const focusedReport = scene.focus?.report
-      const focusedFrame = scene.focus?.frame
       // Frames first, then wires, then cards. A wire therefore always reads on top
       // of the boxes it travels between, while a card's text is never crossed.
       for (const frame of layout.frames) {
-        if (visible(frame.bounds)) drawFrame(frame, scene, frame.index === focusedFrame)
+        if (visible(frame.bounds)) drawFrame(frame, scene)
       }
       for (const edge of layout.edges) {
-        if (!visible(edge.bounds)) continue
-        // Dimming follows the report, not the geometry: while one report's path is
-        // in focus, the other *relations* recede and every participant stays put.
-        const dim = focusedReport !== undefined && edge.report !== focusedReport
-        drawWire(edge, scene, dim ? DIM_ALPHA : 1)
+        if (visible(edge.bounds)) drawWire(edge, scene, 1)
       }
       for (const card of layout.cards) {
         if (!visible(card.bounds)) continue
-        const focused = card.report === focusedReport || card.report === scene.focus?.selected
-        drawCard(card, scene, focused)
+        drawCard(card, scene, card.report === scene.focus?.selected)
+      }
+      ctx.globalAlpha = 1
+      ctx.restore()
+    },
+    paintPath(scene: PaintScene): void {
+      const { layout, theme, viewport } = scene
+      const report = scene.focus?.report ?? scene.focus?.selected
+      const frameIndex = scene.focus?.frame
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+      ctx.globalAlpha = 1
+      ctx.setLineDash([])
+      ctx.clearRect(0, 0, width, height)
+      if (report === undefined && frameIndex === undefined) return
+
+      ctx.save()
+      ctx.translate(viewport.offsetX, viewport.offsetY)
+      ctx.scale(viewport.scale, viewport.scale)
+
+      if (report === undefined) {
+        const frame = layout.frames[frameIndex as number]
+        if (frame !== undefined) drawFrameOutline(frame, scene)
+        ctx.restore()
+        return
       }
 
+      // The scrim: one rectangle over the whole visible world. Everything else
+      // recedes at once, and — unlike dimming shapes one by one — it costs the same
+      // whether the drawing has ten reports or three thousand.
+      const world = worldViewport(viewport, 0)
+      ctx.globalAlpha = SCRIM_ALPHA
+      ctx.fillStyle = theme.canvas
+      ctx.fillRect(world.x, world.y, world.width, world.height)
       ctx.globalAlpha = 1
+
+      const edges = layout.edges.filter((edge) => edge.report === report)
+      const touched = new Set<number>()
+      for (const edge of edges) {
+        if (edge.from.kind === 'frame') touched.add(edge.from.index)
+        if (edge.to.kind === 'frame') touched.add(edge.to.index)
+      }
+      // The frames the path touches are re-outlined rather than redrawn: their
+      // boxes are already underneath, and only the endpoints need to stay legible.
+      for (const frame of layout.frames) {
+        if (touched.has(frame.index)) drawFrameOutline(frame, scene)
+      }
+      for (const edge of edges) {
+        if (intersects(edge.bounds, world)) drawWire(edge, scene, 1)
+      }
+      for (const card of layout.cards) {
+        if (card.report === report) drawCard(card, scene, true)
+      }
       ctx.restore()
     },
   }

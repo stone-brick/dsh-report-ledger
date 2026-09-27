@@ -15,6 +15,11 @@
  * own chip styling).
  *
  * @module dsh-report-ledger/client/TopologyView
+ *
+ * ⚠️ **Superseded by `CardgraphView.tsx`** (the card canvas) and no longer imported
+ * by the tab, so it costs the bundle nothing. Kept deliberately: its model is still
+ * asserted by `scripts/topology-check.ts`, and it is the fallback if a canvas proves
+ * worse than DOM out on a real ledger.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
