@@ -54,7 +54,7 @@
   "scripts": {
     "build": "tsdown",
     "watch": "tsdown --watch",
-    "test": "node scripts/smoke.ts && node scripts/guidance-check.ts && node scripts/timeline-check.ts && node scripts/roster-check.ts && node scripts/client-filter-check.ts",
+    "test": "node scripts/smoke.ts && node scripts/guidance-check.ts && node scripts/timeline-check.ts && node scripts/roster-check.ts && node scripts/client-filter-check.ts && node scripts/topology-check.ts",
     "typecheck": "tsc --noEmit",
     "check": "pnpm run typecheck && pnpm run test",
     "prepare": "pnpm run build",

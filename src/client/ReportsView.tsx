@@ -34,7 +34,7 @@ import {
   Tooltip,
   writeClipboard,
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { ReportDetail, ReportStatus, TimelinePayload } from '../shared/wire.ts'
+import type { ReportDetail, TimelinePayload } from '../shared/wire.ts'
 import {
   buildRows,
   closeOpenFence,
@@ -52,7 +52,9 @@ import {
   type Row,
   type StatusFilter,
 } from './timeline-model.ts'
-import { HOP_LABEL, STATUS_LABEL, type ReportLedgerKey } from './locales.ts'
+import { buildTopology } from './topology-model.ts'
+import { TopologyView } from './TopologyView.tsx'
+import { HOP_LABEL, STATUS_DOT, STATUS_LABEL, STATUS_TONE, type ReportLedgerKey } from './locales.ts'
 import { SEARCH_CLASS } from './styles.ts'
 
 /** Translate one key, substituting `{name}` placeholders. */
@@ -105,24 +107,9 @@ function stamp(at: number | undefined): string {
   return new Date(at).toLocaleString()
 }
 
-/**
- * Lifecycle state → the shell's chip tone.
- *
- * Colour-coded status is the point of the chip, and the shell's palette already
- * has the three tones this needs — so the states ride `Tag` instead of a
- * hand-mixed background. `open` reads as the one that wants attention.
- */
-const STATUS_TONE: Record<ReportStatus, 'warning' | 'success' | 'neutral'> = {
-  open: 'warning',
-  acked: 'success',
-  closed: 'neutral',
-}
-
-/** Lifecycle state → the shell's state dot. `ongoing` is the animated one. */
-const STATUS_DOT: Record<ReportStatus, 'ongoing' | 'done' | 'idle'> = {
-  open: 'ongoing',
-  acked: 'done',
-  closed: 'idle',
+/** Dom id of one report's card, so the topology can scroll to it. */
+function rowDomId(report: string): string {
+  return `report-ledger-row-${report}`
 }
 
 /**
@@ -173,6 +160,12 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
   const [basis, setBasis] = useState<ReportTimeBasis>('created')
   const [copiedPath, setCopiedPath] = useState(false)
   const copyTimer = useRef<ReturnType<typeof globalThis.setTimeout> | undefined>(undefined)
+  // The topology is an overview over the same data, so it is expanded by default
+  // and collapses rather than being a separate mode: the list stays the place
+  // where a report is read, and the graph stays above it.
+  const [showTopology, setShowTopology] = useState(true)
+  /** Set when the topology asks for a card, so the list can scroll to it once. */
+  const scrollTo = useRef<string | undefined>(undefined)
 
   useEffect(() => () => {
     if (copyTimer.current !== undefined) globalThis.clearTimeout(copyTimer.current)
@@ -286,6 +279,22 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
     const title = titles.get(id)
     return title === undefined ? id : `${title} · ${id}`
   }, [titles])
+
+  /**
+   * The reports the topology plots.
+   *
+   * Taken from the same filtered row set the list renders, so the graph is a view
+   * of the current filter rather than a second source of truth — narrowing the
+   * toolbar narrows both.
+   */
+  const plotted = useMemo(
+    () => filterRows(rows, filter).flatMap((row) => (row.kind === 'report' ? [row.front] : [])),
+    [rows, filter],
+  )
+  const topology = useMemo(
+    () => (payload === undefined ? undefined : buildTopology(payload, plotted)),
+    [payload, plotted],
+  )
   /**
    * One session id the way a dense row shows it: shortened, with the full value
    * and the session title on hover. The hover is not decoration — it is where
@@ -301,6 +310,28 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
     setTimelineNonce((value) => value + 1)
     setDetailNonce((value) => value + 1)
   }, [])
+
+  /**
+   * Open a report from the topology.
+   *
+   * The graph does not get its own detail surface: it opens the card in the list
+   * and brings it into view, which keeps one reading surface for the body and the
+   * transfer path — and inherits the card's guarantees for free (a filtered-out
+   * report still gets a row to render into).
+   */
+  const openFromTopology = useCallback((report: string) => {
+    scrollTo.current = report
+    setOpenReport(report)
+  }, [])
+
+  // Scroll after the row exists, not before: the card may only be synthesized by
+  // the render this state change is about to cause.
+  useEffect(() => {
+    const target = scrollTo.current
+    if (target === undefined || openReport !== target) return
+    scrollTo.current = undefined
+    globalThis.document?.getElementById(rowDomId(target))?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  }, [openReport])
 
   /**
    * Copy the ledger path, acknowledging through the control's own label.
@@ -406,6 +437,31 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
     alignItems: 'baseline',
     gap: '6px',
   }
+  /** The topology's frame: an overview that sits above the list, not instead of it. */
+  const topoSection: Record<string, string | number> = {
+    marginBottom: '12px',
+    border: '1px solid var(--dsw-alias-border-l1, rgba(0,0,0,0.06))',
+    borderRadius: '6px',
+    background: 'var(--dsw-alias-bg-layer-1, rgba(0,0,0,0.02))',
+    overflow: 'hidden',
+  }
+  const topoHead: Record<string, string | number> = {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+    padding: '6px 10px',
+    borderBottom: '1px solid var(--dsw-alias-border-l1, rgba(0,0,0,0.06))',
+  }
+  /**
+   * The drawing scrolls inside its own box, on purpose and in both directions: a
+   * wide tree needs horizontal travel, and capping the height keeps a long ledger
+   * from pushing the list off the page. This is the one deliberate scroller in the
+   * tab — contained, unlike the accidental whole-tab one this view used to have.
+   */
+  const topoScroll: Record<string, string | number> = {
+    maxHeight: '46vh',
+    overflow: 'auto',
+  }
 
   if (error !== undefined) {
     return (
@@ -485,6 +541,37 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
       {empty === 'no-reports' ? <div style={muted}>{t('view.empty')}</div> : null}
       {empty === 'filtered-out' ? <div style={muted}>{t('filter.none')}</div> : null}
 
+      {topology !== undefined && topology.rows > 0 ? (
+        <section style={topoSection}>
+          <div style={topoHead}>
+            <strong>{t('topology.title')}</strong>
+            <span style={summary}>
+              {t('topology.summary', { lanes: topology.lanes.length, reports: topology.rows })}
+            </span>
+            <Button
+              variant="ghost"
+              size="sm"
+              icon={showTopology ? <IconChevronDownOutline14 /> : <IconChevronRightOutline14 />}
+              onClick={() => { setShowTopology((value) => !value) }}
+            >
+              {showTopology ? t('topology.hide') : t('topology.show')}
+            </Button>
+          </div>
+          {showTopology ? (
+            <div style={topoScroll}>
+              <TopologyView
+                layout={topology}
+                reports={plotted}
+                t={t}
+                idHint={idHint}
+                openReport={openReport}
+                onOpen={openFromTopology}
+              />
+            </div>
+          ) : null}
+        </section>
+      ) : null}
+
       {visible.map((row, index) => {
         const pad = 8 + row.depth * 18
         if (row.kind === 'session') {
@@ -521,7 +608,7 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
         const panelId = `report-ledger-panel-${front.report}`
         const toggleLabel = fill(expanded ? t('row.collapse') : t('row.expand'), { report: front.report })
         return (
-          <div key={`r-${front.report}`} style={{ paddingLeft: `${pad}px` }}>
+          <div key={`r-${front.report}`} id={rowDomId(front.report)} style={{ paddingLeft: `${pad}px` }}>
             {/* The row is a plain container, not a `role="button"`.
                 It used to be one, and it contained a real <button> (the task
                 chip) — nested interactive content. Worse, a role="button" takes

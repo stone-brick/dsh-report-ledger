@@ -67,6 +67,13 @@ export const zh = {
   'detail.filteredOut': '{report} 在当前筛选下被隐藏了（用「清除」恢复）。',
   'detail.backToList': '回到列表',
   'detail.bodyTruncated': '正文过长，此处只显示开头 {chars} 字；完整内容见账本文件。',
+  'topology.title': '拓扑',
+  'topology.summary': '{lanes} 条泳道 · {reports} 份汇报',
+  'topology.show': '展开拓扑',
+  'topology.hide': '收起拓扑',
+  'topology.external': '树外',
+  'topology.externalHint': '不属于本树的会话',
+  'topology.openHint': '点击在列表中打开',
   'body.copy': '复制',
   'body.copied': '已复制',
   'body.footnotes': '脚注',
@@ -129,6 +136,13 @@ export const en: Record<keyof typeof zh, string> = {
   'detail.filteredOut': '{report} is hidden by the current filter (use Clear to restore it).',
   'detail.backToList': 'Back to the list',
   'detail.bodyTruncated': 'Body is long, so only the first {chars} characters are shown here; the ledger file has the whole thing.',
+  'topology.title': 'Topology',
+  'topology.summary': '{lanes} lanes · {reports} reports',
+  'topology.show': 'Show topology',
+  'topology.hide': 'Hide topology',
+  'topology.external': 'outside',
+  'topology.externalHint': 'Sessions outside this tree',
+  'topology.openHint': 'Click to open it in the list',
   'body.copy': 'Copy',
   'body.copied': 'Copied',
   'body.footnotes': 'Footnotes',
@@ -149,6 +163,28 @@ export const STATUS_LABEL: Record<ReportStatus, ReportLedgerKey> = {
   open: 'filter.open',
   acked: 'filter.acked',
   closed: 'filter.closed',
+}
+
+/**
+ * Lifecycle state → the shell's chip tone.
+ *
+ * Colour-coded status is the point of the chip, and the shell's palette already
+ * has the three tones this needs — so the states ride `Tag` instead of a
+ * hand-mixed background. `open` reads as the one that wants attention. The tone
+ * names are the ones the shell's CSS actually defines (`[data-tone=…]`), which
+ * is a longer list than the shipped views happen to use.
+ */
+export const STATUS_TONE: Record<ReportStatus, 'warning' | 'success' | 'neutral'> = {
+  open: 'warning',
+  acked: 'success',
+  closed: 'neutral',
+}
+
+/** Lifecycle state → the shell's state dot. `ongoing` is the animated one. */
+export const STATUS_DOT: Record<ReportStatus, 'ongoing' | 'done' | 'idle'> = {
+  open: 'ongoing',
+  acked: 'done',
+  closed: 'idle',
 }
 
 /**
