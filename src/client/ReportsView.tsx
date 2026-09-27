@@ -452,16 +452,6 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
     padding: '6px 10px',
     borderBottom: '1px solid var(--dsw-alias-border-l1, rgba(0,0,0,0.06))',
   }
-  /**
-   * The drawing scrolls inside its own box, on purpose and in both directions: a
-   * wide tree needs horizontal travel, and capping the height keeps a long ledger
-   * from pushing the list off the page. This is the one deliberate scroller in the
-   * tab — contained, unlike the accidental whole-tab one this view used to have.
-   */
-  const topoScroll: Record<string, string | number> = {
-    maxHeight: '46vh',
-    overflow: 'auto',
-  }
 
   if (error !== undefined) {
     return (
@@ -559,16 +549,14 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
             </Button>
           </div>
           {showTopology ? (
-            <div style={topoScroll}>
-              <TopologyView
-                layout={topology}
-                reports={plotted}
-                t={t}
-                idHint={idHint}
-                openReport={openReport}
-                onOpen={openFromTopology}
-              />
-            </div>
+            <TopologyView
+              layout={topology}
+              reports={plotted}
+              t={t}
+              idHint={idHint}
+              openReport={openReport}
+              onOpen={openFromTopology}
+            />
           ) : null}
         </section>
       ) : null}

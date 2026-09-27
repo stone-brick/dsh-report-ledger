@@ -136,6 +136,8 @@ export interface TopologyLayout {
   readonly laneWidth: number
   /** Width of the left gutter, so the view can align its timestamp column. */
   readonly gutterWidth: number
+  /** Height of one row, so the view can window the drawing without guessing. */
+  readonly rowHeight: number
   /** Bounding size of the drawing, headers included. */
   readonly width: number
   readonly height: number
@@ -312,6 +314,7 @@ export function buildTopology(
     edges,
     laneWidth: opts.laneWidth,
     gutterWidth: opts.gutterWidth,
+    rowHeight: opts.rowHeight,
     width: opts.gutterWidth + opts.laneWidth * lanes.length,
     height: opts.rowHeight * reports.length,
     headerHeight: opts.headerHeight,
@@ -330,4 +333,65 @@ export function buildTopology(
 export function rowCenter(row: number, options: Partial<TopologyOptions> = {}): number {
   const opts: TopologyOptions = { ...DEFAULT_TOPOLOGY_OPTIONS, ...options }
   return opts.rowHeight * row + opts.rowHeight / 2
+}
+
+/**
+ * The row window a viewport is showing, padded by an overscan.
+ *
+ * The drawing is one tall coordinate space inside a short scroll box, so a
+ * reader only ever sees a dozen of the rows: rendering the rest costs a style
+ * recalculation and a repaint per shape for rows nobody can look at. This is the
+ * arithmetic behind rendering only what is visible — kept here, and tested,
+ * because "which rows are on screen" is a decision the reader feels the moment
+ * it is wrong (a missing row, or a row that flickers at the window edge).
+ * @param scrollTop - the scroll box's offset, in pixels.
+ * @param viewportHeight - the scroll box's height, in pixels.
+ * @param rows - how many rows the drawing has in total.
+ * @param options - the same geometry the layout used.
+ * @param overscan - extra rows to keep on each side, so scrolling does not show a
+ *   blank band before the next frame arrives.
+ * @returns the inclusive row range; `last < first` when there are no rows.
+ */
+export function visibleRows(
+  scrollTop: number,
+  viewportHeight: number,
+  rows: number,
+  options: Partial<TopologyOptions> = {},
+  overscan = 4,
+): { readonly first: number; readonly last: number } {
+  const opts: TopologyOptions = { ...DEFAULT_TOPOLOGY_OPTIONS, ...options }
+  if (rows <= 0) return { first: 0, last: -1 }
+  const top = Math.max(0, Number.isFinite(scrollTop) ? scrollTop : 0)
+  const height = Math.max(0, Number.isFinite(viewportHeight) ? viewportHeight : 0)
+  const firstVisible = Math.floor(top / opts.rowHeight)
+  // `- 1` because a viewport ending exactly on a row boundary does not show the
+  // next row.
+  const lastVisible = Math.floor((top + Math.max(height, 1) - 1) / opts.rowHeight)
+  return {
+    first: Math.max(0, firstVisible - Math.max(0, overscan)),
+    last: Math.min(rows - 1, lastVisible + Math.max(0, overscan)),
+  }
+}
+
+/**
+ * The rows one edge touches.
+ *
+ * A delivery stays on its own row; a thread spans from its parent's row to its
+ * child's. Windowing needs both, and a thread whose ends are off-screen but whose
+ * middle crosses the viewport must still be drawn — dropping it would make a
+ * connector appear out of nowhere when the reader scrolls.
+ * @param edge - one edge.
+ * @param options - the same geometry the layout used.
+ * @returns the inclusive row range the edge occupies.
+ */
+export function edgeRowSpan(
+  edge: TopologyEdge,
+  options: Partial<TopologyOptions> = {},
+): { readonly first: number; readonly last: number } {
+  const opts: TopologyOptions = { ...DEFAULT_TOPOLOGY_OPTIONS, ...options }
+  // Node centres sit at `rowHeight * row + rowHeight / 2`, so this inverts exactly.
+  const rowOf = (y: number): number => Math.max(0, Math.round((y - opts.rowHeight / 2) / opts.rowHeight))
+  const from = rowOf(edge.fromY)
+  const to = rowOf(edge.toY)
+  return { first: Math.min(from, to), last: Math.max(from, to) }
 }

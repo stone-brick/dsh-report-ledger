@@ -17,10 +17,11 @@
  * @module dsh-report-ledger/client/TopologyView
  */
 
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import { Pill, StateDot, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ReportFrontMatter } from '../shared/wire.ts'
+import { edgeRowSpan, visibleRows } from './topology-model.ts'
 import type { TopologyEdge, TopologyEdgeKind, TopologyLayout, TopologyNode } from './topology-model.ts'
 import { STATUS_DOT, EDGE_LABEL } from './locales.ts'
 import { DIM_CLASS, arrowClass, edgeClass } from './styles.ts'
@@ -39,6 +40,17 @@ const CHIP_HALF_Y = 12
 
 /** Corner radius of an orthogonal run, so a handoff does not look like plumbing. */
 const CORNER = 6
+
+/**
+ * How tall the drawing's scroll box is.
+ *
+ * A viewport, not the whole drawing: the topology is an overview above the list,
+ * so it gets a fraction of the pane and scrolls inside itself.
+ */
+const VIEWPORT_MAX_HEIGHT = '46vh'
+
+/** Assumed viewport height for the first paint, before the box has been measured. */
+const ASSUMED_VIEWPORT_PX = 600
 
 /** Props for one topology drawing. */
 export interface TopologyViewProps {
@@ -226,6 +238,67 @@ export function TopologyView(props: TopologyViewProps): ReactElement {
   const { layout, reports, t, idHint, openReport, onOpen } = props
   const [hot, setHot] = useState<string | undefined>(undefined)
   const fronts = useMemo(() => new Map(reports.map((front) => [front.report, front])), [reports])
+
+  /**
+   * The rows the scroll box is showing.
+   *
+   * The drawing is one tall coordinate space inside a short box, so most of it is
+   * never looked at: at 300 reports, rendering every row meant ~2700 elements and
+   * a repaint per shape on every hover. Only the window is rendered.
+   */
+  const scroller = useRef<HTMLDivElement | null>(null)
+  const [slice, setSlice] = useState(() =>
+    visibleRows(0, ASSUMED_VIEWPORT_PX, layout.rows, { rowHeight: layout.rowHeight }))
+  const pendingFrame = useRef<number | undefined>(undefined)
+
+  const syncWindow = useCallback(() => {
+    const element = scroller.current
+    if (element === null) return
+    const next = visibleRows(element.scrollTop, element.clientHeight, layout.rows, { rowHeight: layout.rowHeight })
+    setSlice((current) => (current.first === next.first && current.last === next.last ? current : next))
+  }, [layout])
+
+  // Measure once mounted, whenever the drawing changes, and whenever the box is
+  // resized (the pane can be dragged).
+  useEffect(() => { syncWindow() }, [syncWindow])
+  useEffect(() => {
+    const element = scroller.current
+    if (element === null || typeof ResizeObserver === 'undefined') return undefined
+    const observer = new ResizeObserver(() => { syncWindow() })
+    observer.observe(element)
+    return () => { observer.disconnect() }
+  }, [syncWindow])
+  // Scrolling is throttled to a frame: a scroll event can fire far more often
+  // than the browser paints, and each one would otherwise re-render the window.
+  const onScroll = useCallback(() => {
+    if (pendingFrame.current !== undefined) return
+    pendingFrame.current = globalThis.requestAnimationFrame(() => {
+      pendingFrame.current = undefined
+      syncWindow()
+    })
+  }, [syncWindow])
+  useEffect(() => () => {
+    if (pendingFrame.current !== undefined) globalThis.cancelAnimationFrame(pendingFrame.current)
+  }, [])
+
+  /** Whether a row range intersects the window. */
+  const inWindow = useCallback(
+    (first: number, last: number): boolean => first <= slice.last && last >= slice.first,
+    [slice],
+  )
+
+  const shownNodes = useMemo(
+    () => layout.nodes.filter((node) => inWindow(node.row, node.row)),
+    [layout, inWindow],
+  )
+  const shownEdges = useMemo(
+    () => layout.edges.filter((edge) => {
+      const span = edgeRowSpan(edge, { rowHeight: layout.rowHeight })
+      return inWindow(span.first, span.last)
+    }),
+    [layout, inWindow],
+  )
+
   /**
    * All edges of one kind concatenated into a single path.
    *
@@ -236,9 +309,9 @@ export function TopologyView(props: TopologyViewProps): ReactElement {
   const mergedEdges = useMemo(
     () => EDGE_KINDS.map((kind) => ({
       kind,
-      d: layout.edges.filter((edge) => edge.kind === kind).map((edge) => edgeGeometry(edge).path).join(' '),
+      d: shownEdges.filter((edge) => edge.kind === kind).map((edge) => edgeGeometry(edge).path).join(' '),
     })),
-    [layout],
+    [shownEdges],
   )
 
   /** Hover label for one node: what it is, who sent it, where it went. */
@@ -260,7 +333,7 @@ export function TopologyView(props: TopologyViewProps): ReactElement {
    * React reconciles against the same memoised children.
    */
   const clocks = useMemo(
-    () => layout.nodes.map((node) => {
+    () => shownNodes.map((node) => {
       const front = fronts.get(node.report)
       return (
         <div
@@ -273,11 +346,11 @@ export function TopologyView(props: TopologyViewProps): ReactElement {
         </div>
       )
     }),
-    [layout, fronts],
+    [shownNodes, fronts, layout],
   )
 
   const nodes = useMemo(
-    () => layout.nodes.map((node) => (
+    () => shownNodes.map((node) => (
       <div
         key={`node-${node.report}`}
         className="report-ledger-node"
@@ -293,14 +366,15 @@ export function TopologyView(props: TopologyViewProps): ReactElement {
         </Tooltip>
       </div>
     )),
-    [layout, fronts, openReport, nodeHint, onOpen],
+    [shownNodes, fronts, openReport, nodeHint, onOpen],
   )
 
-  /** One row's height, recovered from the drawing box the model gave us. */
-  const rowHeight = layout.rows > 0 ? layout.height / layout.rows : 0
+  /** One row's height, taken from the model rather than re-derived. */
+  const rowHeight = layout.rowHeight
 
   return (
-    <div style={{ width: layout.width, minWidth: '100%' }}>
+    <div ref={scroller} onScroll={onScroll} style={{ maxHeight: VIEWPORT_MAX_HEIGHT, overflow: 'auto' }}>
+      <div style={{ width: layout.width, minWidth: '100%' }}>
       {/* The lane header pins to the top of the scroll box, so the columns stay
           identified while the reader scrolls down the time axis. */}
       <div style={{
@@ -365,10 +439,17 @@ export function TopologyView(props: TopologyViewProps): ReactElement {
           </defs>
 
           {/* Rules first, so edges sit on top of them — and one path each, because
-              three hundred <line>s are three hundred shapes to paint. */}
+              three hundred <line>s are three hundred shapes to paint. Only the
+              window's rows are drawn: the rest cannot be looked at. */}
           <path
             className="report-ledger-rowsep"
-            d={Array.from({ length: layout.rows }, (_, row) => `M 0 ${row * rowHeight} H ${layout.width}`).join(' ')}
+            d={Array.from(
+              { length: Math.max(0, slice.last - slice.first + 1) },
+              (_, offset) => {
+                const row = slice.first + offset
+                return `M 0 ${row * rowHeight} H ${layout.width}`
+              },
+            ).join(' ')}
           />
           <path
             className="report-ledger-rail"
@@ -387,7 +468,7 @@ export function TopologyView(props: TopologyViewProps): ReactElement {
           {/* The hovered report's own path, at full strength, over the dimmed layer. */}
           {hot === undefined ? null : (
             <g>
-              {layout.edges.flatMap((edge, index) => {
+              {shownEdges.flatMap((edge, index) => {
                 if (edge.report !== hot) return []
                 const geometry = edgeGeometry(edge)
                 return [(
@@ -407,7 +488,7 @@ export function TopologyView(props: TopologyViewProps): ReactElement {
             The line style already says 主送 vs 抄送, so permanent labels would
             repeat it on every row; showing them on hover answers the question at
             the moment somebody is actually tracing one path. */}
-        {layout.edges.flatMap((edge, index) => {
+        {shownEdges.flatMap((edge, index) => {
           if (hot === undefined || edge.report !== hot) return []
           const geometry = edgeGeometry(edge)
           return [(
@@ -427,6 +508,7 @@ export function TopologyView(props: TopologyViewProps): ReactElement {
         {/* Nodes, memoised on everything except the hover state: hovering must not
             rebuild three hundred chips, and none of them changes when it does. */}
         {nodes}
+      </div>
       </div>
     </div>
   )

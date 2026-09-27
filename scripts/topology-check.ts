@@ -14,7 +14,7 @@ export {}
  * Run: node scripts/topology-check.ts
  */
 
-const { buildTopology, rowCenter, DEFAULT_TOPOLOGY_OPTIONS } = await import('../src/client/topology-model.ts')
+const { buildTopology, rowCenter, visibleRows, edgeRowSpan, DEFAULT_TOPOLOGY_OPTIONS } = await import('../src/client/topology-model.ts')
 
 const checks: [string, boolean, string][] = []
 const check = (label: string, ok: boolean, detail = ''): void => { checks.push([label, ok, detail]) }
@@ -165,6 +165,56 @@ check('the same input gives byte-identical geometry',
 check('geometry overrides are honoured',
   buildTopology(payload, plotted, { rowHeight: 10 }).height === 40)
 check('the row formula follows the overrides too', rowCenter(2, { rowHeight: 10 }) === 25)
+
+// ---------------------------------------------------------------------------
+// Windowing: which rows a short scroll box is actually showing
+// ---------------------------------------------------------------------------
+// The drawing is one tall coordinate space inside a 46vh box, so rendering every
+// row costs a repaint per shape for rows nobody can look at. These are the
+// numbers the view slices by.
+const atTop = visibleRows(0, 400, 300)
+check('a viewport at the top starts at row 0',
+  atTop.first === 0, JSON.stringify(atTop))
+check('a 400px viewport covers 14 rows plus the overscan',
+  atTop.last === 13 + 4, JSON.stringify(atTop))
+check('a viewport in the middle is padded by the overscan on both sides',
+  // rows 100..109 are the ten a 300px box shows; the window adds four either side
+  visibleRows(30 * 100, 300, 300).first === 96 && visibleRows(30 * 100, 300, 300).last === 113,
+  JSON.stringify(visibleRows(30 * 100, 300, 300)))
+check('the window never runs past the last row',
+  visibleRows(30 * 10000, 400, 300).last === 299, JSON.stringify(visibleRows(30 * 10000, 400, 300)))
+check('the window never starts before the first row',
+  visibleRows(-50, 400, 300).first === 0)
+check('zero overscan gives exactly the visible rows',
+  visibleRows(30 * 10, 300, 300, {}, 0).first === 10 && visibleRows(30 * 10, 300, 300, {}, 0).last === 19,
+  JSON.stringify(visibleRows(30 * 10, 300, 300, {}, 0)))
+check('an empty drawing has an empty window',
+  visibleRows(0, 400, 0).last === -1 && visibleRows(0, 400, 0).first === 0)
+check('a degenerate viewport still yields a window',
+  visibleRows(0, 0, 300).last >= 0 && Number.isFinite(visibleRows(0, 0, 300).first))
+check('the window follows the row height it is given',
+  visibleRows(0, 400, 300, { rowHeight: 10 }, 0).last === 39)
+
+const delivery = buildTopology(payload, [report('R-0020', { from: 'session-peer', to: ['session-root'] })])
+const deliveryEdge = delivery.edges[0]
+check('a delivery occupies exactly its own row',
+  edgeRowSpan(deliveryEdge as never).first === 0 && edgeRowSpan(deliveryEdge as never).last === 0)
+const spanning = buildTopology(payload, [
+  report('R-0021', { from: 'session-root', created: at(4) }),
+  report('R-0022', { from: 'session-peer', parent: 'R-0021', created: at(5) }),
+])
+const span = edgeRowSpan(spanning.edges.find((e) => e.kind === 'thread') as never)
+check('a thread spans from its parent\'s row to its child\'s',
+  span.first === 0 && span.last === 1, JSON.stringify(span))
+// The options must be the ones the LAYOUT was built with: y coordinates only mean
+// rows relative to the row height that produced them.
+const narrow = buildTopology(payload, [
+  report('R-0023', { from: 'session-root', created: at(4) }),
+  report('R-0024', { from: 'session-peer', parent: 'R-0023', created: at(5) }),
+], { rowHeight: 10 })
+const narrowSpan = edgeRowSpan(narrow.edges.find((e) => e.kind === 'thread') as never, { rowHeight: 10 })
+check('the span holds when the drawing uses a different row height',
+  narrowSpan.first === 0 && narrowSpan.last === 1, JSON.stringify(narrowSpan))
 
 let failed = 0
 for (const [label, ok, detail] of checks) {
