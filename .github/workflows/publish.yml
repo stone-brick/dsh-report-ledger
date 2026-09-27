@@ -1,0 +1,73 @@
+name: publish to npm
+
+# 用「可信发布（trusted publishing / OIDC）」发布到 npm：
+# **不需要任何 npm 令牌，也不需要手输一次性验证码**，并自动附带 provenance
+# （构建来源证明，插件市场与用户都看重这个信任信号）。
+#
+# ── 首次启用前必须做的一步（一次性，需要交互式 2FA）──────────────────────────
+#   在 npm 侧为本仓库建立信任关系：
+#
+#     npm trust github dsh-report-ledger \
+#       --file publish.yml \
+#       --repo stone-brick/dsh-report-ledger \
+#       --allow-publish
+#
+#   --file 必须与下面这个工作流文件名完全一致（publish.yml），否则 npm 不会认。
+#   未建立信任关系时，本工作流会在「Publish」这一步认证失败 —— 它只在推 tag 或
+#   手动触发时运行，不影响日常 push。
+#
+# ── 发版流程 ────────────────────────────────────────────────────────────────
+#   pnpm version patch   # 或 minor / major，会同时打 tag
+#   git push origin main --follow-tags
+#   之后 CI 自动发布；Gitee 镜像由 mirror-to-gitee.yml 同步。
+#
+# ── 纪律 ────────────────────────────────────────────────────────────────────
+#   npm 不允许覆盖已发布版本号：version 必须先递增，否则这一步必定失败。
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # OIDC：可信发布与 provenance 的前提，缺它一定失败
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Toolchain versions
+        run: |
+          node --version
+          npm --version   # 可信发布要求 npm >= 11.5.1（Node 24 自带的满足）
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+      # 发布用 npm CLI：可信发布的 OIDC 交换与 provenance 由它负责。
+      # --ignore-scripts 是刻意的：构建已在上一步显式完成，避免 prepare /
+      # prepublishOnly 再各跑一遍（本机 npm publish 会连跑两次构建）。
+      #
+      # 这里刻意**不跑 typecheck**：本仓库的类型来自 DSH profile 的官方包层
+      # （见 README「运行时解析需要 node_modules/@deepseek-ai junction」一节），
+      # CI 里没有这一层；把官方包装成 devDependency 会在工作区复制一份服务注册表，
+      # 反而破坏本地开发时的实例同一性。所以 CI 只跑确定性检查 + 构建。
+      - name: Publish
+        run: npm publish --ignore-scripts --access public

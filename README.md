@@ -377,6 +377,23 @@ dsh --profile demo --dump-config                  # 应出现 `# == dsh-report-l
 
 `dsh plugin add` 会因包声明了 `dsh.bundle` 而**自动**把包名追加进 `dsh.profile.bundles`，用户不需要手改配置。
 
+**CI 发布（可信发布 OIDC）：** `.github/workflows/publish.yml` 负责推 tag 后自动发布——不需要任何 npm 令牌，
+也不需要手输一次性验证码，并自动附带 provenance。**首次启用前要在 npm 侧建立一次信任关系**（需交互式 2FA）：
+
+```sh
+npm trust github dsh-report-ledger --file publish.yml \
+  --repo stone-brick/dsh-report-ledger --allow-publish
+```
+
+`--file` 必须与工作流文件名完全一致。之后发版就是 `pnpm version patch && git push origin main --follow-tags`。
+注意 CI 只跑 `pnpm test` + 构建，**不跑 typecheck**：类型来自 profile 的官方包层（见下文 junction 一节），
+CI 里没有这一层，把官方包装成 devDependency 反而会在工作区复制服务注册表、破坏实例同一性。
+
+首次发布（新包名）只能手工来一次：npm 的**可信发布与暂存发布都要求包已存在**，新包名两者都会 404。
+手动发一次时如果是安全密钥账号，`npm publish` 会打印一个 `https://www.npmjs.com/auth/cli/…` 链接，
+在浏览器里完成认证即可（放行凭据用 `--//registry.npmjs.org/:_authToken=…` 传，别写进 `.npmrc`）。
+
+
 **git 安装与 npm 安装不是一回事**：`add github:<你>/dsh-report-ledger#<sha>`（或 Gitee 地址）拉到的是**源码**，
 靠仓库里的 `prepare` 构建出 `lib/` 才能跑——本仓库实测在 pnpm 10.14 上直接通过、未要求 `allowBuilds`，
 但部分 pnpm 版本会拦截依赖的构建脚本，届时 `dsh` 会打印出要写进 profile 的 `pnpm-workspace.yaml` 的包键。
