@@ -17,10 +17,24 @@
  * @module dsh-report-ledger/client/ReportsView
  */
 
-import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
-import { MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { ReportDetail, TimelinePayload } from '../shared/wire.ts'
+import {
+  Button,
+  IconCheckOutline16,
+  IconChevronDownOutline14,
+  IconChevronRightOutline14,
+  IconCopyOutline16,
+  IconRefreshOutline16,
+  Input,
+  MarkdownText,
+  Pill,
+  StateDot,
+  Tag,
+  Tooltip,
+  writeClipboard,
+} from '@deepseek-ai/dsh-client-ui-primitives'
+import type { ReportDetail, ReportStatus, TimelinePayload } from '../shared/wire.ts'
 import {
   buildRows,
   closeOpenFence,
@@ -39,6 +53,7 @@ import {
   type StatusFilter,
 } from './timeline-model.ts'
 import { HOP_LABEL, STATUS_LABEL, type ReportLedgerKey } from './locales.ts'
+import { SEARCH_CLASS } from './styles.ts'
 
 /** Translate one key, substituting `{name}` placeholders. */
 export type Translate = (key: ReportLedgerKey, params?: Record<string, string | number>) => string
@@ -90,25 +105,33 @@ function stamp(at: number | undefined): string {
   return new Date(at).toLocaleString()
 }
 
-/** Colour a status chip from the theme's state tokens. */
-function statusStyle(status: string): Record<string, string> {
-  if (status === 'acked') {
-    return {
-      color: 'var(--dsw-alias-state-success-label, #1a7f37)',
-      background: 'var(--dsw-alias-state-success-bg, rgba(26,127,55,0.10))',
-    }
-  }
-  if (status === 'closed') {
-    return {
-      color: 'var(--dsw-alias-label-tertiary, #888)',
-      background: 'var(--dsw-alias-bg-layer-2, rgba(0,0,0,0.04))',
-    }
-  }
-  return {
-    color: 'var(--dsw-alias-state-warn-label, #9a6700)',
-    background: 'var(--dsw-alias-state-warn-bg, rgba(154,103,0,0.10))',
-  }
+/**
+ * Lifecycle state → the shell's chip tone.
+ *
+ * Colour-coded status is the point of the chip, and the shell's palette already
+ * has the three tones this needs — so the states ride `Tag` instead of a
+ * hand-mixed background. `open` reads as the one that wants attention.
+ */
+const STATUS_TONE: Record<ReportStatus, 'warning' | 'success' | 'neutral'> = {
+  open: 'warning',
+  acked: 'success',
+  closed: 'neutral',
 }
+
+/** Lifecycle state → the shell's state dot. `ongoing` is the animated one. */
+const STATUS_DOT: Record<ReportStatus, 'ongoing' | 'done' | 'idle'> = {
+  open: 'ongoing',
+  acked: 'done',
+  closed: 'idle',
+}
+
+/**
+ * How long the copy control keeps its "copied" label.
+ *
+ * The chat view uses the same one-second acknowledgement through the same
+ * `writeClipboard`, so a copy here feels like a copy there.
+ */
+const COPIED_HOLD_MS = 1000
 
 /** Storage key for the remembered status filter. */
 const FILTER_KEY = 'dsh.reportLedger.filter.v1'
@@ -148,6 +171,12 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
   const [status, setStatus] = useState<StatusFilter>(rememberedStatus)
   const [text, setText] = useState('')
   const [basis, setBasis] = useState<ReportTimeBasis>('created')
+  const [copiedPath, setCopiedPath] = useState(false)
+  const copyTimer = useRef<ReturnType<typeof globalThis.setTimeout> | undefined>(undefined)
+
+  useEffect(() => () => {
+    if (copyTimer.current !== undefined) globalThis.clearTimeout(copyTimer.current)
+  }, [])
 
   useEffect(() => {
     try {
@@ -262,11 +291,30 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
    * and the session title on hover. The hover is not decoration — it is where
    * the human name lives, because titles are unbounded and a row is not.
    */
-  const idRef = (id: string): ReactElement => <span title={idHint(id)}>{shortId(id)}</span>
+  const idRef = (id: string): ReactElement => (
+    <Tooltip label={idHint(id)} side="bottom" delayMs={400}>
+      <span>{shortId(id)}</span>
+    </Tooltip>
+  )
 
   const refresh = useCallback(() => {
     setTimelineNonce((value) => value + 1)
     setDetailNonce((value) => value + 1)
+  }, [])
+
+  /**
+   * Copy the ledger path, acknowledging through the control's own label.
+   *
+   * Uses the shell's `writeClipboard` rather than `navigator.clipboard`, so the
+   * plugin inherits whatever fallback chain the rest of the GUI relies on.
+   */
+  const copyPath = useCallback((path: string) => {
+    void writeClipboard(path).then((ok) => {
+      if (!ok) return
+      setCopiedPath(true)
+      if (copyTimer.current !== undefined) globalThis.clearTimeout(copyTimer.current)
+      copyTimer.current = globalThis.setTimeout(() => { setCopiedPath(false) }, COPIED_HOLD_MS)
+    })
   }, [])
 
   const shell: Record<string, string | number> = {
@@ -287,30 +335,35 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
     fontSize: 'var(--dsw-font-xxs-12, 12)',
     flex: '1 1 auto',
   }
-  const button: Record<string, string | number> = {
-    font: 'inherit',
-    color: 'var(--dsw-alias-label-secondary, inherit)',
-    background: 'var(--dsw-alias-bg-layer-2, transparent)',
-    border: '1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.12))',
-    borderRadius: '6px',
-    padding: '3px 10px',
-    cursor: 'pointer',
+  /**
+   * The toolbar's search seat.
+   *
+   * `Input` renders its own wrapper around the field, so the flex sizing lives
+   * on this outer box rather than on the control itself.
+   */
+  const searchBox: Record<string, string | number> = {
+    flex: '1 1 200px',
+    minWidth: '140px',
+    display: 'flex',
   }
-  const chip = (extra: Record<string, string>): Record<string, string | number> => ({
-    display: 'inline-block',
-    padding: '0 6px',
-    borderRadius: '999px',
-    fontSize: 'var(--dsw-font-xxxs-11, 11)',
-    lineHeight: '17px',
-    marginRight: '6px',
-    ...extra,
-  })
   const tools: Record<string, string | number> = {
     display: 'flex',
     alignItems: 'center',
     flexWrap: 'wrap',
     gap: '6px',
     marginBottom: '10px',
+  }
+  /** Chips sit next to a label; the shell's tags carry no spacing of their own. */
+  const tagRow: Record<string, string | number> = {
+    display: 'inline-flex',
+    gap: '4px',
+    marginRight: '6px',
+    verticalAlign: 'baseline',
+  }
+  /** Keeps the state dot on the row's text baseline. */
+  const dotCell: Record<string, string | number> = {
+    display: 'inline-flex',
+    alignItems: 'center',
   }
   const time: Record<string, string | number> = {
     color: 'var(--dsw-alias-label-caption, #999)',
@@ -345,24 +398,24 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
     border: '1px solid var(--dsw-alias-border-l1, rgba(0,0,0,0.06))',
     borderRadius: '4px',
   }
-  /** The disclosure triangle: a real button that has to look like a glyph. */
-  const arrow: Record<string, string | number> = {
-    font: 'inherit',
-    color: 'var(--dsw-alias-label-tertiary, #999)',
-    background: 'none',
-    border: 0,
-    padding: 0,
-    margin: 0,
-    lineHeight: 'inherit',
-    cursor: 'pointer',
+  /** The transcript's footer line: ledger path plus its copy control. */
+  const pathRow: Record<string, string | number> = {
+    ...wrap,
+    marginTop: '6px',
+    display: 'flex',
+    alignItems: 'baseline',
+    gap: '6px',
   }
 
   if (error !== undefined) {
     return (
       <div style={shell}>
-        <div style={{ color: 'var(--dsw-alias-state-error-label, #b00)' }}>{t('view.error', { code: error })}</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+          <StateDot state="error" size={8} />
+          <span>{t('view.error', { code: error })}</span>
+        </div>
         <div style={{ marginTop: '8px' }}>
-          <button type="button" style={button} onClick={refresh}>{t('view.retry')}</button>
+          <Button variant="outline" onClick={refresh}>{t('view.retry')}</Button>
         </div>
       </div>
     )
@@ -385,16 +438,6 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
     closed: counts.closed,
   }
   const chips: StatusFilter[] = ['all', 'open', 'acked', 'closed']
-  const searchInput: Record<string, string | number> = {
-    flex: '1 1 200px',
-    minWidth: '140px',
-    padding: '3px 8px',
-    font: 'inherit',
-    color: 'var(--dsw-alias-label-primary, inherit)',
-    background: 'var(--dsw-alias-bg-base, rgba(0,0,0,0.02))',
-    border: '1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.12))',
-    borderRadius: '6px',
-  }
 
   return (
     <div style={shell}>
@@ -405,58 +448,38 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
             ? t('filter.showing', { visible: visibleReportCount, total: counts.all })
             : t('view.summary', { sessions: payload.sessions.length, reports: payload.reports.length })}
         </span>
-        <button type="button" style={button} onClick={refresh}>{t('view.refresh')}</button>
+        <Button variant="outline" icon={<IconRefreshOutline16 />} onClick={refresh}>{t('view.refresh')}</Button>
       </div>
 
       <div style={tools} title={t('filter.hint')}>
-        {chips.map((candidate) => {
-          const active = status === candidate
-          return (
-            <button
-              key={candidate}
-              type="button"
-              aria-pressed={active}
-              onClick={() => { setStatus(candidate) }}
-              style={{
-                ...button,
-                ...(active
-                  ? {
-                    color: 'var(--dsw-alias-label-primary, inherit)',
-                    background: 'var(--dsw-alias-interactive-bg-active, rgba(0,0,0,0.08))',
-                    borderColor: 'var(--dsw-alias-border-l3, rgba(0,0,0,0.20))',
-                  }
-                  : {}),
-              }}
-            >
-              {`${t(statusLabel[candidate])} ${statusCount[candidate]}`}
-            </button>
-          )
-        })}
-        <input
-          type="search"
-          value={text}
-          placeholder={t('filter.search')}
-          aria-label={t('filter.search')}
-          onChange={(event) => { setText(event.target.value) }}
-          style={searchInput}
-        />
-        {filtering ? (
-          <button
-            type="button"
-            style={button}
-            onClick={() => { setStatus('all'); setText('') }}
+        {chips.map((candidate) => (
+          <Pill
+            key={candidate}
+            active={status === candidate}
+            aria-pressed={status === candidate}
+            onClick={() => { setStatus(candidate) }}
           >
-            {t('filter.clear')}
-          </button>
+            {`${t(statusLabel[candidate])} ${statusCount[candidate]}`}
+          </Pill>
+        ))}
+        <div style={searchBox}>
+          <Input
+            type="search"
+            className={SEARCH_CLASS}
+            value={text}
+            placeholder={t('filter.search')}
+            aria-label={t('filter.search')}
+            onChange={(event) => { setText(event.target.value) }}
+          />
+        </div>
+        {filtering ? (
+          <Button variant="outline" onClick={() => { setStatus('all'); setText('') }}>{t('filter.clear')}</Button>
         ) : null}
-        <button
-          type="button"
-          style={button}
-          title={t('basis.hint')}
-          onClick={() => { setBasis(basis === 'created' ? 'updated' : 'created') }}
-        >
-          {t(basis === 'created' ? 'basis.created' : 'basis.updated')}
-        </button>
+        <Tooltip label={t('basis.hint')} side="bottom" delayMs={400}>
+          <Button variant="outline" onClick={() => { setBasis(basis === 'created' ? 'updated' : 'created') }}>
+            {t(basis === 'created' ? 'basis.created' : 'basis.updated')}
+          </Button>
+        </Tooltip>
       </div>
 
       {empty === 'no-reports' ? <div style={muted}>{t('view.empty')}</div> : null}
@@ -467,16 +490,28 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
         if (row.kind === 'session') {
           return (
             <div key={`s-${row.id}-${index}`} style={{ display: 'flex', gap: '8px', padding: `4px 0 4px ${pad}px`, alignItems: 'baseline' }}>
-              <span style={{ color: 'var(--dsw-alias-label-tertiary, #999)' }}>●</span>
-              <span style={{ flex: '1 1 auto', minWidth: 0 }} title={row.id}>
-                {row.delegated ? <span style={chip({ color: 'var(--dsw-alias-state-business-label, #0969da)', background: 'var(--dsw-alias-state-business-bg, rgba(9,105,218,0.10))' })}>{t('view.delegated')}</span> : null}
-                {row.live ? <span style={chip({ color: 'var(--dsw-alias-state-success-label, #1a7f37)', background: 'var(--dsw-alias-state-success-bg, rgba(26,127,55,0.10))' })}>{t('view.live')}</span> : null}
+              {/* The shell's state dot, not a text bullet: `ongoing` is the
+                  animated one, so a resident session reads as alive at a glance. */}
+              <Tooltip label={idHint(row.id)} side="bottom" delayMs={400}>
+                <span style={dotCell}><StateDot state={row.live ? 'ongoing' : 'idle'} size={8} /></span>
+              </Tooltip>
+              <span style={{ flex: '1 1 auto', minWidth: 0 }}>
+                {row.delegated || row.live ? (
+                  <span style={tagRow}>
+                    {row.delegated ? <Tag tone="info">{t('view.delegated')}</Tag> : null}
+                    {row.live ? <Tag tone="success">{t('view.live')}</Tag> : null}
+                  </span>
+                ) : null}
                 {row.title ?? shortId(row.id)}
               </span>
               {/* The session's own short id, so a digest row's `from=`/`to=` can be
                   read back to the tree it belongs to. Titles stay the prominent
                   label — this is the cross-reference, not the identity. */}
-              {row.title === undefined ? null : <span style={time} title={row.id}>{shortId(row.id)}</span>}
+              {row.title === undefined ? null : (
+                <Tooltip label={row.id} side="left" delayMs={400}>
+                  <span style={time}>{shortId(row.id)}</span>
+                </Tooltip>
+              )}
               <span style={time}>{stamp(row.at)}</span>
             </div>
           )
@@ -493,12 +528,12 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
                 its accessible name from its whole subtree, so a screen reader
                 read out a line of session uuids and then the task label twice,
                 once inside the row's own name.
-                The disclosure now lives on the arrow: a real button whose name
-                says what it does and whose `aria-controls` points at the panel it
-                opens. Clicking anywhere on the row stays as the pointer
-                convenience, which is why the container keeps a click handler
-                with no role: the keyboard path is the button, and the pointer
-                path is the row. */}
+                The disclosure now lives on the leading control: the shell's own
+                Button, whose name says what it does and whose `aria-controls`
+                points at the panel it opens. Clicking anywhere on the row stays
+                as the pointer convenience, which is why the container keeps a
+                click handler with no role: the keyboard path is the button, and
+                the pointer path is the row. */}
             <div
               onClick={() => { setOpenReport(expanded ? undefined : front.report) }}
               style={{
@@ -513,8 +548,10 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
                 border: '1px solid var(--dsw-alias-border-l1, rgba(0,0,0,0.06))',
               }}
             >
-              <button
-                type="button"
+              <Button
+                variant="ghost"
+                size="sm"
+                icon={expanded ? <IconChevronDownOutline14 /> : <IconChevronRightOutline14 />}
                 aria-expanded={expanded}
                 aria-controls={panelId}
                 aria-label={toggleLabel}
@@ -525,12 +562,9 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
                   event.stopPropagation()
                   setOpenReport(expanded ? undefined : front.report)
                 }}
-                style={arrow}
-              >
-                {expanded ? '▾' : '▸'}
-              </button>
+              />
               <span style={{ flex: '1 1 auto', minWidth: 0 }}>
-                <span style={chip(statusStyle(front.status))}>{t(STATUS_LABEL[front.status])}</span>
+                <span style={tagRow}><Tag tone={STATUS_TONE[front.status]}>{t(STATUS_LABEL[front.status])}</Tag></span>
                 <strong>{front.report}</strong> {front.subject}
                 {/* The task chip is a filter shortcut, not decoration: clicking it
                     reuses the search box, so grouping by collaboration needs no
@@ -539,26 +573,16 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
                     promises "show only this task", which stops being true the
                     moment a status chip is also narrowing the list. */}
                 {front.task === undefined ? null : (
-                  <button
-                    type="button"
+                  <Pill
                     title={fill(t('row.filterByTask'), { task: front.task })}
                     onClick={(event) => {
                       event.stopPropagation()
                       setStatus('all')
                       setText(front.task as string)
                     }}
-                    style={{
-                      ...chip({
-                        color: 'var(--dsw-alias-state-business-label, #0969da)',
-                        background: 'var(--dsw-alias-state-business-bg, rgba(9,105,218,0.10))',
-                      }),
-                      border: 0,
-                      cursor: 'pointer',
-                      font: 'inherit',
-                    }}
                   >
                     {front.task}
-                  </button>
+                  </Pill>
                 )}
                 {/* One line per report is the point of the digest, so the meta
                     line is clipped rather than wrapped: a single over-connected
@@ -613,15 +637,18 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
                           <Fragment key={`h-${hopIndex}`}>
                             <span style={time}>{stamp(hop.at)}</span>
                             <span><strong>{t(HOP_LABEL[hop.action])}</strong></span>
-                            <span style={wrap} title={idHint(hop.actor)}>{hop.actor}</span>
+                            <span style={wrap}><Tooltip label={idHint(hop.actor)} side="bottom" delayMs={400}><span>{hop.actor}</span></Tooltip></span>
                             <span style={wrap}>{hop.to.length === 0 ? (hop.note ?? '') : `→ ${hop.to.join(', ')}${hop.note === undefined ? '' : ` (${hop.note})`}`}</span>
                           </Fragment>
                         ))}
                       </div>
                     )}
+                    {/* "Still owed" is a state, so it gets the shell's state dot
+                        instead of a colour mixed by hand. */}
                     {detail.pending.length === 0 ? null : (
-                      <div style={{ ...wrap, color: 'var(--dsw-alias-state-warn-label, #9a6700)' }}>
-                        {fill(t('view.detail.pending'), { targets: detail.pending.join(', ') })}
+                      <div style={{ ...wrap, display: 'flex', alignItems: 'baseline', gap: '6px' }}>
+                        <StateDot state="warning" size={8} />
+                        <span>{fill(t('view.detail.pending'), { targets: detail.pending.join(', ') })}</span>
                       </div>
                     )}
 
@@ -630,15 +657,17 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
                       const children = detail.front.children
                       if (parent === undefined && children.length === 0) return null
                       const link = (target: string): ReactElement => (
-                        <button
-                          key={target}
-                          type="button"
-                          title={fill(t('detail.openLinked'), { report: target })}
-                          onClick={() => { setOpenReport(target) }}
-                          style={{ ...button, marginRight: '6px', font: 'var(--dsw-font-xxxs-11, 11px/1.4 ui-monospace, monospace)' }}
-                        >
-                          {target}
-                        </button>
+                        <span key={target} style={{ marginRight: '6px' }}>
+                          <Tooltip label={fill(t('detail.openLinked'), { report: target })} side="bottom" delayMs={400}>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => { setOpenReport(target) }}
+                            >
+                              {target}
+                            </Button>
+                          </Tooltip>
+                        </span>
                       )
                       return (
                         <div style={{ marginBottom: '8px' }}>
@@ -664,9 +693,9 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
                       <div style={{ ...wrap, marginBottom: '8px' }}>
                         {fill(t('detail.outside'), { report: detail.front.report })}
                         {' '}
-                        <button type="button" style={button} onClick={() => { setOpenReport(undefined) }}>
+                        <Button variant="outline" onClick={() => { setOpenReport(undefined) }}>
                           {t('detail.backToList')}
-                        </button>
+                        </Button>
                       </div>
                     )}
                     {inList.has(detail.front.report) && !filteredReportIds.has(detail.front.report) ? (
@@ -694,8 +723,22 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
                     ) : null}
                     {/* The ledger path is the longest string on the panel and the
                         only one that carries no spaces to break at, so it wraps
-                        mid-segment on purpose. */}
-                    <div style={{ ...wrap, marginTop: '6px', wordBreak: 'break-all' }}>{t('view.detail.path')}: {detail.path}</div>
+                        mid-segment on purpose — and it now has a copy control,
+                        because "see the file" is only useful if you can get there.
+                        The copy goes through the shell's own `writeClipboard`. */}
+                    <div style={pathRow}>
+                      <StateDot state="idle" size={6} />
+                      <span style={{ wordBreak: 'break-all' }}>{t('view.detail.path')}: {detail.path}</span>
+                      <Tooltip label={copiedPath ? t('body.copied') : t('view.copyPath')} side="bottom" delayMs={300}>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          icon={copiedPath ? <IconCheckOutline16 /> : <IconCopyOutline16 />}
+                          aria-label={copiedPath ? t('body.copied') : t('view.copyPath')}
+                          onClick={() => { copyPath(detail.path) }}
+                        />
+                      </Tooltip>
+                    </div>
                   </>
                 )}
               </div>

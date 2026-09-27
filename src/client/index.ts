@@ -17,6 +17,7 @@
 import { createElement } from 'react'
 import { ReportsView, type Translate } from './ReportsView.tsx'
 import { en, zh } from './locales.ts'
+import { installStyles } from './styles.ts'
 
 /** Locale namespace this plugin owns. */
 const NS = 'report-ledger'
@@ -64,6 +65,10 @@ export const inject = ['slots', 'locale']
  */
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'report-ledger: dictionaries')
+
+  // Layout helpers the shell cannot know about — see client/styles.ts. Registered
+  // as an effect so cordis_stop/undefine takes the sheet down with the plugin.
+  ctx.effect(() => installStyles(), 'report-ledger: adapter styles')
 
   const t = ctx.locale.bind(NS)
 
