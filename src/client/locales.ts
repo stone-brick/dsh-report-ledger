@@ -8,6 +8,8 @@
  * @module dsh-report-ledger/client/locales
  */
 
+import type { HopAction, ReportStatus } from '../shared/wire.ts'
+
 /** Chinese dictionary — the source of truth for the key set. */
 export const zh = {
   'view.tab': '汇报',
@@ -29,6 +31,21 @@ export const zh = {
   'row.hops': '{count} 跳',
   'row.authors': '{count} 位共写',
   'row.filterByTask': '只看任务「{task}」',
+  'row.expand': '展开 {report}',
+  'row.collapse': '收起 {report}',
+  'row.last': '最后',
+  'hop.authored': '发起',
+  'hop.contributed': '共写',
+  'hop.sent': '主送',
+  'hop.delivered': '送达',
+  'hop.cc': '抄送',
+  'hop.forwarded': '转呈',
+  'hop.copied': '副本',
+  'hop.read': '阅读',
+  'hop.acked': '回执',
+  'hop.amended': '修正',
+  'hop.closed': '结案',
+  'hop.reopened': '重开',
   'filter.all': '全部',
   'filter.open': '进行中',
   'filter.acked': '已回执',
@@ -49,6 +66,9 @@ export const zh = {
   'detail.filteredOut': '{report} 在当前筛选下被隐藏了（用「清除」恢复）。',
   'detail.backToList': '回到列表',
   'detail.bodyTruncated': '正文过长，此处只显示开头 {chars} 字；完整内容见账本文件。',
+  'body.copy': '复制',
+  'body.copied': '已复制',
+  'body.footnotes': '脚注',
 } as const
 
 /** English dictionary, checked against the Chinese key set. */
@@ -72,6 +92,21 @@ export const en: Record<keyof typeof zh, string> = {
   'row.hops': '{count} hops',
   'row.authors': '{count} authors',
   'row.filterByTask': 'Show only task "{task}"',
+  'row.expand': 'Expand {report}',
+  'row.collapse': 'Collapse {report}',
+  'row.last': 'last',
+  'hop.authored': 'authored',
+  'hop.contributed': 'contributed',
+  'hop.sent': 'sent',
+  'hop.delivered': 'delivered',
+  'hop.cc': 'cc',
+  'hop.forwarded': 'forwarded',
+  'hop.copied': 'copied',
+  'hop.read': 'read',
+  'hop.acked': 'acked',
+  'hop.amended': 'amended',
+  'hop.closed': 'closed',
+  'hop.reopened': 'reopened',
   'filter.all': 'All',
   'filter.open': 'Open',
   'filter.acked': 'Acked',
@@ -92,7 +127,47 @@ export const en: Record<keyof typeof zh, string> = {
   'detail.filteredOut': '{report} is hidden by the current filter (use Clear to restore it).',
   'detail.backToList': 'Back to the list',
   'detail.bodyTruncated': 'Body is long, so only the first {chars} characters are shown here; the ledger file has the whole thing.',
+  'body.copy': 'Copy',
+  'body.copied': 'Copied',
+  'body.footnotes': 'Footnotes',
 }
 
 /** Every key the view may translate. */
 export type ReportLedgerKey = keyof typeof zh
+
+/**
+ * Lifecycle state → dictionary key.
+ *
+ * Deliberately the SAME keys the toolbar's filter chips use. A card's status
+ * chip and the filter that selects it name one state, so giving them two
+ * vocabularies (raw `open` on the card, 进行中 in the toolbar) made the reader
+ * build the mapping themselves — and the mapping was the bug, not the words.
+ */
+export const STATUS_LABEL: Record<ReportStatus, ReportLedgerKey> = {
+  open: 'filter.open',
+  acked: 'filter.acked',
+  closed: 'filter.closed',
+}
+
+/**
+ * Transfer-path hop action → dictionary key.
+ *
+ * These are ledger vocabulary: the model and the ledger files keep the raw
+ * tokens (`authored`, `delivered`, …), and only the human view speaks a
+ * language. Keyed by the full action union so a new hop action cannot ship
+ * without a word for it.
+ */
+export const HOP_LABEL: Record<HopAction, ReportLedgerKey> = {
+  authored: 'hop.authored',
+  contributed: 'hop.contributed',
+  sent: 'hop.sent',
+  delivered: 'hop.delivered',
+  cc: 'hop.cc',
+  forwarded: 'hop.forwarded',
+  copied: 'hop.copied',
+  read: 'hop.read',
+  acked: 'hop.acked',
+  amended: 'hop.amended',
+  closed: 'hop.closed',
+  reopened: 'hop.reopened',
+}

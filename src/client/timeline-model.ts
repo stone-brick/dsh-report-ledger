@@ -44,6 +44,22 @@ export interface RowFilter {
 }
 
 /**
+ * The timeline's ordering: by time, and at the same instant a session before a
+ * report.
+ *
+ * Extracted so that INSERTING a row uses the same rule as SORTING rows — two
+ * copies would drift, and the synthesized row would land somewhere the sort
+ * disagrees with.
+ * @param left - one row.
+ * @param right - the other row.
+ * @returns the comparison result.
+ */
+function byTime(left: Row, right: Row): number {
+  return left.at - right.at
+    || (left.kind === right.kind ? 0 : left.kind === 'session' ? -1 : 1)
+}
+
+/**
  * Build the merged, time-ordered row list.
  *
  * Sessions are placed at their creation time and reports at theirs, so the list
@@ -78,9 +94,81 @@ export function buildRows(payload: TimelinePayload, basis: ReportTimeBasis = 'cr
       front,
     })
   }
-  rows.sort((left, right) => left.at - right.at
-    || (left.kind === right.kind ? 0 : left.kind === 'session' ? -1 : 1))
+  rows.sort(byTime)
   return rows
+}
+
+/** How many characters of a session id a dense row shows. */
+export const SHORT_ID_LENGTH = 8
+
+/**
+ * Shorten a session id so a digest row can be read.
+ *
+ * A session id is 36 characters and a report's recipients are a list of them, so
+ * an unabbreviated meta line is mostly uuid and carries almost no information a
+ * human can use. Eight characters of the leading segment stay unique within one
+ * collaboration and, unlike a session title, are bounded: titles are the first
+ * prompt of a session ("You are doing READ-ONLY research"), so swapping ids for
+ * titles trades one unreadable line for another.
+ *
+ * This is a DENSE-ROW display only. The detail panel keeps full ids, because
+ * that is the view somebody copies an id out of, and the tooltip on every
+ * shortened id carries the full value.
+ * @param id - the session id.
+ * @param length - how many characters to keep.
+ * @returns the shortened id.
+ */
+export function shortId(id: string, length: number = SHORT_ID_LENGTH): string {
+  const bare = id.startsWith('session-') ? id.slice('session-'.length) : id
+  return bare.length <= length ? bare : bare.slice(0, length)
+}
+
+/**
+ * Display titles for the sessions in one payload, keyed by session id.
+ *
+ * Titles are resolved only for the subtree, so an id from another tree simply
+ * has none — which is why every caller must fall back to the shortened id
+ * rather than assuming a name exists.
+ * @param payload - the endpoint payload.
+ * @returns the titles that were resolved.
+ */
+export function sessionTitles(payload: TimelinePayload): Map<string, string> {
+  const titles = new Map<string, string>()
+  for (const node of payload.sessions) {
+    if (typeof node.title === 'string' && node.title !== '') titles.set(node.id, node.title)
+  }
+  return titles
+}
+
+/**
+ * Make sure the open report has a row, and put it where it belongs.
+ *
+ * The detail panel is anchored to a report row, so the open report must HAVE
+ * one. Two real user paths would otherwise leave the panel with nowhere to
+ * render: a thread link pointing at a report outside this tree's payload, and
+ * any filter applied while a report is open. In the first case the panel is also
+ * the only place the "not in this tree" notice can appear, so the panel is not
+ * hoisted out of the list — a row is synthesized instead.
+ *
+ * The synthesized row is INSERTED at its own place on the time axis rather than
+ * appended. Appending made a report created at 11:12 appear below one created at
+ * 14:30, which reads as a broken sort at exactly the moment the user is trying
+ * to understand why something is missing.
+ * @param kept - the rows that survived the filter.
+ * @param front - the digest of the open report.
+ * @param basis - the active time basis, so the row moves with the rest.
+ * @returns the rows, with the open report present exactly once.
+ */
+export function withSynthesizedRow(
+  kept: readonly Row[],
+  front: ReportFrontMatter,
+  basis: ReportTimeBasis = 'created',
+): Row[] {
+  if (kept.some((row) => row.kind === 'report' && row.front.report === front.report)) return [...kept]
+  const row: Row = { kind: 'report', at: basis === 'created' ? front.created : front.updated, depth: 0, front }
+  const index = kept.findIndex((candidate) => byTime(row, candidate) < 0)
+  if (index < 0) return [...kept, row]
+  return [...kept.slice(0, index), row, ...kept.slice(index)]
 }
 
 /** Every string a report row can be found by. */
@@ -181,6 +269,36 @@ export function visibleReports(rows: readonly Row[], filter: RowFilter): number 
   return count
 }
 
+/** Which "there is nothing here to show" message a payload and filter call for. */
+export type EmptyState = 'none' | 'no-reports' | 'filtered-out'
+
+/**
+ * Decide which empty-state message applies.
+ *
+ * An empty ledger and a filter that matched nothing look identical on screen but
+ * mean opposite things: one says "nothing has happened in this tree yet", the
+ * other says "you are looking at a subset of what happened". Saying the wrong
+ * one makes a working ledger look broken, so the choice is made here — where it
+ * is pinned by tests — rather than inline in the view.
+ *
+ * Counted on REPORT rows only. Session rows always survive a status chip, so
+ * counting them would let a tree full of sessions report itself as "you have
+ * filtered everything out" while the actual reason is that no report exists.
+ *
+ * The `no-reports` case deliberately wins over the filter: when the ledger holds
+ * nothing, a filter cannot be the reason nothing is on screen, and blaming it
+ * would send the reader looking for a filter to clear that they never set.
+ * @param payload - the endpoint payload.
+ * @param rows - every assembled row.
+ * @param filter - the active filter.
+ * @returns which message the view should show, if any.
+ */
+export function emptyState(payload: TimelinePayload, rows: readonly Row[], filter: RowFilter): EmptyState {
+  if (payload.reports.length === 0) return 'no-reports'
+  if (!isFiltering(filter)) return 'none'
+  return visibleReports(rows, filter) === 0 ? 'filtered-out' : 'none'
+}
+
 /**
  * The report ids present in one payload.
  *
@@ -222,4 +340,35 @@ export function displayBody(
 ): { readonly text: string; readonly truncated: boolean } {
   if (body.length <= limit) return { text: body, truncated: false }
   return { text: body.slice(0, head), truncated: true }
+}
+
+/**
+ * Close a code fence left hanging by truncation.
+ *
+ * Cutting Markdown at a character count is not the same operation as cutting
+ * plain text: the result can be a document that does not parse as written. The
+ * one construct that changes the meaning of everything after it is a code fence,
+ * so a body cut inside a fenced block hands the renderer an unterminated one and
+ * leaves it to decide where the block ends.
+ *
+ * The renderer here does cope (measured: a body cut mid-fence renders as one
+ * closed code block with no trailing artifact), which is exactly why this is
+ * cheap insurance rather than a fix for something visibly broken: the renderer is
+ * a shell platform module this plugin does not own, and its leniency is not a
+ * contract. Balancing the document costs one line and makes the plugin's output
+ * valid Markdown no matter who renders it.
+ *
+ * Balanced text is returned untouched, so this only ever adds the fence the cut
+ * removed. Only backtick fences are counted; `~~~` fences are rare enough in
+ * report bodies that guessing which convention the author used would be worse
+ * than leaving them alone.
+ * @param text - the already-truncated head.
+ * @returns the head, with an unclosed fence closed.
+ */
+export function closeOpenFence(text: string): string {
+  let open = false
+  for (const line of text.split('\n')) {
+    if (line.trimStart().startsWith('```')) open = !open
+  }
+  return open ? `${text}\n\`\`\`` : text
 }

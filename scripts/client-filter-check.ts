@@ -14,7 +14,7 @@ export {}
  * Run: node scripts/client-filter-check.ts
  */
 
-const { buildRows, filterRows, isFiltering, statusCounts, visibleReports, rowMatches } =
+const { buildRows, filterRows, isFiltering, statusCounts, visibleReports, rowMatches, emptyState, shortId, sessionTitles, withSynthesizedRow } =
   await import('../src/client/timeline-model.ts')
 
 const checks: [string, boolean, string][] = []
@@ -149,9 +149,83 @@ check('rowMatches agrees with filterRows',
   rows.every((row) => rowMatches(row, agreementFilter) === (filterRows([row], agreementFilter).length === 1)))
 
 // ---------------------------------------------------------------------------
+// The two empty states
+// ---------------------------------------------------------------------------
+// "Nothing has happened here yet" and "your filter matched nothing" look
+// identical on screen and mean opposite things, so which one applies is a
+// decision rather than a rendering detail — and getting it wrong makes a
+// working ledger look broken. The bug this pins: the ledger-empty sentence was
+// keyed off an empty ROW list, which cannot happen (a tree always has at least
+// its own session row), so in practice it never appeared and an empty ledger
+// rendered as unexplained blank space.
+const bare = {
+  root: 'session-root',
+  generatedAt: at(99),
+  sessions: payload.sessions,
+  reports: [],
+} as unknown as Parameters<typeof buildRows>[0]
+
+check('a tree with no reports asks for the ledger-empty sentence',
+  emptyState(bare, buildRows(bare), { status: 'all', text: '' }) === 'no-reports')
+check('a tree with no reports does not blame the filter',
+  emptyState(bare, buildRows(bare), { status: 'closed', text: 'nothing' }) === 'no-reports')
+check('an unfiltered tree with reports asks for no message',
+  emptyState(payload, rows, { status: 'all', text: '' }) === 'none')
+check('a filter matching some report asks for no message',
+  emptyState(payload, rows, { status: 'open', text: '' }) === 'none')
+const filteredOut = emptyState(payload, rows, { status: 'closed', text: 'payments' })
+check('a filter matching no report asks for the filtered sentence', filteredOut === 'filtered-out', filteredOut)
+// Session rows survive a status chip by design, so counting every visible row
+// would let a tree full of sessions claim "you filtered everything out" while
+// the real reason is that no report matches.
+check('session rows alone cannot satisfy the filter',
+  emptyState(payload, rows, { status: 'all', text: 'grand session' }) === 'filtered-out')
+check('a payload with neither sessions nor reports asks for the ledger-empty sentence',
+  emptyState({ root: 'x', generatedAt: 0, sessions: [], reports: [] } as never, [], { status: 'all', text: '' }) === 'no-reports')
+
+// ---------------------------------------------------------------------------
+// Dense-row identity: shortened ids
+// ---------------------------------------------------------------------------
+// A report row is a list of session uuids unless they are cut down, and a
+// session TITLE is not a substitute: it is the session's first prompt, so it is
+// unbounded and sometimes longer than the id it replaces.
+check('a session- prefixed id shortens to its leading segment',
+  shortId('session-afcbce3a-93d0-49b6-b465-e3c4b44c7dce') === 'afcbce3a')
+check('a bare uuid shortens the same way',
+  shortId('01edba72-fe45-4f0d-b5e6-f531fb3d1a1e') === '01edba72')
+check('an id shorter than the cut is left whole', shortId('abc') === 'abc')
+check('the cut is parameterized', shortId('01edba72-fe45', 4) === '01ed')
+
+const titles = sessionTitles(payload)
+check('titles are collected per session', titles.get('session-grand') === 'grand session')
+check('an unknown session simply has no title', !titles.has('session-nobody'))
+check('an empty payload has no titles',
+  sessionTitles({ root: 'x', generatedAt: 0, sessions: [], reports: [] } as never).size === 0)
+
+// ---------------------------------------------------------------------------
+// The synthesized row for an open report
+// ---------------------------------------------------------------------------
+// It exists so the detail panel has an anchor. Appending it instead of inserting
+// it made a report created at 11:12 appear below one created at 14:30 — a broken
+// sort at exactly the moment the user is asking why something is missing.
+const middle = report('R-0042', { created: at(4), updated: at(30) })
+const byCreated = withSynthesizedRow(rows, middle, 'created')
+const byActivity = withSynthesizedRow(rows, middle, 'updated')
+
+check('a missing report gains a row', byCreated.filter((r) => r.kind === 'report').length === 5)
+check('the synthesized row keeps the list sorted',
+  byCreated.every((row, index, all) => index === 0 || all[index - 1].at <= row.at))
+check('the synthesized row is inserted, not appended', byCreated[byCreated.length - 1]?.at !== at(4))
+check('the synthesized row follows the time basis', byActivity[byActivity.length - 1]?.at === at(30))
+check('an already-present report is not duplicated',
+  withSynthesizedRow(rows, report('R-0001')).length === rows.length, String(withSynthesizedRow(rows, report('R-0001')).length))
+check('the synthesized row carries the fetched digest',
+  byCreated.some((row) => row.kind === 'report' && row.front.report === 'R-0042'))
+
+// ---------------------------------------------------------------------------
 // Thread links and body display
 // ---------------------------------------------------------------------------
-const { reportIds, displayBody } = await import('../src/client/timeline-model.ts')
+const { reportIds, displayBody, closeOpenFence } = await import('../src/client/timeline-model.ts')
 
 const ids = reportIds(payload)
 check('reportIds lists every report in the payload', ids.size === 4, String(ids.size))
@@ -173,6 +247,15 @@ check('truncation is reported, not silent', long.truncated === true)
 const custom = displayBody('z'.repeat(50), 10, 4)
 check('the display limits are parameterized', custom.truncated && custom.text.length === 4, String(custom.text.length))
 check('an empty body is not truncated', !displayBody('').truncated)
+
+// Cutting Markdown is not cutting text: an unterminated ``` fence re-means every
+// line after it, so a truncated body would render its own tail as code.
+check('balanced fences are left alone',
+  closeOpenFence('a\n```js\ncode\n```\nb') === 'a\n```js\ncode\n```\nb')
+check('text with no fence is left alone', closeOpenFence('just prose') === 'just prose')
+check('an open fence is closed', closeOpenFence('intro\n```\nlet x = 1') === 'intro\n```\nlet x = 1\n```')
+check('an indented fence still counts', closeOpenFence('  ```\nx') === '  ```\nx\n```')
+check('two open fences are treated as one pair', closeOpenFence('```\na\n```\nb') === '```\na\n```\nb')
 
 // ---------------------------------------------------------------------------
 // The time basis
