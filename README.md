@@ -365,7 +365,10 @@ pnpm typecheck    # 对部署中的 harness 类型做全量类型检查
   - 已实测确认：改 `lib/index.js` 后新代码即刻生效，**且宿主进程 PID 不变**。本插件被判定为"直接变更"走局部重载，不会触发 `loader.exit()`（那是 **CLI 入口静态依赖树**里文件改动才会走的路径；插件由 Loader 动态 `import()` 加载，不属于那棵树）。
   - 重载是安全的：插件的持久状态全在磁盘账本上，内存里只有一个互斥锁表，重载不丢数据。
   - ⚠️ **启用 `hmr` 需要一次重启才生效。** 通过 `patchReload: live` 在运行中启用只会"启用行"而**不应用 `config`**——实测服务自己报 `root: []`（空监视）与 schema 默认 `debounce: 100`。组合树本身是对的（`dsh --profile web --dump-config` 可见完整 config），只是生效时机问题。
-- **客户端半：重建 + 页面刷新。** HMR 不覆盖 `lib/client.js`（由 `dsh-client-modules` 提供）。"无需刷新自动重载"未验证——不确定 `dsh-client-hmr` 的监视根是否覆盖 profile 之外的包。
+- **客户端半：保存即生效，同样不需要刷新页面（已实测）。** 原先这里写的是「重建 + 页面刷新」，并注明"未验证"——**那条是错的**。`dsh-web-app` 的 `client-hmr` 行是**常驻**的（`dsh-web-app/cordis.patch.yml`：*always mounted: it is idle until a rebuild watcher actually rewrites client bundles*），其 node 半侧每 `pollIntervalMs`（默认 500ms）stat 轮询**每个图 bundle**，变化时经 `/plugins/events` 的 SSE 通道广播 `rebuilt` 帧；浏览器半侧据此 `invalidate` → `prefetch` 新 factory → 拆旧 fiber → `entry.refresh()` 重新挂载。插件经 junction 挂在 profile 之外**不影响**这条链路：轮询的是解析后的真实路径。
+  - 实测方式与结果：直接改写插件 `lib/client.js` 里的 `"view.tab"` 字面量（不重建源码、不刷新、不点击），标签在**约 1 秒内**变成新值；改回去又自动回退。两次 `performance.getEntriesByType('navigation').length` 始终为 1，页面没有重新导航。也就是说 `pnpm watch`（或任何写 `lib/client.js` 的构建）对客户端半就是**完整回路：保存 → 重建 → 页面自己换掉这个插件**。
+  - 代价与边界：换掉的是**插件**，插件内的 React 状态会丢（展开的详情会收起），而会话、工作区与连接状态不受影响；重载失败不回滚，该 entry 停在 FAILED 视图并在下一次 `rebuilt` 帧从头重试。
+  - **仍然需要刷新页面的只有一种情况：启动图本身变了。** 装／卸插件、启用／禁用某一行（即 `dsh.client` 名单变化）只在页面加载时组合——每个 `rebuilt` 帧只携带单个插件产物的 revision，不替换启动图。
 - **`pnpm watch` 的生命周期**：它是个前台常驻进程。由代理会话启动的那种只在该会话存活期间有效；要长期常驻请在自己的终端里跑。
 - 离线/批量集成验证仍可走独立的 headless profile（`~/.dsh/profiles/reports-dev/`），它一次性跑任务、不干扰正在服务的 GUI：
   ```sh
