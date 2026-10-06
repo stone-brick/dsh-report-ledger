@@ -11,6 +11,7 @@
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { PeerService } from './peer.ts'
+import { DEFAULT_RECEIPT_MS, type PeerReceipt } from './peer.ts'
 import type { ReportService } from './service.ts'
 import { renderRow } from './service.ts'
 import type { DeliveryOutcome } from './deliver.ts'
@@ -64,6 +65,34 @@ function subjectFrom(task: string, name: string | undefined): string {
   const firstLine = task.split('\n').find((line) => line.trim() !== '')?.trim() ?? task.trim()
   const trimmed = firstLine.length > 72 ? `${firstLine.slice(0, 71)}…` : firstLine
   return name === undefined ? trimmed : `${name}: ${trimmed}`
+}
+
+/**
+ * Render what was observed about a peer's first turn.
+ *
+ * A delivery certifies one thing only: the digest reached a live agent. It says
+ * nothing about whether a turn opened, and a turn that dies at step 1 — an
+ * unresolvable prompt variable, no model route, no composition — leaves exactly
+ * the same `delivered` hop and the same `live` roster row as a peer that is hard
+ * at work. This line is the difference between those two, and it exists because
+ * the difference cost a real caller a long, silent wait.
+ * @param receipt - the observation, or `undefined` when the host could not make one.
+ * @param windowMs - the observation window the receipt was bounded by.
+ * @returns one line for the tool output, or `undefined` when there is nothing to say.
+ */
+function describeReceipt(receipt: PeerReceipt | undefined, windowMs: number): string | undefined {
+  if (receipt === undefined) return undefined
+  if (receipt.kind === 'running') return `the peer's first turn is running (observed for ${windowMs} ms after the assignment landed)`
+  if (receipt.kind === 'failed') {
+    return `⚠ the peer's first turn FAILED before doing any work: ${receipt.error ?? receipt.reason ?? 'unknown error'}`
+  }
+  if (receipt.kind === 'unstarted') {
+    return "⚠ the assignment is in the peer's inbox but no turn opened — nothing is working on it"
+  }
+  if (receipt.reason === 'completed') {
+    return `the peer's first turn completed within ${windowMs} ms — read the report for its answer`
+  }
+  return `the peer's first turn ended within ${windowMs} ms (${receipt.reason ?? 'settled'}) — nothing is working on it now`
 }
 
 /**
@@ -333,7 +362,7 @@ export function registerReportTools(
 
   disposers.push(ctx.tools.register(defineTool({
     name: 'peer_start',
-    description: 'Open a new independent agent session — a peer, not a subordinate. A peer is a root session with its own lifecycle that outlives this turn, so it is the right move when the work is long-running, when you want a partner that keeps its own context across days, or when a task should not be nested under you. This creates the session, records that you started it (which is what later lets you address it directly), and hands it the task as a REPORT — so the assignment is durable and traceable, and the peer can answer by contributing to that same report. Do not use it as a cheaper subagent: for a bounded subtask, delegation is the right tool.',
+    description: 'Open a new independent agent session — a peer, not a subordinate. A peer is a root session with its own lifecycle that outlives this turn, so it is the right move when the work is long-running, when you want a partner that keeps its own context across days, or when a task should not be nested under you. This creates the session, records that you started it (which is what later lets you address it directly), and hands it the task as a REPORT — so the assignment is durable and traceable, and the peer can answer by contributing to that same report. The output also reports what became of the peer\'s first turn (running, already ended, or failed): a delivered digest proves only that the peer is resident, never that work started. Do not use this as a cheaper subagent: for a bounded subtask, delegation is the right tool.',
     parameters: {
       task: { type: 'string', required: true, description: 'What this peer is for and what it should do first. It becomes the opening report body.' },
       name: { type: 'string', description: 'Optional short display name for the peer (60 characters or fewer).' },
@@ -360,12 +389,17 @@ export function registerReportTools(
         to: [started.sessionId],
         task: started.name,
       })
+      // Observe the first turn before answering. The assignment has just been
+      // delivered, so this is the only moment where "did it start?" is cheap to
+      // answer — and the answer is the difference between a hand-off and a hope.
+      const receipt = describeReceipt(await peers.receipt(started.sessionId, DEFAULT_RECEIPT_MS), DEFAULT_RECEIPT_MS)
       return [
         `opened peer ${started.sessionId}${started.name === undefined ? '' : ` (name=${started.name})`}`,
         started.cwd === undefined ? '' : `cwd=${started.cwd}`,
         `peers you have started: ${started.started}`,
         `assignment report: ${result.front.report}`,
         renderMutation(result.front, result.outcomes),
+        receipt === undefined ? '' : receipt,
         `Address this peer later with report_send / report_cc to=${started.sessionId}, or see everyone with peer_list.`,
       ].filter((line) => line !== '').join('\n')
     },

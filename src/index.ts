@@ -31,7 +31,7 @@ import type { AgentLike } from './report/deliver.ts'
 import { pendingTargets } from './report/deliver.ts'
 import { PARTNERSHIP_SECTION_ORDER, PROTOCOL, SECTION_ORDER, partnershipText } from './report/guidance.ts'
 import { listReports, readHops, readReport, reportPath } from './report/ledger.ts'
-import { DEFAULT_MAX_PEERS, PeerService, type PeerHost } from './report/peer.ts'
+import { DEFAULT_MAX_PEERS, PeerService, type PeerHost, type PeerReceipt } from './report/peer.ts'
 import { REPORT_PATH, TIMELINE_PATH, createReportHandler, createTimelineHandler, type ReportDetail } from './report/route.ts'
 import { ReportService, type ReportServiceHost } from './report/service.ts'
 import { buildTimeline, type SessionRecordLike } from './report/timeline.ts'
@@ -70,6 +70,48 @@ interface WebServerLike {
     path: string
     handler: (request: never, response: never) => void | Promise<void>
   }): () => void
+}
+
+/**
+ * Structural face of the agent-preset roster.
+ *
+ * Optional on purpose: a deployment may compose no roster at all, and there the
+ * model-facing rows sit in the host composition and every agent already sees them
+ * through the global layer. When a roster IS composed, an agent that joins no
+ * composition sees the empty global layer instead — no preset tools, none of the
+ * preset prompt sections — which is why a peer must join one.
+ */
+interface AgentPresetsLike {
+  /**
+   * The preset a live agent runs on.
+   * @param agentCtx - the agent's scope context.
+   * @returns the preset id, or `undefined` when it joined none.
+   */
+  composedPreset(agentCtx: Context): string | undefined
+  /**
+   * Join one agent to the same standing composition another already runs on.
+   * @param agentCtx - the joining agent's scope context.
+   * @param parentCtx - the context of the agent whose composition to join.
+   * @returns the preset id joined, or `undefined` when the parent joined none.
+   */
+  composeFrom(agentCtx: Context, parentCtx: Context): string | undefined
+}
+
+/** Structural face of the optional deployment default model service. */
+interface AgentDefaultModelLike {
+  /**
+   * The selection a fresh agent starts on when nothing else names one.
+   * @returns the provider, model, and optional reasoning effort.
+   */
+  currentSelection(): { readonly provider: string; readonly model: string; readonly reasoningEffort?: string }
+}
+
+/** The model route a peer inherits from its starter. */
+interface PeerRoute {
+  readonly provider?: string
+  readonly model?: string
+  readonly reasoningEffort?: string
+  readonly maxTokens?: number
 }
 
 /** Everything this plugin reads out of the host, in its own shapes. */
@@ -128,6 +170,111 @@ function toSessionRecord(entry: unknown): SessionRecordLike | undefined {
     },
     live: record.live === true,
   }
+}
+
+/**
+ * Resolve the model route a peer is created with.
+ *
+ * This is the difference between a peer that works and a peer that dies silently:
+ * an agent with no route cannot resolve `{{model}}` while its prompt is
+ * assembled, so its first turn ends at step 1 with an `error` reason — before a
+ * single tool call, which is why the ledger's `delivered` and the roster's `live`
+ * both stay perfectly green while nothing whatsoever happens.
+ *
+ * The starter's live route is the right source, in the same order the harness's
+ * own delegation uses: the session's request header records the route actually in
+ * force after request-time selection, creation options are the fallback before
+ * the first request, and only a starter carrying neither falls through to the
+ * deployment default. When even that is absent the peer is refused rather than
+ * created doomed.
+ * @param caller - the live starter agent, when it is resident.
+ * @param fallback - the deployment default model service, when it is mounted.
+ * @returns the route fields to pass as creation options.
+ * @throws when no source can name a provider and model.
+ */
+function peerRoute(caller: { readonly options: PeerRoute; readonly session: { requestHeader(): { config?: PeerRoute } | undefined } } | undefined, fallback: AgentDefaultModelLike | undefined): PeerRoute {
+  const fromHeader = caller?.session.requestHeader()?.config
+  const created = caller?.options
+  const selection = fallback?.currentSelection()
+  const provider = fromHeader?.provider ?? created?.provider ?? selection?.provider
+  const model = fromHeader?.model ?? created?.model ?? selection?.model
+  if (provider === undefined || model === undefined) {
+    throw new Error(
+      'report-ledger: cannot start a peer — no model route could be resolved for it. '
+      + 'The starting session carries no provider/model and this deployment exposes no default model selection, '
+      + 'so the peer would be created unable to assemble a prompt (its first turn would fail).',
+    )
+  }
+  const reasoningEffort = fromHeader?.reasoningEffort ?? created?.reasoningEffort ?? selection?.reasoningEffort
+  return {
+    provider,
+    model,
+    ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+    ...(created?.maxTokens === undefined ? {} : { maxTokens: created.maxTokens }),
+  }
+}
+
+/**
+ * Whether a session's log already records an opened turn.
+ * @param session - the live session.
+ * @returns true when at least one `turn/start` was appended.
+ */
+function hasOpenedTurn(session: { snapshotEvents(): readonly unknown[] }): boolean {
+  return session.snapshotEvents().some((event) => event !== null && typeof event === 'object' && (event as Record<string, unknown>).type === 'turn/start')
+}
+
+/**
+ * Read the last turn's stop reason out of a session log.
+ * @param session - the live session.
+ * @returns the reason kind and, for an error, its message.
+ */
+function lastTurnReason(session: { snapshotEvents(): readonly unknown[] }): { kind?: string; message?: string } {
+  const events = session.snapshotEvents()
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event === null || typeof event !== 'object') continue
+    const record = event as Record<string, unknown>
+    if (record.type !== 'turn/end') continue
+    const data = record.data
+    if (data === null || typeof data !== 'object') return {}
+    const reason = (data as Record<string, unknown>).reason
+    if (reason === null || typeof reason !== 'object') return {}
+    const fields = reason as Record<string, unknown>
+    const error = fields.error
+    const message = error === null || typeof error !== 'object' ? undefined : str(error as Record<string, unknown>, 'message')
+    return {
+      ...(typeof fields.kind === 'string' ? { kind: fields.kind } : {}),
+      ...(message === undefined ? {} : { message }),
+    }
+  }
+  return {}
+}
+
+/**
+ * Wait for one agent to reach quiescence, bounded.
+ *
+ * The bound is what makes the answer usable: a peer that opened a turn and is
+ * still working after it elapses is reported as running, while a turn that dies
+ * (the silent failure mode this exists to expose) settles in milliseconds. The
+ * timer is an observation window only — it is unref'd, so it can never be a
+ * reason for the host to stay alive.
+ * @param agent - the agent to observe.
+ * @param timeoutMs - the window length.
+ * @returns true when quiescence came first, false when the window closed first.
+ */
+function settledWithin(agent: { whenIdle(): Promise<void> }, timeoutMs: number): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    let finished = false
+    const finish = (settled: boolean): void => {
+      if (finished) return
+      finished = true
+      clearTimeout(timer)
+      resolve(settled)
+    }
+    const timer = setTimeout(() => { finish(false) }, Math.max(timeoutMs, 0))
+    timer.unref?.()
+    void agent.whenIdle().then(() => { finish(true) }, () => { finish(true) })
+  })
 }
 
 /**
@@ -208,11 +355,32 @@ async function readDetail(id: string): Promise<ReportDetail | undefined> {
  * gate, {@link Config.maxPeersPerAgent} bounds the blast radius, the peer
  * inherits the caller's own working directory (so it cannot be pointed at an
  * unrelated tree), and every creation is attributed in the roster log.
+ *
+ * It is also the only place that must supply what a fresh agent cannot supply
+ * itself. A root session is born with no composition and no model route:
+ *
+ *  - **Composition.** The peer joins the starter's standing preset
+ *    (`composeFrom`), which is a bind to the SAME generation the starter runs —
+ *    not a re-resolution of the preset by id, so a preset edited or deleted since
+ *    cannot hand the peer a different world than its starter's. A deployment with
+ *    no roster yields no join and no error, exactly like a delegated child.
+ *  - **Route.** The peer inherits the starter's provider/model/reasoning effort.
+ *    Without it, prompt assembly cannot resolve `{{model}}` and every turn of the
+ *    peer dies at step 1 before its first tool call.
+ *  - **Preset identity.** The joined preset is recorded in the durable session
+ *    header, so a cold read of the peer's log rebuilds the composition it
+ *    actually ran under instead of the deployment default.
+ *
+ * `confirmPeer` closes the other half of the same problem: a peer that turns out
+ * to be unable to run must be visible to the agent that just started it, rather
+ * than reported as a successful hand-off.
  * @param ctx - the plugin context.
  * @param host - the session-reading bundle.
  * @returns the peer host capability.
  */
 function buildPeerHost(ctx: Context, host: HostBundle): PeerHost {
+  const presets = (): AgentPresetsLike | undefined => ctx.get('agentPresets') as AgentPresetsLike | undefined
+  const defaultModel = (): AgentDefaultModelLike | undefined => ctx.get('agentDefaultModel') as AgentDefaultModelLike | undefined
   return {
     selfCwd(sessionId: string): string | undefined {
       const session = ctx.agents.get(sessionId as never)?.session
@@ -227,10 +395,31 @@ function buildPeerHost(ctx: Context, host: HostBundle): PeerHost {
     listSessionRecords: () => host.listSessionRecords(),
     readTitles: (ids: readonly string[]) => host.readTitles(ids),
     listReports: () => listReports(),
-    async createPeer(input: { sessionId: string; cwd?: string }) {
+    async createPeer(input: { sessionId: string; startedBy: string; cwd?: string }) {
+      const caller = ctx.agents.get(input.startedBy as never)
+      if (caller === undefined) {
+        throw new Error(
+          `report-ledger: cannot start a peer from ${input.startedBy} — the starting session is not resident, `
+          + 'so the peer has no composition and no model route to inherit',
+        )
+      }
+      // Refuse before creating anything: a peer published without a route is a
+      // session whose every turn fails at step 1, which is far worse than an error.
+      const agentOptions = peerRoute(caller, defaultModel())
+      const agentPreset = presets()?.composedPreset(caller.ctx)
+      const meta = {
+        ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
+        ...(agentPreset === undefined ? {} : { agentPreset }),
+      }
       const handle = await ctx.agents.create({
         sessionId: input.sessionId as never,
-        ...(input.cwd === undefined ? {} : { meta: { cwd: input.cwd } }),
+        ...(Object.keys(meta).length === 0 ? {} : { meta }),
+        agentOptions: agentOptions as never,
+        // Synchronous and roster-free, which is what lets it run inside the
+        // creation window; a rosterless deployment joins nothing here.
+        setup: (agentCtx: Context) => {
+          presets()?.composeFrom(agentCtx, caller.ctx)
+        },
       })
       // The handle is intentionally NOT retained. Its `dispose()` removes the
       // session from the store, which is exactly wrong for a peer that must
@@ -239,6 +428,19 @@ function buildPeerHost(ctx: Context, host: HostBundle): PeerHost {
         id: String(handle.agent.id),
         steer: (message) => { handle.agent.steer(message as never) },
       }
+    },
+    async confirmPeer(sessionId: string, timeoutMs: number): Promise<PeerReceipt | undefined> {
+      const agent = ctx.agents.get(sessionId as never)
+      if (agent === undefined) return undefined
+      // No turn was ever opened: the digest is sitting in a durable inbox that
+      // nothing woke. That is a real, reportable state and it is NOT "running".
+      if (!hasOpenedTurn(agent.session)) return { kind: 'unstarted' }
+      if (!await settledWithin(agent, timeoutMs)) return { kind: 'running' }
+      const reason = lastTurnReason(agent.session)
+      if (reason.kind === 'error') {
+        return { kind: 'failed', reason: 'error', ...(reason.message === undefined ? {} : { error: reason.message }) }
+      }
+      return { kind: 'settled', ...(reason.kind === undefined ? {} : { reason: reason.kind }) }
     },
   }
 }

@@ -133,7 +133,7 @@ check('the peer log is append-only JSONL', logText.trim().split('\n').every((lin
 // ---------------------------------------------------------------------------
 // PeerService: budget, validation, and roster integration
 // ---------------------------------------------------------------------------
-const created: { sessionId: string; cwd?: string }[] = []
+const created: { sessionId: string; startedBy?: string; cwd?: string }[] = []
 const madeSteer: string[] = []
 const host = {
   selfCwd: () => 'D:\\Projects\\demo',
@@ -141,16 +141,25 @@ const host = {
   listSessionRecords: async () => records as never,
   readTitles: async () => new Map<string, string>(),
   listReports: async () => reports,
-  createPeer: async ({ sessionId, cwd }: { sessionId: string; cwd?: string }) => {
-    created.push({ sessionId, ...(cwd === undefined ? {} : { cwd }) })
+  createPeer: async ({ sessionId, startedBy, cwd }: { sessionId: string; startedBy?: string; cwd?: string }) => {
+    created.push({ sessionId, ...(startedBy === undefined ? {} : { startedBy }), ...(cwd === undefined ? {} : { cwd }) })
     return { id: sessionId, steer: (message: { content: readonly { text: string }[] }) => { madeSteer.push(message.content[0]?.text ?? '') } }
   },
+  // The receipt is an observation, so the fake host answers with one directly:
+  // what matters here is that the service passes the peer id and the window
+  // through unchanged and hands the observation back verbatim.
+  confirmPeer: async (sessionId: string, timeoutMs: number) => ({
+    kind: 'failed' as const,
+    reason: 'error',
+    error: `observed ${sessionId} for ${timeoutMs} ms`,
+  }),
 }
 
 const loose = new PeerService(host as never, 100)
 const startedOne = await loose.start(SELF, { task: 'long-horizon partner for the payments rework', name: 'payments' })
 check('a peer session id follows the deployment convention', /^session-[0-9a-f-]{36}$/.test(startedOne.sessionId), startedOne.sessionId)
 check('the peer inherits the caller\'s working directory', created[0]?.cwd === 'D:\\Projects\\demo', String(created[0]?.cwd))
+check('creation names the starter the peer is composed from', created[0]?.startedBy === SELF, String(created[0]?.startedBy))
 check('the peer is attributed in the log', (await readPeers()).some((record) => record.sessionId === startedOne.sessionId && record.startedBy === SELF))
 check('the peer count is reported', startedOne.started >= 1)
 check('the caller now holds a channel to what it started', await loose.holdsChannel(SELF, startedOne.sessionId))
@@ -192,6 +201,16 @@ try {
   failedCreate = error instanceof Error ? error.message : String(error)
 }
 check('a creation failure propagates', failedCreate.includes('factory unavailable'), failedCreate)
+
+// The receipt is what separates "the digest reached a live agent" from "someone
+// is working": the service must pass the peer id and the window through and
+// return the observation unchanged.
+const receipt = await loose.receipt(startedOne.sessionId, 1500)
+check('the receipt reaches the host with the peer id and the window', receipt?.error === `observed ${startedOne.sessionId} for 1500 ms`, String(receipt?.error))
+check('a failed first turn is reported as failed, not as delivered', receipt?.kind === 'failed', String(receipt?.kind))
+const noHost = { ...host, confirmPeer: async () => undefined }
+const absent = await new PeerService(noHost as never, 100).receipt('session-not-here', 10)
+check('a non-resident peer yields no observation rather than a false one', absent === undefined)
 
 let failed = 0
 for (const [label, ok, detail] of checks) {

@@ -62,7 +62,16 @@ export const PLUGIN_ID = 'report-ledger'
 export interface DeliveryOutcome {
   /** Target session id. */
   readonly targetId: string
-  /** `delivered` when it reached a live agent; `queued` when it is held. */
+  /**
+   * `delivered` when it reached a live agent; `queued` when it is held.
+   *
+   * Read narrowly: this certifies ARRIVAL, not work. An agent that is resident
+   * accepts the digest and the inbox splice it causes is durable, but whether a
+   * turn then opens — and whether that turn survives its first step — is a
+   * separate question this outcome deliberately does not answer. Anything that
+   * needs the stronger claim must observe it (`PeerService.receipt` is that
+   * observation for a peer's first turn).
+   */
   readonly status: 'delivered' | 'queued'
 }
 

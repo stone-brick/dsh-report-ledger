@@ -3,17 +3,31 @@
  *
  * A peer is deliberately created as an **independent root session**, not a
  * delegated child. That is what makes it a partner rather than a subordinate: it
- * owns its own preset and lifecycle, it is not charged against the delegation
- * depth budget, it is visible in the workspace session list, and above all it
- * outlives the turn that started it. The harness's delegation seam cannot express
- * that relationship, so the roster log records it, and the roster log is what
- * makes the peer addressable later by the agent that started it.
+ * owns its own lifecycle, it is not charged against the delegation depth budget,
+ * it is visible in the workspace session list, and above all it outlives the turn
+ * that started it. The harness's delegation seam cannot express that
+ * relationship, so the roster log records it, and the roster log is what makes
+ * the peer addressable later by the agent that started it.
+ *
+ * Being a root session says nothing about the CAPABILITIES it runs with, and a
+ * root session is born with none: an agent published without joining a
+ * composition sees the empty global layer — no preset tools and none of the
+ * preset prompt sections — and an agent created without a model route cannot
+ * resolve `{{model}}` during prompt assembly, so its very first turn dies at
+ * step 1. Both halves are the host adapter's job, which is why
+ * {@link PeerHost.createPeer} receives the starter's session id: the peer is
+ * composed from the live starter (its model route, its composition) instead of
+ * being left to resolve against nothing. Both failures are also completely
+ * silent unless someone looks, which is why {@link PeerHost.confirmPeer} exists:
+ * `delivered` certifies that a digest reached a live agent, and must never be
+ * reported as "someone is working".
  *
  * Creation and conversation are kept separate on purpose: this module only
- * creates and records. Handing the peer its first task is the caller's job, and
- * the caller does it with a report — so the assignment lands in the ledger, the
- * peer is woken by the delivery, and the peer's later contributions turn that one
- * report into the conversation thread.
+ * creates, records, and (optionally) observes the peer's first turn. Handing the
+ * peer its first task is the caller's job, and the caller does it with a report —
+ * so the assignment lands in the ledger, the peer is woken by the delivery, and
+ * the peer's later contributions turn that one report into the conversation
+ * thread.
  *
  * @module dsh-report-ledger/report/peer
  */
@@ -26,6 +40,34 @@ import type { ReportFrontMatter } from './types.ts'
 
 /** Default cap on peers one session may start. */
 export const DEFAULT_MAX_PEERS = 8
+
+/** How long a caller waits for evidence about a peer's first turn, by default. */
+export const DEFAULT_RECEIPT_MS = 1500
+
+/**
+ * What actually happened to the peer's first turn.
+ *
+ * This exists because the delivery vocabulary cannot answer the question a
+ * starter is really asking. `delivered` means the digest reached a live agent;
+ * it is silent about whether a turn opened, and a turn that opens and dies at
+ * step 1 (an unresolvable prompt variable, an unregistered route) produces
+ * exactly the same `delivered` and exactly the same `live` roster row as a peer
+ * that is happily working. Every kind below is an OBSERVATION with a bound on it,
+ * not a promise.
+ */
+export interface PeerReceipt {
+  /**
+   * - `running` — a turn was open and still open when the observation window closed.
+   * - `settled` — a turn ran and finished inside the window.
+   * - `failed` — a turn ran and ended in error inside the window ({@link PeerReceipt.error}).
+   * - `unstarted` — nothing was ever appended after the delivery: no turn opened.
+   */
+  readonly kind: 'running' | 'settled' | 'failed' | 'unstarted'
+  /** The last turn's stop reason, when one settled (`completed`, `aborted`, `blocked`, …). */
+  readonly reason?: string
+  /** The failing turn's message, when it ended in error. */
+  readonly error?: string
+}
 
 /** A freshly created peer. */
 export interface StartedPeer {
@@ -70,10 +112,26 @@ export interface PeerHost {
   listReports(): Promise<readonly ReportFrontMatter[]>
   /**
    * Create one independent agent on a caller-supplied session id.
-   * @param input - the session id and inherited directory.
+   *
+   * `startedBy` is not decoration: a fresh root agent has no composition and no
+   * model route of its own, so the adapter resolves both from the live starter
+   * session named here. An adapter that ignores it produces a peer whose first
+   * turn fails immediately.
+   * @param input - the session id, the starter it is composed from, and the inherited directory.
    * @returns the new session id and its wake channel.
    */
-  createPeer(input: { sessionId: string; cwd?: string }): Promise<{ id: string; steer(message: OutboundMessage): void }>
+  createPeer(input: { sessionId: string; startedBy: string; cwd?: string }): Promise<{ id: string; steer(message: OutboundMessage): void }>
+  /**
+   * Observe what became of a peer's first turn, within a bound.
+   *
+   * Called after the assignment has been delivered, so it answers the question
+   * `delivered` cannot: did a turn actually open, is it still running, or did it
+   * die — and if it died, why.
+   * @param sessionId - the peer session to observe.
+   * @param timeoutMs - how long a still-running turn is awaited before it is reported as running.
+   * @returns the observation, or `undefined` when the peer is not resident at all.
+   */
+  confirmPeer(sessionId: string, timeoutMs: number): Promise<PeerReceipt | undefined>
 }
 
 /** Options for {@link PeerService.start}. */
@@ -158,6 +216,20 @@ export class PeerService {
   }
 
   /**
+   * Observe what became of a peer's first turn.
+   *
+   * Not a status check: it is the honest answer to "did the thing I just handed
+   * this peer actually start working?" — the question a bare `delivered` cannot
+   * answer. Call it after the assignment report has been delivered.
+   * @param sessionId - the peer session to observe.
+   * @param timeoutMs - how long a still-running turn is awaited before being reported as running.
+   * @returns the observation, or `undefined` when the peer is not resident.
+   */
+  async receipt(sessionId: string, timeoutMs: number = DEFAULT_RECEIPT_MS): Promise<PeerReceipt | undefined> {
+    return await this.#host.confirmPeer(sessionId, timeoutMs)
+  }
+
+  /**
    * Open one independent peer session.
    *
    * The peer is recorded before it is returned, so the relationship survives even
@@ -185,7 +257,9 @@ export class PeerService {
 
     const cwd = this.#host.selfCwd(self)
     const sessionId = `session-${randomUUID()}`
-    const created = await this.#host.createPeer({ sessionId, ...(cwd === undefined ? {} : { cwd }) })
+    // The starter is named, not just recorded: the adapter composes the peer from
+    // that live session, because a root agent has no composition or route of its own.
+    const created = await this.#host.createPeer({ sessionId, startedBy: self, ...(cwd === undefined ? {} : { cwd }) })
 
     await appendPeer({
       sessionId: created.id,
