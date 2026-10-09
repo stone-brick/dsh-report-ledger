@@ -21,11 +21,11 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'rea
 import type { ReactElement } from 'react'
 import {
   Button,
-  IconCheckOutline16,
-  IconChevronDownOutline14,
-  IconChevronRightOutline14,
-  IconCopyOutline16,
-  IconRefreshOutline16,
+  IconCheckOutlineRegular,
+  IconChevronDownOutlineRegular,
+  IconChevronRightOutlineRegular,
+  IconCopyOutlineRegular,
+  IconRefreshOutlineRegular,
   Input,
   MarkdownText,
   Pill,
@@ -489,7 +489,7 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
             ? t('filter.showing', { visible: visibleReportCount, total: counts.all })
             : t('view.summary', { sessions: payload.sessions.length, reports: payload.reports.length })}
         </span>
-        <Button variant="outline" icon={<IconRefreshOutline16 />} onClick={refresh}>{t('view.refresh')}</Button>
+        <Button variant="outline" icon={<IconRefreshOutlineRegular size={16} />} onClick={refresh}>{t('view.refresh')}</Button>
       </div>
 
       <div style={tools} title={t('filter.hint')}>
@@ -533,7 +533,7 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
             <Button
               variant="ghost"
               size="sm"
-              icon={showTopology ? <IconChevronDownOutline14 /> : <IconChevronRightOutline14 />}
+              icon={showTopology ? <IconChevronDownOutlineRegular size={14} /> : <IconChevronRightOutlineRegular size={14} />}
               onClick={() => { setShowTopology((value) => !value) }}
             >
               {showTopology ? t('topology.hide') : t('topology.show')}
@@ -575,7 +575,7 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
                   read back to the tree it belongs to. Titles stay the prominent
                   label — this is the cross-reference, not the identity. */}
               {row.title === undefined ? null : (
-                <Tooltip label={row.id} side="left" delayMs={400}>
+                <Tooltip label={row.id} side="right" delayMs={400}>
                   <span style={time}>{shortId(row.id)}</span>
                 </Tooltip>
               )}
@@ -618,7 +618,7 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
               <Button
                 variant="ghost"
                 size="sm"
-                icon={expanded ? <IconChevronDownOutline14 /> : <IconChevronRightOutline14 />}
+                icon={expanded ? <IconChevronDownOutlineRegular size={14} /> : <IconChevronRightOutlineRegular size={14} />}
                 aria-expanded={expanded}
                 aria-controls={panelId}
                 aria-label={toggleLabel}
@@ -800,7 +800,7 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
                         <Button
                           variant="ghost"
                           size="sm"
-                          icon={copiedPath ? <IconCheckOutline16 /> : <IconCopyOutline16 />}
+                          icon={copiedPath ? <IconCheckOutlineRegular size={16} /> : <IconCopyOutlineRegular size={16} />}
                           aria-label={copiedPath ? t('body.copied') : t('view.copyPath')}
                           onClick={() => { copyPath(detail.path) }}
                         />

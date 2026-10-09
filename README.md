@@ -51,7 +51,10 @@ GitHub 每次推送后由 `.github/workflows/mirror-to-gitee.yml` 自动镜像 `
 
 ### 兼容性、权限与数据
 
-- **DSH 0.1.5-rc.3 实测可用**（构建产物与该版本的平台模块表对齐）。宿主半的运行时
+- **DSH 0.2.0-rc.2 对齐**（构建产物与该版本的平台模块表逐条比对一致；类型检查、构建与
+  82 条断言均通过）。0.1.5-rc.3 已不再支持：那个 shell 的图标导出带画板尺寸后缀（如
+  `IconCopyOutline16`），0.2.0 改成尺寸中立的 `…Regular` / `…Medium` 成对导出，尺寸交给
+  `size` prop。宿主半的运行时
   外部依赖只有一个：`@deepseek-ai/dsh-tools`，由 profile 提供；浏览器半 require
   `react`、`react/jsx-runtime` 与 `@deepseek-ai/dsh-client-ui-primitives`（面板里的
   按钮、芯片、悬停、状态点、输入框与正文渲染全部用它，与内置的 Chat / 轨迹视图同一套），
@@ -74,7 +77,9 @@ dsh --profile web --dump-config                  # verify: a `report-ledger` row
 dsh web                                          # restart the profile to load it
 ```
 
-Tested against DSH 0.1.5-rc.3. The ledger is plain files under
+Aligned with DSH 0.2.0-rc.2 (0.1.5-rc.3 is no longer supported: that shell's icon
+exports carried artboard-size suffixes, which 0.2.0 replaced with size-neutral
+`…Regular` / `…Medium` pairs). The ledger is plain files under
 `$DSH_HOME/report-ledger/` and nothing leaves the machine. The host half works in
 any profile; the web profile additionally gets a **Reports** tab in the GUI.
 

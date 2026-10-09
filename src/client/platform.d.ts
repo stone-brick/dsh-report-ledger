@@ -22,7 +22,7 @@
  */
 
 declare module '@deepseek-ai/dsh-client-ui-primitives' {
-  import type { CSSProperties, ReactElement, ReactNode } from 'react'
+  import type { ReactElement, ReactNode } from 'react'
 
   /** Presentational strings the renderer needs for the controls it owns. */
   export interface MarkdownLabels {
@@ -96,7 +96,7 @@ declare module '@deepseek-ai/dsh-client-ui-primitives' {
   /** A hover label. Replaces `title` where the browser's own tooltip is too slow. */
   export function Tooltip(props: {
     readonly label: ReactNode
-    readonly side?: 'top' | 'bottom' | 'left' | 'right'
+    readonly side?: 'top' | 'bottom' | 'right'
     readonly delayMs?: number
     /** Skip the tooltip without changing the tree, e.g. when the text is not cut. */
     readonly disabled?: boolean
@@ -106,7 +106,7 @@ declare module '@deepseek-ai/dsh-client-ui-primitives' {
 
   /** The shell's status dot: `ongoing` animates, the rest are coloured dots. */
   export function StateDot(props: {
-    readonly state: 'ongoing' | 'idle' | 'done' | 'warning' | 'error' | 'failed'
+    readonly state: 'ongoing' | 'idle' | 'done' | 'warning' | 'error'
     readonly size?: number
     readonly className?: string
   }): ReactElement
@@ -126,17 +126,24 @@ declare module '@deepseek-ai/dsh-client-ui-primitives' {
     readonly onChange?: (event: { target: { value: string } }) => void
   }): ReactElement
 
-  /** One of the shell's 16px outline icons. */
+  /**
+   * One of the shell's outline icons.
+   *
+   * DSH 0.2.0 dropped the artboard size from the export name: a glyph is exported
+   * size-neutral as `…Regular` (the supplied one-pixel artwork) or `…Medium` (the
+   * same geometry at a 1.3px stroke), and `size` — defaulting to the glyph's own
+   * drawn size — controls the rendered edge. Call sites keep the size explicit so
+   * each control draws at exactly the dimension the removed numbered name pinned.
+   */
   export interface IconProps {
     readonly size?: number
     readonly className?: string
-    readonly style?: CSSProperties
   }
-  export function IconRefreshOutline16(props: IconProps): ReactElement
-  export function IconChevronRightOutline14(props: IconProps): ReactElement
-  export function IconChevronDownOutline14(props: IconProps): ReactElement
-  export function IconCopyOutline16(props: IconProps): ReactElement
-  export function IconCheckOutline16(props: IconProps): ReactElement
+  export function IconRefreshOutlineRegular(props: IconProps): ReactElement
+  export function IconChevronRightOutlineRegular(props: IconProps): ReactElement
+  export function IconChevronDownOutlineRegular(props: IconProps): ReactElement
+  export function IconCopyOutlineRegular(props: IconProps): ReactElement
+  export function IconCheckOutlineRegular(props: IconProps): ReactElement
 
   /**
    * Copy text with the shell's own fallback chain.

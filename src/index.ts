@@ -460,12 +460,19 @@ export function apply(ctx: Context, config?: Config): void {
   // The delivery pump. A hand-off recorded while its recipient was absent stays
   // pending in the transfer path; this is where it finally lands. Failures are
   // logged, never thrown: a ledger problem must not break agent creation.
-  ctx.on('agent/created', (payload: { agent: { id: unknown } }) => {
+  //
+  // The explicit `undefined` return is what DSH 0.2.0 requires. There the listener
+  // signature is `undefined | Promise<undefined>` — the payload also grew
+  // `source` and `signal` in the same change — so a handler whose inferred return
+  // type is `void` no longer satisfies it. The flush deliberately stays
+  // un-awaited: delivery must never be a reason for agent creation to wait.
+  ctx.on('agent/created', (payload: { agent: { id: unknown } }): undefined => {
     const sessionId = String(payload?.agent?.id ?? '')
-    if (sessionId === '') return
+    if (sessionId === '') return undefined
     void service.flushForAgent(sessionId).catch((error: unknown) => {
       ctx.logger?.warn?.(`report-ledger: deferred delivery to ${sessionId} failed: ${String(error)}`)
     })
+    return undefined
   })
 
   // The browser tab's read surface.

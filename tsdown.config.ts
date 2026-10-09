@@ -34,8 +34,11 @@ const ID = 'dsh-report-ledger'
  * `@deepseek-ai/dsh-web-frontend`'s `dist` bundle, function `by()` — not from a
  * published package, so it can only be verified against a running install.
  *
- * The list below matches DSH 0.1.5-rc.3. The 0.1.5-rc.3 update moved three
- * entries: `@deepseek-ai/dsh-client-web-react`,
+ * The list below is unchanged by DSH 0.2.0-rc.2: reading the deployed shell at
+ * both 0.1.5-rc.3 and 0.2.0-rc.2 yields exactly these `@deepseek-ai` specifiers,
+ * alongside `react`, `react/jsx-runtime`, `react-dom` and `react-dom/client`.
+ * It was the 0.1.5-rc.3 update that moved entries:
+ * `@deepseek-ai/dsh-client-web-react`,
  * `@deepseek-ai/dsh-client-schema-form` and the subpath
  * `@deepseek-ai/dsh-client-runtime/client` are gone, replaced by
  * `@deepseek-ai/dsh-client-store` (the inlined snapshot-store engine) and
