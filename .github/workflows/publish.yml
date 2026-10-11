@@ -42,10 +42,23 @@ jobs:
         with:
           version: 10
 
+      # ⚠ 这里**刻意不写 `registry-url`**，别加回去。
+      #
+      # `actions/setup-node` 一旦收到 `registry-url`，就会往 `~/.npmrc` 写一行
+      #   //registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}
+      # 本工作流没有（也不该有）NODE_AUTH_TOKEN，于是 npm 拿着一个**空令牌**去认证——
+      # 它就此走上令牌那条路，**根本不会去做 OIDC 交换**，注册表回一个 404。
+      #
+      # 这个失败极具误导性：**配好可信发布之后报的错与配之前一字不差**，于是你会去查
+      # 仓库名、workflow 文件名、environment name，而真正的原因在这一行。实测就是如此：
+      # 信任关系建立并重跑后，错误仍是 `E404 PUT .../dsh-report-ledger`。
+      #
+      # 注册表默认就是 registry.npmjs.org（日志里那句 "Publishing to
+      # https://registry.npmjs.org/ with tag latest and public access" 就是证据），
+      # 所以删掉它不损失任何东西。
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-          registry-url: https://registry.npmjs.org
 
       - name: Toolchain versions
         run: |
