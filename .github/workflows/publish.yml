@@ -64,6 +64,15 @@ jobs:
         run: |
           node --version
           npm --version   # 可信发布要求 npm >= 11.5.1（Node 24 自带的满足）
+          # npm 只在下面两个变量**同时存在**时才去交换 OIDC 令牌
+          # （lib/utils/oidc.js：缺任一个就 log.silly 后静默 return）。
+          # 它们由上面的 `id-token: write` 注入。缺了的话，npm 会跳过 OIDC，
+          # 然后在 Publish 步扔一个与该原因毫无关系的 `ENEEDAUTH`——
+          # 所以这两行是那次误诊的解药。只报长度，不打印值。
+          for v in ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN NPM_ID_TOKEN; do
+            eval "val=\$$v"
+            if [ -n "$val" ]; then echo "$v: present (${#val} chars)"; else echo "$v: MISSING"; fi
+          done
 
       - name: Install
         run: pnpm install --frozen-lockfile
@@ -82,5 +91,9 @@ jobs:
       # （见 README「运行时解析需要 node_modules/@deepseek-ai junction」一节），
       # CI 里没有这一层；把官方包装成 devDependency 会在工作区复制一份服务注册表，
       # 反而破坏本地开发时的实例同一性。所以 CI 只跑确定性检查 + 构建。
+      # --loglevel verbose 是**临时**的（诊断中）：oidc() 从不抛错，任何失败都静默返回
+      # undefined，外面只看得到 ENEEDAUTH。verbose 级别才会打出真正的原因，包括
+      # "Failed token exchange request with body message: …"（那里面会写注册表为什么拒绝）。
+      # 诊断完就删掉这一行。
       - name: Publish
-        run: npm publish --ignore-scripts --access public
+        run: npm publish --ignore-scripts --access public --loglevel verbose
