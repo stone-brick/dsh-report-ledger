@@ -93,16 +93,22 @@ check('holders cover every live branch', holders.size === 4, [...holders.keys()]
 check('holders point at the right entry', w.samePath(holders.get('main')?.path ?? '', 'C:/r/main'))
 
 // ---- 2. path comparison is the host's rule, not a lowest common denominator -
-check('forward and backward slashes name one file', w.samePath('C:/a/b', 'C:\\a\\b'))
-check('a trailing separator does not change identity', w.samePath('C:/a/b/', 'C:\\a\\b'))
+// A backslash separates only where the host says so: on Windows the two
+// spellings name one file, while on POSIX a backslash is an ordinary character
+// in a filename — and pretending otherwise would merge two directories git keeps
+// distinct. The assertion is written as the host's answer rather than as the
+// Windows answer, so the suite means the same thing on a Linux runner.
+const win32 = process.platform === 'win32'
+check('a backslash separates only where the host says so',
+  w.samePath('a/b', 'a\\b') === win32, `platform=${process.platform}`)
+check('a trailing separator does not change identity', w.samePath('/a/b/', '/a/b'))
 check('different paths stay different', !w.samePath('C:/a/b', 'C:/a/c'))
 // Stripping trailing separators must not eat a root: `C:\` reduced to `C:` is a
 // different thing on Windows, and every drive-root comparison would go wrong.
 check('a drive root keeps its separator',
-  process.platform !== 'win32' || /^c:\\$/i.test(w.compareKey('C:\\')),
+  !win32 || /^c:\\$/i.test(w.compareKey('C:\\')),
   w.compareKey('C:\\'))
-const caseRules = process.platform === 'win32'
-check('case sensitivity follows the host', w.samePath('C:/A/B', 'c:/a/b') === caseRules,
+check('case sensitivity follows the host', w.samePath('C:/A/B', 'c:/a/b') === win32,
   `platform=${process.platform}`)
 
 // ---- 3. version gating ------------------------------------------------------

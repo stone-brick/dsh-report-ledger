@@ -87,7 +87,11 @@ check('one branch is one claim however the path is spelled',
 check('different branches are different claims',
   !sameClaim({ path: 'C:/a', branch: 'b' }, { path: 'C:/a', branch: 'c' }))
 check('a detached tree is identified by its path',
-  sameClaim({ path: 'C:/a' }, { path: 'C:\\a' }))
+  sameClaim({ path: 'seg/a' }, { path: 'seg/a' }))
+// Whether the two spellings are one path is the host's answer, not ours.
+check('two spellings of one path agree exactly when the host does',
+  sameClaim({ path: 'seg/a' }, { path: 'seg\\a' }) === (process.platform === 'win32'),
+  `platform=${process.platform}`)
 check('a detached tree at another path is another claim',
   !sameClaim({ path: 'C:/a' }, { path: 'C:/b' }))
 
