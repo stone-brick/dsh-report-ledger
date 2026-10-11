@@ -31,8 +31,10 @@ import type { AgentLike } from './report/deliver.ts'
 import { pendingTargets } from './report/deliver.ts'
 import { PARTNERSHIP_SECTION_ORDER, PROTOCOL, SECTION_ORDER, partnershipText } from './report/guidance.ts'
 import { listReports, readHops, readReport, reportPath } from './report/ledger.ts'
+import { resolveWorktree, type WorktreeConfig, type WorktreeRuntime } from './report/allocate.ts'
+import { buildWorktreeReport } from './report/maintenance.ts'
 import { DEFAULT_MAX_PEERS, PeerService, type PeerHost, type PeerReceipt } from './report/peer.ts'
-import { REPORT_PATH, TIMELINE_PATH, createReportHandler, createTimelineHandler, type ReportDetail } from './report/route.ts'
+import { REPORT_PATH, TIMELINE_PATH, WORKTREES_PATH, createReportHandler, createTimelineHandler, createWorktreesHandler, type ReportDetail } from './report/route.ts'
 import { ReportService, type ReportServiceHost } from './report/service.ts'
 import { buildTimeline, type SessionRecordLike } from './report/timeline.ts'
 import { registerReportTools } from './report/tools.ts'
@@ -52,6 +54,17 @@ export interface Config {
    * @default 8
    */
   maxPeersPerAgent?: number
+  /**
+   * Optional git worktree support: each report may hold its own checkout.
+   *
+   * Off unless `enabled` is set. What a working tree isolates is narrow and
+   * worth stating plainly, because the opposite is easy to assume: each checkout
+   * has its own working directory and index, while `config`, `hooks`, the object
+   * store and everything outside the checkouts on the machine stay shared. A
+   * hook installed or a setting changed in one checkout therefore affects every
+   * other one.
+   */
+  worktree?: WorktreeConfig
 }
 
 /** The three host services this half cannot work without. */
@@ -324,6 +337,10 @@ function buildHost(ctx: Context): HostBundle {
     async describe(sessionId: string): Promise<string | undefined> {
       return (await readTitles([sessionId])).get(sessionId)
     },
+    selfCwd(sessionId: string): string | undefined {
+      const cwd = (ctx.agents.get(sessionId as never)?.session?.header as { cwd?: unknown } | undefined)?.cwd
+      return typeof cwd === 'string' && cwd !== '' ? cwd : undefined
+    },
     readTitles,
     async listSessionRecords(): Promise<SessionRecordLike[]> {
       const query = sessionQuery()
@@ -454,8 +471,9 @@ export function apply(ctx: Context, config?: Config): void {
   const host = buildHost(ctx)
   const service = new ReportService(host)
   const peers = new PeerService(buildPeerHost(ctx, host), config?.maxPeersPerAgent ?? DEFAULT_MAX_PEERS)
+  const worktree = resolveWorktree(config?.worktree)
 
-  ctx.effect(() => registerReportTools(ctx, service, peers), 'report-ledger: model tools')
+  ctx.effect(() => registerReportTools(ctx, service, peers, worktree), 'report-ledger: model tools')
 
   // The delivery pump. A hand-off recorded while its recipient was absent stays
   // pending in the transfer path; this is where it finally lands. Failures are
@@ -497,13 +515,20 @@ export function apply(ctx: Context, config?: Config): void {
         listSessionRecords: () => host.listSessionRecords(),
         readTitles: (ids: readonly string[]) => host.readTitles(ids),
         listReports: () => listReports(),
+        readHops: (report: string) => readHops(report),
       }, root),
       report: readDetail,
+      worktrees: async () => buildWorktreeReport({
+        listReports: () => listReports(),
+        readHops: (report: string) => readHops(report),
+      }, worktree.settings, worktree.enabled),
     }
     scoped.effect(() => {
       const disposeReport = webServer.register({ kind: 'exact', path: REPORT_PATH, handler: createReportHandler(deps) as never })
       const disposeTimeline = webServer.register({ kind: 'exact', path: TIMELINE_PATH, handler: createTimelineHandler(deps) as never })
+      const disposeWorktrees = webServer.register({ kind: 'exact', path: WORKTREES_PATH, handler: createWorktreesHandler(deps) as never })
       return () => {
+        disposeWorktrees()
         disposeTimeline()
         disposeReport()
       }

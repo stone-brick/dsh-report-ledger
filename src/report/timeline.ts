@@ -12,7 +12,8 @@
  * @module dsh-report-ledger/report/timeline
  */
 
-import type { ReportFrontMatter } from './types.ts'
+import { leaseState, type LeaseState } from './lease.ts'
+import type { ReportFrontMatter, RouteHop } from './types.ts'
 
 /** The session-header fields the timeline reads. */
 export interface SessionHeaderLike {
@@ -58,6 +59,28 @@ export interface SessionNode {
   readonly createdAt?: number
 }
 
+/**
+ * One bound checkout, as the views render it.
+ *
+ * The lease state travels with the lane rather than being recomputed in the
+ * browser. The two halves of this plugin share no code by design, so a state
+ * machine copied into the client would be a *second* implementation — and the
+ * thing it decides is whether a checkout may be claimed, which is not a decision
+ * two implementations should be able to disagree about.
+ */
+export interface WorktreeLane {
+  /** The report holding the binding. */
+  readonly report: string
+  /** Absolute path of the checkout. */
+  readonly path: string
+  /** Short branch name; absent for a detached checkout. */
+  readonly branch?: string
+  /** Whether the ledger created this checkout, rather than adopting one. */
+  readonly allocated: boolean
+  /** Whether the claim is live, ended, or the checkout has since been cleared. */
+  readonly state: LeaseState
+}
+
 /** The complete payload the tab renders. */
 export interface TimelinePayload {
   /** The session the timeline was requested for. */
@@ -68,6 +91,37 @@ export interface TimelinePayload {
   readonly sessions: readonly SessionNode[]
   /** Every report touching any session in the subtree, newest activity first. */
   readonly reports: readonly ReportFrontMatter[]
+  /** The checkouts those reports are bound to, ordered by branch then report. */
+  readonly worktrees: readonly WorktreeLane[]
+}
+
+/**
+ * Collect the checkouts a set of reports is bound to.
+ *
+ * Only a report that carries a binding costs a hop read, so a ledger with no
+ * working trees in play pays one pass over the digests and nothing more.
+ * @param reports - the report digests in play.
+ * @param readHops - read one report's hops.
+ * @returns one lane per bound report.
+ */
+export async function worktreeLanes(
+  reports: readonly ReportFrontMatter[],
+  readHops: (report: string) => Promise<readonly RouteHop[]>,
+): Promise<WorktreeLane[]> {
+  const lanes: WorktreeLane[] = []
+  for (const front of reports) {
+    const binding = front.worktree
+    if (binding === undefined) continue
+    lanes.push({
+      report: front.report,
+      path: binding.path,
+      ...(binding.branch === undefined ? {} : { branch: binding.branch }),
+      allocated: binding.allocated === true,
+      state: leaseState(await readHops(front.report)),
+    })
+  }
+  return lanes.sort((left, right) => (left.branch ?? left.path).localeCompare(right.branch ?? right.path)
+    || left.report.localeCompare(right.report))
 }
 
 /**
@@ -181,6 +235,15 @@ export interface TimelineDeps {
    * @returns the digests.
    */
   listReports(): Promise<readonly ReportFrontMatter[]>
+  /**
+   * Read one report's hops.
+   *
+   * Needed only for reports that carry a working-tree binding, because lease
+   * liveness is derived from the hop stream and nowhere else.
+   * @param report - report id.
+   * @returns the hops, oldest first.
+   */
+  readHops(report: string): Promise<readonly RouteHop[]>
 }
 
 /**
@@ -212,5 +275,6 @@ export async function buildTimeline(deps: TimelineDeps, root: string): Promise<T
   const titles = bare.length === 0 ? new Map<string, string>() : await deps.readTitles(bare.map((node) => node.id))
   const sessions = withTitles(bare, titles)
   const reports = reportsForSubtree(await deps.listReports(), sessions)
-  return { root, generatedAt: Date.now(), sessions, reports }
+  const worktrees = await worktreeLanes(reports, deps.readHops)
+  return { root, generatedAt: Date.now(), sessions, reports, worktrees }
 }

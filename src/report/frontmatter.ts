@@ -14,27 +14,11 @@
  */
 
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
-import type { HopAction, Report, ReportFrontMatter, ReportStatus } from './types.ts'
+import { HOP_ACTIONS, REPORT_STATUSES } from './types.ts'
+import type { Report, ReportFrontMatter, ReportWorktree } from './types.ts'
 
 /** The front-matter fence. */
 const FENCE = '---'
-
-const STATUSES: readonly ReportStatus[] = ['open', 'acked', 'closed']
-
-const ACTIONS: readonly HopAction[] = [
-  'authored',
-  'contributed',
-  'sent',
-  'delivered',
-  'cc',
-  'forwarded',
-  'copied',
-  'read',
-  'acked',
-  'amended',
-  'closed',
-  'reopened',
-]
 
 /** A parsed document. */
 export interface ParsedDocument {
@@ -123,6 +107,36 @@ function time(value: unknown, fallback: number): number {
 }
 
 /**
+ * Read a working-tree binding, tolerating the hand-edited short form.
+ *
+ * A human who wants to point a report at a checkout should be able to write
+ * `worktree: /path/to/tree` and have it mean what it looks like, so a bare
+ * scalar is normalized to a path-only binding. A mapping with no usable path is
+ * dropped whole rather than half-read: a binding with a branch but no path would
+ * claim a branch the ledger cannot locate, which is worse than no binding.
+ * @param value - the raw front-matter value.
+ * @returns the binding, or `undefined` when there is no usable path.
+ */
+function toWorktree(value: unknown): ReportWorktree | undefined {
+  if (value === undefined || value === null) return undefined
+  const record = typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : { path: value }
+  const path = str(record.path)
+  if (path === undefined) return undefined
+  const branch = str(record.branch)
+  const head = str(record.head)
+  const repo = str(record.repo)
+  return {
+    path,
+    ...(branch === undefined ? {} : { branch }),
+    ...(head === undefined ? {} : { head }),
+    ...(repo === undefined ? {} : { repo }),
+    ...(typeof record.allocated === 'boolean' ? { allocated: record.allocated } : {}),
+  }
+}
+
+/**
  * Normalize a raw front-matter mapping into the report schema.
  *
  * Every field is optional on the way in: a missing recipient list becomes empty,
@@ -136,17 +150,18 @@ export function toFrontMatter(data: Record<string, unknown>): ReportFrontMatter 
   if (report === undefined) return undefined
 
   const statusText = str(data.status)
-  const status = STATUSES.find((candidate) => candidate === statusText) ?? 'open'
+  const status = REPORT_STATUSES.find((candidate) => candidate === statusText) ?? 'open'
 
   const created = time(data.created, 0)
   const updated = time(data.updated, created)
+  const worktree = toWorktree(data.worktree)
 
   const lastRaw = data.last
   let last: ReportFrontMatter['last']
   if (lastRaw !== null && typeof lastRaw === 'object' && !Array.isArray(lastRaw)) {
     const record = lastRaw as Record<string, unknown>
     const actionText = str(record.action)
-    const action = ACTIONS.find((candidate) => candidate === actionText)
+    const action = HOP_ACTIONS.find((candidate) => candidate === actionText)
     const actor = str(record.actor)
     if (action !== undefined && actor !== undefined) {
       last = { at: time(record.at, updated), action, actor }
@@ -167,6 +182,7 @@ export function toFrontMatter(data: Record<string, unknown>): ReportFrontMatter 
     ...(str(data.parent) === undefined ? {} : { parent: str(data.parent) as string }),
     children: strList(data.children),
     ...(str(data.task) === undefined ? {} : { task: str(data.task) as string }),
+    ...(worktree === undefined ? {} : { worktree }),
     artifacts: strList(data.artifacts),
     hops: num(data.hops) ?? 0,
     ...(last === undefined ? {} : { last }),
@@ -211,6 +227,17 @@ export function frontMatterYaml(front: ReportFrontMatter): string {
   if (front.parent !== undefined) ordered.parent = front.parent
   ordered.children = [...front.children]
   if (front.task !== undefined) ordered.task = front.task
+  if (front.worktree !== undefined) {
+    // Key order mirrors the interface, and absent optionals stay absent, so a
+    // binding with only a path stays a one-line mapping a human can read.
+    ordered.worktree = {
+      path: front.worktree.path,
+      ...(front.worktree.branch === undefined ? {} : { branch: front.worktree.branch }),
+      ...(front.worktree.head === undefined ? {} : { head: front.worktree.head }),
+      ...(front.worktree.repo === undefined ? {} : { repo: front.worktree.repo }),
+      ...(front.worktree.allocated === undefined ? {} : { allocated: front.worktree.allocated }),
+    }
+  }
   ordered.artifacts = [...front.artifacts]
   ordered.hops = front.hops
   if (front.last !== undefined) {
@@ -250,7 +277,7 @@ export function parseHop(raw: string): (import('./types.ts').RouteHop) | undefin
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
   const record = value as Record<string, unknown>
   const actionText = str(record.action)
-  const action = ACTIONS.find((candidate) => candidate === actionText)
+  const action = HOP_ACTIONS.find((candidate) => candidate === actionText)
   const actor = str(record.actor)
   if (action === undefined || actor === undefined) return undefined
   const from = str(record.from)

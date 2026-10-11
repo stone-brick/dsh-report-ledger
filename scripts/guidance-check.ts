@@ -43,10 +43,20 @@ const childText = partnershipText(child)
 for (const tool of [
   'report_author', 'report_contribute', 'report_send', 'report_cc',
   'report_forward', 'report_read', 'report_list', 'report_ack', 'report_amend', 'report_close',
+  'report_release', 'report_lease',
   'peer_list', 'peer_start',
 ]) {
   check(`protocol documents ${tool}`, PROTOCOL.includes(tool))
 }
+
+// ---- the working-tree contract is stated, including what is NOT isolated --
+check('protocol names the worktree option', PROTOCOL.includes('worktree:true'))
+check('protocol says only the directory and index are private',
+  PROTOCOL.includes('工作目录与索引'))
+check('protocol warns that hooks and config are shared', PROTOCOL.includes('装一个 hook 或改一项配置'))
+check('protocol frames the branch as a lock', PROTOCOL.includes('只能被一个检出占用'))
+check('protocol says closing releases the claim', PROTOCOL.includes('结案会自动交还'))
+check('protocol states both directions of the claim', PROTOCOL.includes('认领已有检出') && PROTOCOL.includes('交还'))
 
 // ---- the correction rule is stated ---------------------------------------
 check('protocol points at report_amend instead of re-authoring', PROTOCOL.includes('不要重开一份新汇报'))

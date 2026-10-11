@@ -34,7 +34,7 @@ import {
   Tooltip,
   writeClipboard,
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { ReportDetail, TimelinePayload } from '../shared/wire.ts'
+import type { ReportDetail, TimelinePayload, WorktreeLane } from '../shared/wire.ts'
 import {
   buildRows,
   closeOpenFence,
@@ -42,18 +42,21 @@ import {
   emptyState,
   filterRows,
   isFiltering,
+  laneIndex,
+  LEASE_TONE,
   reportIds,
   sessionTitles,
   shortId,
   statusCounts,
   visibleReports,
   withSynthesizedRow,
+  worktreeLabel,
   type ReportTimeBasis,
   type Row,
   type StatusFilter,
 } from './timeline-model.ts'
 import { CardgraphView } from './CardgraphView.tsx'
-import { HOP_LABEL, STATUS_DOT, STATUS_LABEL, STATUS_TONE, type ReportLedgerKey } from './locales.ts'
+import { HOP_LABEL, LEASE_HINT, STATUS_DOT, STATUS_LABEL, STATUS_TONE, type ReportLedgerKey } from './locales.ts'
 import { SEARCH_CLASS } from './styles.ts'
 
 /** Translate one key, substituting `{name}` placeholders. */
@@ -223,6 +226,9 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
   const rows = useMemo<Row[]>(() => (payload === undefined ? [] : buildRows(payload, basis)), [payload, basis])
   const counts = useMemo(() => statusCounts(payload?.reports ?? []), [payload])
   const inList = useMemo(() => (payload === undefined ? new Set<string>() : reportIds(payload)), [payload])
+  // The lease state is not on the digest: liveness comes from the hop stream, and
+  // the host derives it once so the browser never needs a second copy of the rule.
+  const lanes = useMemo(() => (payload === undefined ? new Map<string, WorktreeLane>() : laneIndex(payload)), [payload])
   const shownBody = useMemo(() => displayBody(detail?.body ?? ''), [detail])
   // The text the renderer gets. A cut body can end mid-fence, and an unterminated
   // fence would turn the rest of the report into a code block — see
@@ -586,6 +592,11 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
         const front = row.front
         const expanded = openReport === front.report
         const panelId = `report-ledger-panel-${front.report}`
+        // The label comes off the binding, so a report opened by id and rendered
+        // before it is in the payload still names its checkout; only the lease
+        // state needs the lane, and a missing lane degrades to `none`.
+        const wtLabel = worktreeLabel(front.worktree)
+        const wtLane = lanes.get(front.report)
         const toggleLabel = fill(expanded ? t('row.collapse') : t('row.expand'), { report: front.report })
         return (
           <div key={`r-${front.report}`} id={rowDomId(front.report)} style={{ paddingLeft: `${pad}px` }}>
@@ -650,6 +661,28 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
                   >
                     {front.task}
                   </Pill>
+                )}
+                {/* The checkout chip follows the task chip exactly, for the same
+                    reason: it reuses the search box instead of inventing a second
+                    filter, and it clears the status filter because its own label
+                    promises "show only this checkout". Its tone is the lease
+                    state, which is the one thing the digest cannot carry — a
+                    checkout nobody holds and one being worked in look identical
+                    from the binding alone. */}
+                {wtLabel === undefined ? null : (
+                  <Tag tone={LEASE_TONE[wtLane?.state ?? 'none']}>
+                    <span
+                      title={`${fill(t('row.filterByWorktree'), { worktree: wtLabel })} — ${t(LEASE_HINT[wtLane?.state ?? 'none'])}`}
+                      style={{ cursor: 'pointer' }}
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        setStatus('all')
+                        setText(wtLabel)
+                      }}
+                    >
+                      {wtLabel}
+                    </span>
+                  </Tag>
                 )}
                 {/* One line per report is the point of the digest, so the meta
                     line is clipped rather than wrapped: a single over-connected

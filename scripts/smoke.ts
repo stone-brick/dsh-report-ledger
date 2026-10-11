@@ -294,6 +294,76 @@ const amendedAfterReopenAt = reopenAfterAmend.findIndex((h, index) => index > re
 check('the reopen precedes the amendment that caused it', reopenedAt >= 0 && amendedAfterReopenAt > reopenedAt,
   `reopen@${reopenedAt} -> amended@${amendedAfterReopenAt}`)
 
+// ---- 15. the working-tree binding is authored state, not a projection ------
+// The digest is a cache of to/cc/authors/hops/last and of nothing else, so a
+// binding has to survive every refresh of those. It is also the one digest field
+// git — not the ledger — is the authority for, which is exactly why the ledger
+// must still remember it: git can say a branch is taken, but never by which
+// report.
+const boundPath = 'C:\\repo-parent\\.dsh-worktrees\\repo\\R-0015-slug'
+const boundBranch = 'dsh/R-0015-worktree-binding-round-trip'
+const bound = await service.author({
+  subject: 'worktree binding round trip',
+  body: 'bound to a checkout',
+  actor: 'session-a',
+  worktree: {
+    path: boundPath,
+    branch: boundBranch,
+    head: 'a'.repeat(40),
+    repo: 'C:\\repo-parent\\repo\\.git',
+    allocated: true,
+  },
+})
+check('a binding is recorded on the digest', bound.front.worktree?.branch === boundBranch,
+  String(bound.front.worktree?.branch))
+check('the binding records that the ledger allocated it', bound.front.worktree?.allocated === true)
+
+const boundOnDisk = await readFile(reportPath(bound.front.report), 'utf8')
+check('the binding reaches the document', boundOnDisk.includes(boundBranch))
+const boundReread = await readReport(bound.front.report)
+check('a Windows path survives YAML quoting and parsing',
+  boundReread?.front.worktree?.path === boundPath, boundReread?.front.worktree?.path ?? '')
+check('the binding keeps its head and repository',
+  boundReread?.front.worktree?.head === 'a'.repeat(40)
+  && boundReread?.front.worktree?.repo === 'C:\\repo-parent\\repo\\.git')
+
+// The invariant that matters: a hop refresh rewrites the derived fields from the
+// route sidecar, and must not drop a field the stream does not own.
+const boundAfterHop = await service.contribute(bound.front.report, 'session-b', 'second author', 'reviewed')
+check('the binding survives a hop refresh', boundAfterHop.front.worktree?.branch === boundBranch,
+  String(boundAfterHop.front.worktree?.branch))
+check('the hop refresh still advanced the digest', boundAfterHop.front.hops > bound.front.hops)
+
+const byBranch = await service.list({ worktree: 'R-0015' })
+const boundRow = byBranch.find((row) => row.report === bound.front.report)
+check('the listing filters by a branch fragment', boundRow !== undefined)
+check('the row carries the branch as its compact label', boundRow?.worktree === boundBranch, boundRow?.worktree ?? '')
+check('a worktree filter ignores case',
+  (await service.list({ worktree: 'r-0015' })).some((row) => row.report === bound.front.report))
+check('a worktree filter also matches the path',
+  (await service.list({ worktree: 'dsh-worktrees' })).some((row) => row.report === bound.front.report))
+check('a worktree filter that matches nothing excludes the row',
+  !(await service.list({ worktree: 'no-such-checkout' })).some((row) => row.report === bound.front.report))
+check('read renders the binding', (await service.read(bound.front.report, 'session-a')).includes(boundBranch))
+
+// ---- 16. a hand edit can only ever cost the field it edited ----------------
+// A report written before the field existed, and one a human simplified to a
+// bare path, must both read correctly. A binding with a branch but no path is
+// dropped whole rather than half-read: claiming a branch the ledger cannot
+// locate is worse than claiming nothing.
+const legacyReport = parseReport('---\nreport: "R-9002"\nsubject: "legacy"\n---\n\nbody\n')
+check('a report without a binding still parses', legacyReport !== undefined)
+check('an absent binding stays absent', legacyReport?.front.worktree === undefined)
+
+const shortForm = parseReport('---\nreport: "R-9001"\nsubject: "short"\nworktree: /tmp/wt\n---\n\nbody\n')
+check('a bare-string binding is normalized to a path', shortForm?.front.worktree?.path === '/tmp/wt',
+  shortForm?.front.worktree?.path ?? '')
+check('a normalized bare-string binding invents no branch', shortForm?.front.worktree?.branch === undefined)
+
+const halfBinding = parseReport('---\nreport: "R-9003"\nsubject: "half"\nworktree:\n  branch: dsh/x\n---\n\nbody\n')
+check('a binding with no path is dropped whole, not half-read',
+  halfBinding?.front.worktree === undefined, JSON.stringify(halfBinding?.front.worktree))
+
 let failed = 0
 for (const [label, ok, detail] of checks) {
   if (!ok) failed++

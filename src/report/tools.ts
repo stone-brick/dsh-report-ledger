@@ -10,11 +10,84 @@
  */
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import type { WorktreeRuntime } from './allocate.ts'
 import type { PeerService } from './peer.ts'
 import { DEFAULT_RECEIPT_MS, type PeerReceipt } from './peer.ts'
-import type { ReportService } from './service.ts'
+import type { PreparedWorktree, ReportService, WorktreeOutcome } from './service.ts'
 import { renderRow } from './service.ts'
 import type { DeliveryOutcome } from './deliver.ts'
+
+/**
+ * The `worktree` parameter a tool advertises, or nothing at all.
+ *
+ * With the feature off the parameter does not exist, so a model cannot ask for
+ * something the deployment will not do. That is a better answer than a parameter
+ * that is always refused, and it keeps the promise that a deployment which does
+ * not want working trees pays nothing for them.
+ * @param runtime - the resolved feature state.
+ * @param description - what the parameter does, for this tool.
+ * @returns the parameter map to spread into a tool's parameters.
+ */
+function worktreeParam(runtime: WorktreeRuntime, description: string): Record<string, unknown> {
+  return runtime.enabled ? { worktree: { type: 'boolean', description } } : {}
+}
+
+/** Provision a checkout, or explain that this deployment does not offer one. */
+async function requireWorktree(
+  runtime: WorktreeRuntime,
+  service: ReportService,
+  input: { readonly subject: string; readonly actor: string },
+): Promise<{ readonly report: string; readonly prepared: PreparedWorktree }> {
+  if (!runtime.enabled) {
+    throw new Error(
+      'report-ledger: this deployment has not enabled git worktree support, so no checkout can be allocated '
+      + '(the composition row sets worktree.enabled)',
+    )
+  }
+  return await service.provision({ subject: input.subject, actor: input.actor, settings: runtime.settings })
+}
+
+/**
+ * The lines describing a checkout that was just provisioned.
+ *
+ * The sharing sentence is not boilerplate. "Its own checkout" reads naturally as
+ * "its own environment", and the difference becomes real the moment an agent
+ * installs a hook or changes a setting — both of which reach every other
+ * checkout, because only the working directory and index are private.
+ * @param prepared - what provisioning produced.
+ * @returns the lines to append to the tool output.
+ */
+function renderProvision(prepared: PreparedWorktree): string[] {
+  const lines = [`worktree=${prepared.binding.path} branch=${prepared.binding.branch}`]
+  if (prepared.reclaimed !== undefined) {
+    lines.push(
+      `reclaimed ${prepared.reclaimed.report}'s checkout at ${prepared.reclaimed.path} to stay within the retained `
+      + 'budget; that report remains closed',
+    )
+  }
+  for (const skipped of prepared.reclaimSkipped) {
+    lines.push(`kept a checkout the budget would otherwise have cleared: ${skipped}`)
+  }
+  for (const gone of prepared.stale) {
+    lines.push(`recorded that ${gone.report}'s checkout at ${gone.path} was already gone — nothing to remove`)
+  }
+  lines.push('private: working directory and index. shared: config, hooks, the object store, and everything outside the checkouts.')
+  return lines
+}
+
+/** The line describing what a mutation did with a checkout on disk. */
+function renderWorktreeOutcome(outcome: WorktreeOutcome | undefined, canRemove: boolean): string | undefined {
+  if (outcome === undefined) return undefined
+  if (outcome.action === 'removed') return 'working tree removed'
+  // The hint only names a parameter the caller can actually see and pass; on a
+  // deployment with the feature off, `worktree` is not advertised at all.
+  if (outcome.action === 'kept') {
+    return canRemove
+      ? 'working tree kept (close with worktree:"remove-if-clean" to remove it)'
+      : 'working tree kept'
+  }
+  return `working tree NOT removed — git refused: ${outcome.detail ?? 'unknown reason'}`
+}
 
 /** The slice of a tool execution these tools read. */
 interface ExecLike {
@@ -46,7 +119,7 @@ function actorOf(exec: ExecLike): string {
 }
 
 /** Render a mutation result as a compact model-facing report. */
-function renderMutation(front: { report: string; status: string; subject: string; to: readonly string[]; cc: readonly string[]; authors: readonly string[]; hops: number }, outcomes: readonly DeliveryOutcome[]): string {
+function renderMutation(front: { report: string; status: string; subject: string; to: readonly string[]; cc: readonly string[]; authors: readonly string[]; hops: number }, outcomes: readonly DeliveryOutcome[], prepared?: PreparedWorktree): string {
   const lines = [
     `${front.report} [${front.status}] ${front.subject}`,
     `authors=${front.authors.join(',')} to=${front.to.length === 0 ? '-' : front.to.join(',')} cc=${front.cc.length === 0 ? '-' : front.cc.join(',')} hops=${front.hops}`,
@@ -57,6 +130,7 @@ function renderMutation(front: { report: string; status: string; subject: string
     if (delivered.length > 0) lines.push(`delivered to: ${delivered.join(', ')}`)
     if (queued.length > 0) lines.push(`held for absent recipient (delivered automatically when it becomes resident): ${queued.join(', ')}`)
   }
+  if (prepared !== undefined) lines.push(...renderProvision(prepared))
   return lines.join('\n')
 }
 
@@ -106,6 +180,7 @@ export function registerReportTools(
   ctx: { tools: { register(definition: unknown): () => void } },
   service: ReportService,
   peers: PeerService,
+  worktree: WorktreeRuntime,
 ): () => void {
   const disposers: (() => void)[] = []
 
@@ -120,6 +195,7 @@ export function registerReportTools(
       task: { type: 'string', description: 'Label grouping the reports of one collaboration.' },
       artifacts: { type: 'array', items: { type: 'string' }, description: 'Paths, commits, or report ids this report refers to.' },
       parent: { type: 'string', description: 'Report id this one answers, linking it into the thread.' },
+      ...worktreeParam(worktree, 'Allocate this report its own git checkout, on a branch named after the report. Only the working directory and index are private; config, hooks and the object store are shared with every other checkout.'),
     },
     output: stringOutput,
     execute: async (args, exec) => {
@@ -131,18 +207,33 @@ export function registerReportTools(
         task?: string
         artifacts?: string[]
         parent?: string
+        worktree?: boolean
       }
-      const result = await service.author({
-        subject: input.subject,
-        body: input.body,
-        actor: actorOf(exec as ExecLike),
-        ...(input.to === undefined ? {} : { to: input.to }),
-        ...(input.cc === undefined ? {} : { cc: input.cc }),
-        ...(input.task === undefined ? {} : { task: input.task }),
-        ...(input.artifacts === undefined ? {} : { artifacts: input.artifacts }),
-        ...(input.parent === undefined ? {} : { parent: input.parent }),
-      })
-      return renderMutation(result.front, result.outcomes)
+      const actor = actorOf(exec as ExecLike)
+      const provisioned = input.worktree === true
+        ? await requireWorktree(worktree, service, { subject: input.subject, actor })
+        : undefined
+      try {
+        const result = await service.author({
+          subject: input.subject,
+          body: input.body,
+          actor,
+          ...(input.to === undefined ? {} : { to: input.to }),
+          ...(input.cc === undefined ? {} : { cc: input.cc }),
+          ...(input.task === undefined ? {} : { task: input.task }),
+          ...(input.artifacts === undefined ? {} : { artifacts: input.artifacts }),
+          ...(input.parent === undefined ? {} : { parent: input.parent }),
+          ...(provisioned === undefined
+            ? {}
+            : { reportId: provisioned.report, worktree: provisioned.prepared.binding }),
+        })
+        return renderMutation(result.front, result.outcomes, provisioned?.prepared)
+      } catch (error) {
+        // The report was never authored, so nothing references the checkout that
+        // was made for it. Leaving it would be litter no report could explain.
+        if (provisioned !== undefined) await service.rollbackProvision(provisioned)
+        throw error
+      }
     },
   })))
 
@@ -226,23 +317,33 @@ export function registerReportTools(
 
   disposers.push(ctx.tools.register(defineTool({
     name: 'report_list',
-    description: 'List report digests from the ledger — no bodies, so this is the cheap way to survey a long-running collaboration. Filter by `session` to see every report that touches one agent (authored, addressed, copied, or contributed to), by `status`, or by `task` to pull up one collaboration across every session it touched. The task label is matched case-insensitively and partially, so "payments" finds "payments-rework". Use it to find the report id you need before reading it, or to check what a teammate is still waiting on.',
+    description: 'List report digests from the ledger — no bodies, so this is the cheap way to survey a long-running collaboration. Filter by `session` to see every report that touches one agent (authored, addressed, copied, or contributed to), by `status`, or by `task` to pull up one collaboration across every session it touched. The task label is matched case-insensitively and partially, so "payments" finds "payments-rework". `worktree` matches a bound working tree by branch or path, which is the way to find out who is working in which checkout. Use it to find the report id you need before reading it, or to check what a teammate is still waiting on.',
     parameters: {
       session: { type: 'string', description: 'Only reports touching this session id.' },
       status: { type: 'string', enum: ['open', 'acked', 'closed'], description: 'Only reports in this state.' },
       task: { type: 'string', description: 'Only reports carrying this collaboration label (partial match, case-insensitive).' },
+      worktree: { type: 'string', description: 'Only reports bound to a working tree whose branch or path contains this text (partial match, case-insensitive).' },
       limit: { type: 'integer', description: 'Maximum rows (default 50, capped at 200).' },
     },
     output: stringOutput,
     execute: async (args) => {
-      const input = args as { session?: string; status?: string; task?: string; limit?: number }
+      const input = args as { session?: string; status?: string; task?: string; worktree?: string; limit?: number }
       const rows = await service.list({
         ...(input.session === undefined ? {} : { session: input.session }),
         ...(input.status === undefined ? {} : { status: input.status }),
         ...(input.task === undefined ? {} : { task: input.task }),
+        ...(input.worktree === undefined ? {} : { worktree: input.worktree }),
         ...(input.limit === undefined ? {} : { limit: input.limit }),
       })
-      if (rows.length === 0) return input.task === undefined ? 'no reports match' : `no reports carry a task matching ${JSON.stringify(input.task)}`
+      if (rows.length === 0) {
+        // Name the filter that emptied the result. "no reports match" after a
+        // worktree filter reads as "nothing is bound anywhere", which is a
+        // different and much stronger claim than "nothing matched this text".
+        if (input.worktree !== undefined && input.worktree.trim() !== '') {
+          return `no reports are bound to a working tree matching ${JSON.stringify(input.worktree)}`
+        }
+        return input.task === undefined ? 'no reports match' : `no reports carry a task matching ${JSON.stringify(input.task)}`
+      }
       const lines = [`${rows.length} report(s):`, ...rows.map(renderRow)]
       // A task rollup answers the question the filter was asked for: how much of
       // this collaboration is still live, rather than how many rows came back.
@@ -283,14 +384,81 @@ export function registerReportTools(
     parameters: {
       report: { type: 'string', required: true, description: 'Report id to close.' },
       note: { type: 'string', description: 'Why it is finished, or what concluded it. Recorded on the hop.' },
+      ...(worktree.enabled
+        ? {
+          worktree: {
+            type: 'string',
+            enum: ['keep', 'remove-if-clean'],
+            description: 'What to do with a bound git checkout. keep (the default) leaves it exactly as it is; '
+              + 'remove-if-clean deletes it only if it has no uncommitted work, and reports git\'s refusal otherwise.',
+          },
+        }
+        : {}),
+    },
+    output: stringOutput,
+    execute: async (args, exec) => {
+      const input = args as { report: string; note?: string; worktree?: 'keep' | 'remove-if-clean' }
+      const result = await service.close(input.report, actorOf(exec as ExecLike), input.note, {
+        // The deployment's default, overridable per close. `keep` is the safest
+        // thing a deployment can be configured to do and the only thing it does
+        // by default: a report ending is not a licence to delete a directory.
+        worktree: input.worktree ?? worktree.onClose,
+      })
+      return [
+        renderMutation(result.front, result.outcomes),
+        renderWorktreeOutcome(result.worktree, worktree.enabled),
+        'closed — later activity on this report reopens it automatically',
+      ].filter((line): line is string => line !== undefined).join('\n')
+    },
+  })))
+
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'report_release',
+    description: 'Hand back a report\'s claim on its git checkout without concluding the report. Use it when the work in that checkout is done but the conversation is not: the checkout stays on disk exactly as you left it, and the claim — which is what stops another agent from taking the same branch — ends. A claim is released once; closing a report releases it too, so this is only needed while the report stays open.',
+    parameters: {
+      report: { type: 'string', required: true, description: 'Report id whose checkout claim should end.' },
+      note: { type: 'string', description: 'Why the claim is being handed back. Recorded on the hop.' },
     },
     output: stringOutput,
     execute: async (args, exec) => {
       const input = args as { report: string; note?: string }
-      const result = await service.close(input.report, actorOf(exec as ExecLike), input.note)
-      return `${renderMutation(result.front, result.outcomes)}\nclosed — later activity on this report reopens it automatically`
+      const result = await service.release(input.report, actorOf(exec as ExecLike), input.note)
+      const binding = result.front.worktree
+      return [
+        renderMutation(result.front, result.outcomes),
+        binding === undefined
+          ? 'claim released'
+          : `claim released; the checkout at ${binding.path} is untouched and stays traceable to ${result.front.report}`,
+      ].join('\n')
     },
   })))
+
+  if (worktree.enabled) {
+    disposers.push(ctx.tools.register(defineTool({
+      name: 'report_lease',
+      description: 'Claim an EXISTING git checkout for a report — the counterpart to report_release. Use it to pick up a checkout that already exists: one a human made, one a previous report left behind, or one a report released earlier. A branch is held by exactly one live report at a time, so a competing claim is refused and the refusal names the holder and its authors. The branch is read from the checkout itself, so pass one only to require it.',
+      parameters: {
+        report: { type: 'string', required: true, description: 'Report id that will hold the checkout. Only its owners may claim on its behalf.' },
+        path: { type: 'string', required: true, description: 'Absolute path of the checkout to claim.' },
+        branch: { type: 'string', description: 'The branch the checkout must be on. Omit to take whichever branch it is really on.' },
+      },
+      output: stringOutput,
+      execute: async (args, exec) => {
+        const input = args as { report: string; path: string; branch?: string }
+        const result = await service.lease(input.report, actorOf(exec as ExecLike), {
+          path: input.path,
+          ...(input.branch === undefined ? {} : { branch: input.branch }),
+        })
+        const binding = result.front.worktree
+        return [
+          renderMutation(result.front, result.outcomes),
+          binding === undefined
+            ? 'claimed'
+            : `claimed ${binding.branch ?? '(detached HEAD)'} at ${binding.path}${binding.head === undefined ? '' : ` @ ${binding.head.slice(0, 12)}`}`,
+        ].join('\n')
+      },
+    })))
+  }
 
   disposers.push(ctx.tools.register(defineTool({
     name: 'report_amend',
@@ -366,29 +534,58 @@ export function registerReportTools(
     parameters: {
       task: { type: 'string', required: true, description: 'What this peer is for and what it should do first. It becomes the opening report body.' },
       name: { type: 'string', description: 'Optional short display name for the peer (60 characters or fewer).' },
+      ...worktreeParam(worktree, 'Give the peer its own git checkout, on a branch named after the assignment report, and start it there instead of in your directory. Only the working directory and index are private; config, hooks and the object store are shared with every other checkout.'),
     },
     output: stringOutput,
     execute: async (args, exec) => {
-      const input = args as { task: string; name?: string }
+      const input = args as { task: string; name?: string; worktree?: boolean }
       const actor = actorOf(exec as ExecLike)
-      const started = await peers.start(actor, {
-        task: input.task,
-        ...(input.name === undefined ? {} : { name: input.name }),
-      })
-      const result = await service.author({
-        subject: subjectFrom(input.task, started.name),
-        body: [
-          `本会话由 ${actor} 开启，你是它的**同伴**而非下属：你有自己的生命周期，会比这一轮活得更久。`,
-          '',
-          `要回复或继续这个话题，用 report_contribute 追加到本汇报——它会成为我们之间的线程；需要直接交代新事情时用 report_author 并 to=[${actor}]。`,
-          '',
-          '## 任务',
-          input.task,
-        ].join('\n'),
-        actor,
-        to: [started.sessionId],
-        task: started.name,
-      })
+      const subject = subjectFrom(input.task, input.name)
+      // The checkout has to exist before the peer does, because the peer's
+      // working directory is the checkout's path and a session is born with the
+      // directory it will keep. That ordering is the whole reason report ids can
+      // be claimed in advance.
+      const provisioned = input.worktree === true
+        ? await requireWorktree(worktree, service, { subject, actor })
+        : undefined
+      let started: Awaited<ReturnType<PeerService['start']>>
+      let result: Awaited<ReturnType<ReportService['author']>>
+      try {
+        started = await peers.start(actor, {
+          task: input.task,
+          ...(input.name === undefined ? {} : { name: input.name }),
+          ...(provisioned === undefined ? {} : { cwd: provisioned.prepared.binding.path }),
+        })
+        result = await service.author({
+          subject,
+          body: [
+            `本会话由 ${actor} 开启，你是它的**同伴**而非下属：你有自己的生命周期，会比这一轮活得更久。`,
+            ...(provisioned === undefined
+              ? []
+              : [
+                '',
+                `你的工作目录是一个**独立的 git 检出**：${provisioned.prepared.binding.path}（分支 ${provisioned.prepared.binding.branch}）。`,
+                '独立的是工作目录与索引；config、hooks、对象库与其它检出共享，所以装 hook 或改配置会影响所有检出。',
+              ]),
+            '',
+            `要回复或继续这个话题，用 report_contribute 追加到本汇报——它会成为我们之间的线程；需要直接交代新事情时用 report_author 并 to=[${actor}]。`,
+            '',
+            '## 任务',
+            input.task,
+          ].join('\n'),
+          actor,
+          to: [started.sessionId],
+          task: started.name,
+          ...(provisioned === undefined
+            ? {}
+            : { reportId: provisioned.report, worktree: provisioned.prepared.binding }),
+        })
+      } catch (error) {
+        // Neither the peer nor a report exists to explain the checkout, so it is
+        // rolled back rather than left for a later cleanup to puzzle over.
+        if (provisioned !== undefined) await service.rollbackProvision(provisioned)
+        throw error
+      }
       // Observe the first turn before answering. The assignment has just been
       // delivered, so this is the only moment where "did it start?" is cheap to
       // answer — and the answer is the difference between a hand-off and a hope.
@@ -398,6 +595,7 @@ export function registerReportTools(
         started.cwd === undefined ? '' : `cwd=${started.cwd}`,
         `peers you have started: ${started.started}`,
         `assignment report: ${result.front.report}`,
+        ...(provisioned === undefined ? [] : renderProvision(provisioned.prepared)),
         renderMutation(result.front, result.outcomes),
         receipt === undefined ? '' : receipt,
         `Address this peer later with report_send / report_cc to=${started.sessionId}, or see everyone with peer_list.`,

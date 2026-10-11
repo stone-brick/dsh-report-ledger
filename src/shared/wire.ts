@@ -13,8 +13,9 @@
  * @module dsh-report-ledger/shared/wire
  */
 
-export type { HopAction, ReportFrontMatter, ReportStatus, RouteHop } from '../report/types.ts'
-export type { SessionNode, TimelinePayload } from '../report/timeline.ts'
+export type { HopAction, ReportFrontMatter, ReportStatus, ReportWorktree, RouteHop } from '../report/types.ts'
+export type { LeaseState } from '../report/lease.ts'
+export type { SessionNode, TimelinePayload, WorktreeLane } from '../report/timeline.ts'
 export type { ReportDetail } from '../report/route.ts'
 
 /** Result envelope every read endpoint returns. */

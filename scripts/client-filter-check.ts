@@ -14,7 +14,7 @@ export {}
  * Run: node scripts/client-filter-check.ts
  */
 
-const { buildRows, filterRows, isFiltering, statusCounts, visibleReports, rowMatches, emptyState, shortId, sessionTitles, withSynthesizedRow } =
+const { buildRows, filterRows, isFiltering, statusCounts, visibleReports, rowMatches, emptyState, shortId, sessionTitles, withSynthesizedRow, laneIndex, worktreeLabel, LEASE_TONE } =
   await import('../src/client/timeline-model.ts')
 
 const checks: [string, boolean, string][] = []
@@ -47,9 +47,15 @@ const payload = {
     { id: 'session-grand', depth: 2, delegated: true, live: false, parentId: 'session-child', title: 'grand session', createdAt: at(3) },
   ],
   reports: [
-    report('R-0001', { from: 'session-child', subject: 'payments rework', status: 'open', created: at(4), updated: at(20) }),
+    report('R-0001', {
+      from: 'session-child', subject: 'payments rework', status: 'open', created: at(4), updated: at(20),
+      worktree: { path: '/wt/R-0001-payments-rework', branch: 'dsh/R-0001-payments-rework', allocated: true },
+    }),
     report('R-0002', { from: 'session-root', subject: 'review done', status: 'acked', created: at(5), updated: at(15) }),
-    report('R-0003', { from: 'session-grand', subject: 'old matter', status: 'closed', created: at(6), updated: at(12) }),
+    report('R-0003', {
+      from: 'session-grand', subject: 'old matter', status: 'closed', created: at(6), updated: at(12),
+      worktree: { path: '/wt/R-0003', branch: 'dsh/R-0003-old-matter', allocated: true },
+    }),
     report('R-0004', {
       from: 'session-outsider',
       subject: 'copied in',
@@ -61,7 +67,13 @@ const payload = {
       task: 'audit',
       artifacts: ['src/pay.ts'],
       fromName: 'the auditor',
+      worktree: { path: 'C:\\wt\\detached-checkout', allocated: true },
     }),
+  ],
+  worktrees: [
+    { report: 'R-0001', path: '/wt/R-0001-payments-rework', branch: 'dsh/R-0001-payments-rework', allocated: true, state: 'held' },
+    { report: 'R-0003', path: '/wt/R-0003', branch: 'dsh/R-0003-old-matter', allocated: true, state: 'reclaimed' },
+    { report: 'R-0004', path: 'C:\\wt\\detached-checkout', allocated: true, state: 'released' },
   ],
 } as unknown as Parameters<typeof buildRows>[0]
 
@@ -112,6 +124,42 @@ check('search matches an artifact path', search('src/pay.ts').some((r) => r.kind
 check('search is case-insensitive', search('PAYMENTS').some((r) => r.kind === 'report' && r.front.report === 'R-0001'))
 check('search is trimmed', search('   payments   ').some((r) => r.kind === 'report' && r.front.report === 'R-0001'))
 check('search matches a session title', search('grand session').some((r) => r.kind === 'session' && r.id === 'session-grand'))
+
+// ---------------------------------------------------------------------------
+// Working-tree bindings
+// ---------------------------------------------------------------------------
+// The checkout chip is a filter shortcut exactly like the task chip, which only
+// works if the text it sets is text the search looks at.
+check('search matches a checkout branch', search('dsh/R-0001').some((r) => r.kind === 'report' && r.front.report === 'R-0001'))
+check('search matches a checkout path', search('wt/r-0003').some((r) => r.kind === 'report' && r.front.report === 'R-0003'))
+check('a checkout filter narrows to bound reports only',
+  search('dsh/R-0001').filter((r) => r.kind === 'report').length === 1,
+  String(search('dsh/R-0001').filter((r) => r.kind === 'report').length))
+check('an unbound report is not caught by a checkout filter',
+  !search('dsh/R-0001').some((r) => r.kind === 'report' && r.front.report === 'R-0002'))
+
+const lanes = laneIndex(payload)
+check('a lane exists per bound report', lanes.size === 3, String(lanes.size))
+check('an unbound report has no lane', !lanes.has('R-0002'))
+check('a lane carries the derived lease state', lanes.get('R-0001')?.state === 'held', String(lanes.get('R-0001')?.state))
+check('a cleared checkout reports as reclaimed', lanes.get('R-0003')?.state === 'reclaimed', String(lanes.get('R-0003')?.state))
+check('a detached checkout still has a lane',
+  lanes.get('R-0004')?.branch === undefined && lanes.get('R-0004')?.path !== undefined)
+
+const bindingOf = new Map(payload.reports.map((front) => [front.report, front.worktree]))
+check('a checkout is named by its branch',
+  worktreeLabel(bindingOf.get('R-0001')) === 'dsh/R-0001-payments-rework',
+  String(worktreeLabel(bindingOf.get('R-0001'))))
+check('a detached checkout is named by its directory',
+  worktreeLabel(bindingOf.get('R-0004')) === 'detached-checkout',
+  String(worktreeLabel(bindingOf.get('R-0004'))))
+check('an unbound report has no checkout label', worktreeLabel(bindingOf.get('R-0002')) === undefined)
+check('an absent binding has no label', worktreeLabel(undefined) === undefined)
+// Only a live claim means someone is working right now, and a ledger tidying up
+// after itself is not a problem — a warning tone there would teach a reader to
+// ignore warnings.
+check('a live claim is the only positive tone', LEASE_TONE.held === 'success')
+check('a cleared checkout is not alarmed', LEASE_TONE.reclaimed === 'neutral')
 check('search matches a session id', search('session-grand').some((r) => r.kind === 'session' && r.id === 'session-grand'))
 check('search narrows sessions too', search('grand session').filter((r) => r.kind === 'session').length === 1)
 check('an unmatched search yields nothing', search('no-such-thing-anywhere').length === 0)

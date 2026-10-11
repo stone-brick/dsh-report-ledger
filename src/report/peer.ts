@@ -140,6 +140,14 @@ export interface StartPeerInput {
   readonly task: string
   /** Optional display name. */
   readonly name?: string
+  /**
+   * Directory to start the peer in, when it should not inherit the starter's.
+   *
+   * A caller that allocated a working tree passes its path here, which is what
+   * turns the peer's isolation from a claim into a fact: the peer's `cwd` is its
+   * own checkout from its very first turn.
+   */
+  readonly cwd?: string
 }
 
 /** The peer service. */
@@ -255,7 +263,10 @@ export class PeerService {
       )
     }
 
-    const cwd = this.#host.selfCwd(self)
+    // The starter's own directory unless the caller supplies one — a caller that
+    // allocated a working tree points the peer at it, so the peer works in its
+    // own checkout rather than in the starter's.
+    const cwd = input.cwd ?? this.#host.selfCwd(self)
     const sessionId = `session-${randomUUID()}`
     // The starter is named, not just recorded: the adapter composes the peer from
     // that live session, because a root agent has no composition or route of its own.

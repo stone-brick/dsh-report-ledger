@@ -26,7 +26,7 @@
 
 import { randomBytes } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { appendFile, mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { parseHop, parseReport, serializeReport } from './frontmatter.ts'
@@ -243,4 +243,35 @@ export async function listReports(): Promise<ReportFrontMatter[]> {
  */
 export function reportExists(id: string): boolean {
   return isValidReportId(id) && existsSync(reportPath(id))
+}
+
+/**
+ * Give back an id that was claimed but never became a report.
+ *
+ * {@link allocateId} claims a name by creating an empty document, which is what
+ * makes a concurrent claim lose cleanly. When the work that needed the id then
+ * fails — a working tree that could not be created, a peer that never started —
+ * the claim would otherwise leave an empty file behind forever, burning the
+ * number and showing up in no listing.
+ *
+ * Only an **empty** document is removed. A report with any content is kept, so a
+ * misuse of this function can cost at most a placeholder, never a record.
+ * @param id - the claimed identifier.
+ * @returns true when an empty claim was removed.
+ */
+export async function discardUnwrittenId(id: string): Promise<boolean> {
+  if (!isValidReportId(id)) return false
+  const path = reportPath(id)
+  try {
+    const raw = await readFile(path, 'utf8')
+    if (raw !== '') return false
+  } catch {
+    return false
+  }
+  try {
+    await unlink(path)
+    return true
+  } catch {
+    return false
+  }
 }

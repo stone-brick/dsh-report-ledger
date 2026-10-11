@@ -78,11 +78,44 @@ const report = (id: string, over: Record<string, unknown> = {}): never => ({
   ...over,
 }) as never
 
+/** One hop, for the lease streams the lanes derive their state from. */
+const hop = (action: string): Record<string, unknown> => ({ at: at(1), actor: 'session-a', action, to: [] })
+
+/** Which reports were asked for their hops, to pin the cost of the lanes. */
+const hopReads: string[] = []
+
+/** Hop streams keyed by report; anything absent reads as no hops at all. */
+const hopStreams: Record<string, unknown[]> = {
+  'R-0001': [hop('authored'), hop('leased')],
+  'R-0003': [hop('authored'), hop('leased'), hop('released')],
+  'R-0004': [hop('authored'), hop('leased'), hop('released'), hop('reclaimed')],
+}
+const readHopsOf = async (id: string): Promise<never> => {
+  hopReads.push(id)
+  return (hopStreams[id] ?? []) as never
+}
+
 const allReports = [
-  report('R-0001', { from: 'session-a', to: ['session-root'], updated: at(5) }),
-  report('R-0002', { from: 'session-other', to: ['session-other'], updated: at(9) }),
-  report('R-0003', { from: 'session-outsider', cc: ['session-g'], updated: at(7) }),
-  report('R-0004', { from: 'session-outsider', authors: ['session-b'], updated: at(6) }),
+  report('R-0001', {
+    from: 'session-a',
+    to: ['session-root'],
+    updated: at(5),
+    worktree: { path: '/wt/R-0001', branch: 'dsh/R-0001', allocated: true },
+  }),
+  // Outside the subtree *and* bound: its lane must not appear, and — because the
+  // cost of a lane is a hop read — it must not be read for either.
+  report('R-0002', {
+    from: 'session-other', to: ['session-other'], updated: at(9),
+    worktree: { path: '/wt/R-0002', branch: 'dsh/R-0002', allocated: true },
+  }),
+  report('R-0003', {
+    from: 'session-outsider', cc: ['session-g'], updated: at(7),
+    worktree: { path: '/wt/R-0003', branch: 'dsh/R-0003', allocated: true },
+  }),
+  report('R-0004', {
+    from: 'session-outsider', authors: ['session-b'], updated: at(6),
+    worktree: { path: '/wt/R-0004', allocated: true },
+  }),
   report('R-0005', { from: 'session-a', status: 'closed', updated: at(1) }),
 ]
 const kept = reportsForSubtree(allReports, subtree).map((r) => r.report)
@@ -101,6 +134,7 @@ const payload = await buildTimeline({
   listSessionRecords: async () => records,
   readTitles: async (ids) => new Map(ids.map((id) => [id, `title of ${id}`])),
   listReports: async () => allReports,
+  readHops: readHopsOf,
 }, 'session-root')
 
 check('payload carries the root', payload.root === 'session-root')
@@ -114,12 +148,40 @@ check('a closed report reaches the client as closed',
   payload.reports.find((r) => r.report === 'R-0005')?.status === 'closed',
   String(payload.reports.find((r) => r.report === 'R-0005')?.status))
 
+// ---------------------------------------------------------------------------
+// Working-tree lanes
+// ---------------------------------------------------------------------------
+// One lane per bound report in scope, with the lease state derived from the hop
+// stream. It is derived here rather than in the browser because the two halves
+// share no code: a client-side copy would be a second implementation of the rule
+// that decides whether a checkout may be claimed.
+const lanes = new Map(payload.worktrees.map((lane) => [lane.report, lane]))
+check('one lane per bound report in scope', payload.worktrees.length === 3,
+  payload.worktrees.map((lane) => lane.report).join())
+check('a report with no binding contributes no lane', !lanes.has('R-0005'))
+check('a bound report outside the subtree contributes no lane', !lanes.has('R-0002'))
+check('a live claim reads as held', lanes.get('R-0001')?.state === 'held', String(lanes.get('R-0001')?.state))
+check('an ended claim reads as released', lanes.get('R-0003')?.state === 'released', String(lanes.get('R-0003')?.state))
+check('a cleared checkout reads as reclaimed', lanes.get('R-0004')?.state === 'reclaimed',
+  String(lanes.get('R-0004')?.state))
+check('a lane carries the branch', lanes.get('R-0001')?.branch === 'dsh/R-0001')
+check('a detached lane has no branch', lanes.get('R-0004')?.branch === undefined)
+check('a lane carries its path', lanes.get('R-0001')?.path === '/wt/R-0001')
+check('a lane says whether the ledger created the checkout', lanes.get('R-0001')?.allocated === true)
+// The documented cost of a lane is one hop read per bound report in scope, which
+// is what keeps a ledger with no working trees in play free.
+check('only bound, in-scope reports cost a hop read',
+  hopReads.slice().sort().join() === 'R-0001,R-0003,R-0004', hopReads.join())
+
 const unknownPayload = await buildTimeline({
   listSessionRecords: async () => records,
   readTitles: async () => new Map(),
   listReports: async () => allReports,
+  readHops: readHopsOf,
 }, 'session-nope')
 check('an unknown root yields an empty timeline', unknownPayload.sessions.length === 0 && unknownPayload.reports.length === 0)
+check('an empty timeline carries no lanes', unknownPayload.worktrees.length === 0)
+check('an empty timeline reads no hops', hopReads.length === 3, hopReads.join())
 
 // ---------------------------------------------------------------------------
 // The request guard
@@ -188,15 +250,33 @@ const response = (): { captured: Capture; res: never } => {
   }
 }
 
+/** A placeholder maintenance view. It has its own check; here it merely has to
+ * satisfy the route's dependency bundle so the other two guards can be poked. */
+const emptyWorktreeReport = {
+  generatedAt: 0,
+  enabled: false,
+  limits: { maxActive: 0, maxRetained: 0, reclaim: 'never' as const },
+  active: 0,
+  retained: 0,
+  records: [],
+  unmanaged: [],
+  dangling: [],
+  warnings: [],
+}
+
 const deps = {
   timeline: async (root: string) => buildTimeline({
     listSessionRecords: async () => records,
     readTitles: async () => new Map(),
     listReports: async () => allReports,
+    readHops: readHopsOf,
   }, root),
   report: async (id: string) => (id === 'R-0001'
     ? { front: allReports[0], hops: [], pending: ['session-ghost'], body: 'body text', path: '/ledger/R-0001.md' }
     : undefined),
+  // The maintenance view has its own check; here it only has to satisfy the
+  // route's dependency bundle so the timeline and report guards can be poked.
+  worktrees: async () => emptyWorktreeReport,
 }
 
 const timelineHandler = route.createTimelineHandler(deps)
@@ -241,6 +321,7 @@ check('a malformed report id answers 400', badId.captured.status === 400, String
 const brokenHandler = route.createTimelineHandler({
   timeline: async () => { throw new Error('ledger offline') },
   report: async () => undefined,
+  worktrees: async () => emptyWorktreeReport,
 })
 const brokenCase = response()
 await brokenHandler(request({ url: '/api/report-ledger/timeline?root=session-root', headers: { host: '127.0.0.1:3080' } }), brokenCase.res)

@@ -9,7 +9,7 @@
  * @module dsh-report-ledger/client/timeline-model
  */
 
-import type { ReportFrontMatter, ReportStatus, TimelinePayload } from '../shared/wire.ts'
+import type { LeaseState, ReportFrontMatter, ReportStatus, ReportWorktree, TimelinePayload, WorktreeLane } from '../shared/wire.ts'
 
 /** One rendered timeline row: a session branching, or a report appearing. */
 export type Row =
@@ -183,6 +183,11 @@ function reportHaystack(front: ReportFrontMatter): string {
     ...front.authors,
     front.task ?? '',
     ...front.artifacts,
+    // The bound checkout is searchable for the same reason the task label is:
+    // the chip that names it is a filter shortcut, so the text it sets has to be
+    // text the search actually looks at.
+    front.worktree?.branch ?? '',
+    front.worktree?.path ?? '',
   ].join('\n').toLowerCase()
 }
 
@@ -255,6 +260,55 @@ export function statusCounts(reports: readonly ReportFrontMatter[]): StatusCount
  */
 export function isFiltering(filter: RowFilter): boolean {
   return filter.status !== 'all' || filter.text.trim() !== ''
+}
+
+/**
+ * Index the payload's working-tree lanes by report id.
+ *
+ * The lanes carry the lease state, which the digests do not: liveness is derived
+ * from the hop stream, and the host derives it once rather than each half of the
+ * plugin deriving it separately.
+ * @param payload - the endpoint payload.
+ * @returns report id to lane.
+ */
+export function laneIndex(payload: TimelinePayload): Map<string, WorktreeLane> {
+  return new Map(payload.worktrees.map((lane) => [lane.report, lane]))
+}
+
+/**
+ * How a lease state should read at a glance.
+ *
+ * A live claim is the only state that means someone is working *now*, so it is
+ * the only one that earns a positive tone. A cleared checkout is deliberately
+ * plain rather than alarming: the ledger tidying up after itself is not a
+ * problem to be surfaced, and giving it a warning tone would teach a reader to
+ * ignore warnings.
+ */
+export const LEASE_TONE: Record<LeaseState, 'success' | 'info' | 'neutral'> = {
+  held: 'success',
+  released: 'info',
+  reclaimed: 'neutral',
+  none: 'neutral',
+}
+
+/** The last path segment, for naming a checkout that has no branch. */
+function lastSegment(path: string): string {
+  const parts = path.split(/[\\/]/)
+  return parts[parts.length - 1] || path
+}
+
+/**
+ * The short name a checkout is shown under.
+ *
+ * Taken from the binding rather than from the lane, because a report opened by
+ * id can be rendered before it is in the payload's lane list — the binding is
+ * always on the row, the lane is not.
+ * @param binding - the row's binding, when it has one.
+ * @returns the label, or `undefined` when the report is not bound.
+ */
+export function worktreeLabel(binding: ReportWorktree | undefined): string | undefined {
+  if (binding === undefined) return undefined
+  return binding.branch ?? lastSegment(binding.path)
 }
 
 /**

@@ -29,6 +29,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { WorktreeReport } from './maintenance.ts'
 import type { TimelinePayload } from './timeline.ts'
 import type { ReportFrontMatter, RouteHop } from './types.ts'
 
@@ -37,6 +38,15 @@ export const TIMELINE_PATH = '/api/report-ledger/timeline'
 
 /** Path of one report's detail. */
 export const REPORT_PATH = '/api/report-ledger/report'
+
+/**
+ * Path of the working-tree maintenance view.
+ *
+ * Registered whatever the feature's state, so an operator asking "is anything
+ * out there?" gets an answer even when the answer is "nothing, and allocation is
+ * off". A 404 would be indistinguishable from a typo.
+ */
+export const WORKTREES_PATH = '/api/report-ledger/worktrees'
 
 /** Longest accepted root session id. */
 const MAX_ID_LENGTH = 200
@@ -75,6 +85,11 @@ export interface RouteDeps {
    * @returns the detail, or `undefined` when unknown.
    */
   report(id: string): Promise<ReportDetail | undefined>
+  /**
+   * Assemble the working-tree maintenance view.
+   * @returns the view.
+   */
+  worktrees(): Promise<WorktreeReport>
 }
 
 /**
@@ -199,6 +214,21 @@ export function createTimelineHandler(deps: RouteDeps): (request: IncomingMessag
       return
     }
     writeJson(response, 200, { ok: true, value: await deps.timeline(root) })
+  })
+}
+
+/**
+ * Build the working-tree maintenance handler.
+ *
+ * Read-only and unparameterised: it answers one question — what checkouts does
+ * the ledger know about, and what is true of them — with no way to change any of
+ * it. Repair stays a human decision made from these facts.
+ * @param deps - data sources.
+ * @returns the route handler.
+ */
+export function createWorktreesHandler(deps: RouteDeps): (request: IncomingMessage, response: ServerResponse) => Promise<void> {
+  return guarded(async (_url, response) => {
+    writeJson(response, 200, { ok: true, value: await deps.worktrees() })
   })
 }
 

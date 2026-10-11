@@ -8,7 +8,7 @@
  * @module dsh-report-ledger/client/locales
  */
 
-import type { HopAction, ReportStatus } from '../shared/wire.ts'
+import type { HopAction, LeaseState, ReportStatus } from '../shared/wire.ts'
 import type { TopologyEdgeKind } from './topology-model.ts'
 
 /** Chinese dictionary — the source of truth for the key set. */
@@ -33,6 +33,11 @@ export const zh = {
   'row.hops': '{count} 跳',
   'row.authors': '{count} 位共写',
   'row.filterByTask': '只看任务「{task}」',
+  'row.filterByWorktree': '只看检出「{worktree}」',
+  'row.leaseHeld': '工作区：正在被这份汇报占用',
+  'row.leaseReleased': '工作区：占用已结束，检出仍留在磁盘上',
+  'row.leaseReclaimed': '工作区：已被账本回收清除',
+  'row.leaseNone': '工作区：绑定已记录，但从未被占用',
   'row.expand': '展开 {report}',
   'row.collapse': '收起 {report}',
   'row.last': '最后',
@@ -45,6 +50,9 @@ export const zh = {
   'hop.copied': '副本',
   'hop.read': '阅读',
   'hop.acked': '回执',
+  'hop.leased': '认领工作区',
+  'hop.released': '释放工作区',
+  'hop.reclaimed': '回收工作区',
   'hop.amended': '修正',
   'hop.closed': '结案',
   'hop.reopened': '重开',
@@ -56,7 +64,7 @@ export const zh = {
   'filter.clear': '清除',
   'filter.showing': '显示 {visible}/{total} 份汇报',
   'filter.none': '没有符合当前筛选的汇报。',
-  'filter.hint': '状态筛选只作用于汇报；搜索会同时匹配会话标题与编号。',
+  'filter.hint': '状态筛选只作用于汇报；搜索会同时匹配会话标题与编号，以及任务标签和检出名。',
   'basis.created': '按创建',
   'basis.updated': '按最近活动',
   'basis.hint': '汇报按创建时间还是按最后一次活动排入时间线；会话始终按创建时间。',
@@ -108,6 +116,11 @@ export const en: Record<keyof typeof zh, string> = {
   'row.hops': '{count} hops',
   'row.authors': '{count} authors',
   'row.filterByTask': 'Show only task "{task}"',
+  'row.filterByWorktree': 'Show only checkout "{worktree}"',
+  'row.leaseHeld': 'Checkout: currently claimed by this report',
+  'row.leaseReleased': 'Checkout: claim ended, the checkout is still on disk',
+  'row.leaseReclaimed': 'Checkout: cleared away by the ledger',
+  'row.leaseNone': 'Checkout: bound but never claimed',
   'row.expand': 'Expand {report}',
   'row.collapse': 'Collapse {report}',
   'row.last': 'last',
@@ -120,6 +133,9 @@ export const en: Record<keyof typeof zh, string> = {
   'hop.copied': 'copied',
   'hop.read': 'read',
   'hop.acked': 'acked',
+  'hop.leased': 'leased',
+  'hop.released': 'released',
+  'hop.reclaimed': 'reclaimed',
   'hop.amended': 'amended',
   'hop.closed': 'closed',
   'hop.reopened': 'reopened',
@@ -131,7 +147,7 @@ export const en: Record<keyof typeof zh, string> = {
   'filter.clear': 'Clear',
   'filter.showing': 'Showing {visible}/{total} reports',
   'filter.none': 'No reports match the current filter.',
-  'filter.hint': 'The status filter narrows reports only; search matches every row, including session titles and ids.',
+  'filter.hint': 'The status filter narrows reports only; search matches every row, including session titles and ids, task labels and checkout names.',
   'basis.created': 'By creation',
   'basis.updated': 'By activity',
   'basis.hint': 'Whether reports are placed at creation or at their latest activity; sessions always keep their creation time.',
@@ -222,6 +238,15 @@ export const EDGE_LABEL: Record<TopologyEdgeKind, ReportLedgerKey> = {
  * language. Keyed by the full action union so a new hop action cannot ship
  * without a word for it.
  */
+/** Lease-state description, for the checkout chip's tooltip. */
+export const LEASE_HINT: Record<LeaseState, ReportLedgerKey> = {
+  held: 'row.leaseHeld',
+  released: 'row.leaseReleased',
+  reclaimed: 'row.leaseReclaimed',
+  none: 'row.leaseNone',
+}
+
+/** Hop action label, for the transfer-path rendering. */
 export const HOP_LABEL: Record<HopAction, ReportLedgerKey> = {
   authored: 'hop.authored',
   contributed: 'hop.contributed',
@@ -232,6 +257,9 @@ export const HOP_LABEL: Record<HopAction, ReportLedgerKey> = {
   copied: 'hop.copied',
   read: 'hop.read',
   acked: 'hop.acked',
+  leased: 'hop.leased',
+  released: 'hop.released',
+  reclaimed: 'hop.reclaimed',
   amended: 'hop.amended',
   closed: 'hop.closed',
   reopened: 'hop.reopened',
