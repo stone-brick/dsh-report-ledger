@@ -31,8 +31,8 @@ dsh plugin --profile web remove dsh-report-ledger
 
 ```sh
 # 1) 下载发行版附件（预构建产物，不需要构建工具链）
-#    https://gitee.com/stone_zhan/dsh-report-ledger/releases/download/v0.1.0/dsh-report-ledger-0.1.0.tgz
-dsh plugin --profile web add ./dsh-report-ledger-0.1.0.tgz
+#    https://gitee.com/stone_zhan/dsh-report-ledger/releases/download/v0.2.0/dsh-report-ledger-0.2.0.tgz
+dsh plugin --profile web add ./dsh-report-ledger-0.2.0.tgz
 
 # 2) 或直接从 Gitee 安装（安装时自动构建，约 15 秒）
 dsh plugin --profile web add git+https://gitee.com/stone_zhan/dsh-report-ledger.git
@@ -729,7 +729,7 @@ Gitee 自带的「仓库镜像管理」在本账号不可用（`GET /api/v5/repo
 
 ```sh
 curl -X POST "https://gitee.com/api/v5/repos/stone_zhan/dsh-report-ledger/releases/<release_id>/attach_files?access_token=<token>" \
-     -F "file=@dsh-report-ledger-0.1.0.tgz"
+     -F "file=@dsh-report-ledger-0.2.0.tgz"
 ```
 
 ## 已知限制
