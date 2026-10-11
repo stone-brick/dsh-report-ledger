@@ -65,5 +65,28 @@ jobs:
           }
 
           gp gitee --all
-          gp gitee --tags
+
+          # 只推 Gitee 上**还没有**的 tag，绝不更新已存在的。
+          #
+          # 为什么不能直接 `gp gitee --tags`：由 tag 推送触发的那次运行里，
+          # `actions/checkout` 会在本地把该 tag 重建成**轻量标签**（指向提交），而 GitHub 上
+          # 存的是附注标签对象。于是那次镜像把轻量标签推给了 Gitee——此后每次 `--tags` 都会
+          # `! [rejected] v0.2.0 -> v0.2.0 (already exists)`（tag 默认不允许更新），**整个 job
+          # 变红**，尽管 main 那一半（`--all`）每次都成功。
+          #
+          # 实测就是这样：v0.2.0 之后连续三次 main 推送的镜像全红，而 Gitee 上的 main 其实
+          # 每次都跟上了。v0.1.0 从没暴露这个问题，因为它在两边都是轻量标签、值相同。
+          #
+          # 已存在的 tag 往往只是**对象类型**不同而非提交不同；为这种差别去 force 移动一个
+          # 公开 tag 不值得。缺的补上、有的不动，才是这个 job 该有的语义。
+          existing=$(git ls-remote --tags gitee | awk '{print $2}' | sed 's#refs/tags/##; s/\^{}$//' | sort -u)
+          for tag in $(git tag); do
+            if grep -qx -- "$tag" <<<"$existing"; then
+              echo "tag $tag already on gitee; leaving it alone"
+            else
+              echo "pushing tag $tag"
+              gp gitee "refs/tags/$tag:refs/tags/$tag"
+            fi
+          done
+
           echo "mirrored $(git rev-parse --short HEAD) to Gitee"
