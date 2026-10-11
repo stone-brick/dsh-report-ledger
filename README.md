@@ -605,7 +605,7 @@ DSH 的委派层拒绝非相邻通信，源码原话是"其他代理、祖先、
 
 ```sh
 pnpm build        # 产出 lib/index.js（host 半）与 lib/client.js（client 半）
-pnpm test         # 十三套确定性检查共 908 项断言：账本内核与生命周期 96 + 提示词角色分流 55
+pnpm test         # 十二套确定性检查共 859 项断言：账本内核与生命周期 96 + 提示词角色分流 55
                   # + 时间线装配与路由守卫 72 + 同伴名册与创建 46
                   # + 时间线模型（筛选/线程/空状态/身份/正文/围栏）96
                   # + 拓扑布局（泳道/节点/边/树外/线程路由/确定性）51
@@ -614,11 +614,22 @@ pnpm test         # 十三套确定性检查共 908 项断言：账本内核与�
                   # + worktree 适配器（porcelain 解析/路径归一化/git 拒绝分类/格式版本闸门）76
                   # + 租约裁判（双层占用/并发只赢一个/凭证来自 git/交还与结案）74
                   # + 分配（命名 ref 安全性/两套预算/回收与脏跳过/幽灵终态/回滚）67
-                  # + 工作区工具面（参数只在启用时暴露/回滚/认领/配置生效/移除留痕）50
                   # + 维护视图（六种检出状态/未绑定检出/悬空条目/故意移除不误报/路由守卫）47
-                  #（不需要 DSH，不触碰真实账本，不启动服务器；worktree 相关的五套会在临时目录里建真仓库）
+                  #（不需要 DSH，不触碰真实账本，不启动服务器；worktree 相关的四套会在临时目录里建真仓库）
+pnpm test:tools   # 工作区工具面 50 项 —— 只能在有官方包层的地方跑，见下
 pnpm typecheck    # 对部署中的 harness 类型做全量类型检查
+pnpm check        # 以上三者的合并，也就是完整的本地门禁
 ```
+
+**为什么工具面那一套不在 `pnpm test` 里。** `scripts/worktree-tools-check.ts` 要运行期 import
+`src/report/tools.ts`，而后者运行期 import `@deepseek-ai/dsh-tools`——一个**未在 package.json 里
+声明**的包：本机靠 `node_modules/@deepseek-ai` 的 junction 解析，而 lockfile 里没有它，所以 runner
+上 `pnpm install` 之后必然解析不到。
+
+这与 typecheck 面对的是同一个约束（CI 里没有官方包层），处理方式也刻意一致：**CI 跑它跑得了的
+那部分，跑不了的留在本地门禁里**。`pnpm check` 是完整门禁，`pnpm test` 是它可移植的子集——`ci.yml`
+与 `publish.yml` 都只跑后者。把这个分工写在脚本名上而不是注释里，是为了失败信息不至于指向一个与
+被测代码毫无关系的模块名。
 
 **安装到 profile**（本仓库已这么装好）：包经 junction 出现在 `~/.dsh/profiles/node_modules/dsh-report-ledger`，并在 profile 的 `cordis.patch.yml` 中有一行：
 
@@ -669,7 +680,7 @@ pnpm typecheck    # 对部署中的 harness 类型做全量类型检查
 分发形态是**预构建的 bundle**：`lib/` 在发布前构建好，用户安装时不跑任何构建脚本，因此不需要 `allowBuilds` 授权。
 
 ```sh
-pnpm check          # 类型检查 + 五套确定性检查
+pnpm check          # 完整门禁：类型检查 + 十二套可移植检查 + 工具面那一套
 pnpm pack           # 先出 tarball 核对产物（prepare 会顺带构建）
 npm publish         # ⚠ 本机 registry 若是镜像站，必须显式 --registry=https://registry.npmjs.org
 ```
@@ -701,8 +712,14 @@ npm trust github dsh-report-ledger --file publish.yml \
 ```
 
 `--file` 必须与工作流文件名完全一致。之后发版就是 `pnpm version patch && git push origin main --follow-tags`。
-注意 CI 只跑 `pnpm test` + 构建，**不跑 typecheck**：类型来自 profile 的官方包层（见下文 junction 一节），
-CI 里没有这一层，把官方包装成 devDependency 反而会在工作区复制服务注册表、破坏实例同一性。
+注意 CI 只跑 `pnpm test` + 构建，**不跑 typecheck、也不跑 `pnpm test:tools`**：两者的原因相同——都需要
+profile 的官方包层（见下文 junction 一节），CI 里没有这一层；把官方包装成 devDependency 反而会在工作区
+复制服务注册表、破坏实例同一性。
+
+**`ci.yml` 只跑测试，不发布。** 在它之前，本仓库**唯一**跑测试的地方就是 `publish.yml`——而它一推 tag 就
+发布。也就是说这套断言从未在 Linux 上跑过，却要拿它决定一个版本能不能发出去。`ci.yml` 把这两件事分开：
+推 `main` 与每个 PR 都跑一遍可移植的检查加一次构建，于是"测试在 Linux 上过不过"有了独立答案，而推 tag
+之前的失败代价从"一个已挂出去的版本"降到"一条红的运行记录"。
 
 首次发布（新包名）只能手工来一次：npm 的**可信发布与暂存发布都要求包已存在**，新包名两者都会 404。
 手动发一次时如果是安全密钥账号，`npm publish` 会打印一个 `https://www.npmjs.com/auth/cli/…` 链接，

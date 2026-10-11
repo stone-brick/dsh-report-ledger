@@ -1,0 +1,56 @@
+name: ci
+
+# 每次推送到 main 与每个 PR 都跑一遍：确定性的检查，加一次构建。
+#
+# 为什么需要它：在此之前**唯一**跑测试的地方是 publish.yml，而它一推 tag 就发布。也就是说
+# 这套断言从未在 Linux 上跑过，就要拿它决定一个版本能不能发出去。CI 里报错的代价是一条红的
+# 运行记录；发布里报错的代价是一个已经挂出去、却过不了自己测试的版本号。
+#
+# 与 publish.yml 的纪律保持一致：只跑 `pnpm test` 与构建，**不跑 typecheck、也不跑
+# `pnpm test:tools`**。
+#
+#   - typecheck 要 DSH profile 的官方包层（见 README 的 junction 一节），runner 上没有这一层；
+#   - `pnpm test:tools` 会运行期 import `src/report/tools.ts`，而它运行期 import
+#     `@deepseek-ai/dsh-tools` —— 那是个**未在 package.json 里声明**的包，靠本机的 junction
+#     解析。lockfile 里没有它，所以 `pnpm install` 之后 runner 上必然解析不到。
+#
+# 把这两件事写进注释而不是让它们以"莫名的失败"出现，是因为失败信息会指向一个与被测代码毫无
+# 关系的模块名，而真正的原因在这里。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    # 卡住的任务比失败的任务糟：给整个 job 一个硬上限，超时就红，不要悬着。
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Toolchain versions
+        run: |
+          node --version
+          git --version   # worktree 的几套检查会在临时目录里建真仓库
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
