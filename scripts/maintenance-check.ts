@@ -186,7 +186,31 @@ check('one allocation reclaims at most one checkout',
 check('a reclaimed checkout is no longer counted as retained',
   afterReclaim.retained === 1, String(afterReclaim.retained))
 
-// ---- 7. the route ----------------------------------------------------------
+// ---- 7. a removal the ledger performed is not an anomaly -------------------
+// Closing with remove-if-clean takes the checkout away *and* records that the
+// ledger did it. Without the record the binding would sit at `released` with
+// nothing on disk — indistinguishable from a checkout that vanished behind the
+// ledger's back — so the view would report the recommended workflow as something
+// to look at, every single time. An alarm that fires on the happy path is one
+// readers learn to ignore.
+const swept = await leaseInto('removed by closing')
+await service.close(swept.report, ME, 'done', { worktree: 'remove-if-clean' })
+const afterSweep = await view()
+const sweptRecord = afterSweep.records.find((record) => record.report === swept.report)
+check('a checkout removed at closing reads as reclaimed', sweptRecord?.state === 'reclaimed',
+  String(sweptRecord?.state))
+check('a checkout removed at closing is off disk', sweptRecord?.onDisk === false)
+check("the removal is recorded as the ledger's own act",
+  (await ledger.readHops(swept.report)).some((hop) => hop.action === 'reclaimed'
+    && (hop.note ?? '').includes("owner's request")))
+check('a deliberate removal raises no warning about that report',
+  !afterSweep.warnings.some((warning) => warning.includes(swept.report)),
+  afterSweep.warnings.filter((warning) => warning.includes(swept.report)).join(' | '))
+check('a deliberate removal is not counted as retained',
+  afterSweep.records.filter((record) => record.state === 'released' && record.onDisk)
+    .every((record) => record.report !== swept.report))
+
+// ---- 8. the route ----------------------------------------------------------
 const handler = route.createWorktreesHandler({
   timeline: async () => { throw new Error('unused') },
   report: async () => undefined,

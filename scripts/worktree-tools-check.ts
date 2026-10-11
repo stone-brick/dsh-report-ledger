@@ -324,6 +324,12 @@ check('the onClose config reaches the tool without a parameter',
 check('the configured removal happened on disk',
   doomed?.worktree === undefined
   || !(await w.listWorktrees(located)).some((entry) => w.samePath(entry.path, doomed.worktree?.path ?? '')))
+// A removal the ledger performed has to be recorded as such, or the binding sits
+// at `released` with nothing on disk and every maintenance read reports the
+// workflow as an anomaly.
+check('the configured removal is recorded as reclaimed',
+  doomed !== undefined && leaseState(await ledger.readHops(doomed.report)) === 'reclaimed',
+  doomed === undefined ? 'no digest' : leaseState(await ledger.readHops(doomed.report)))
 
 // ---- 9. the budget refusal reaches the model as a sentence -----------------
 // A full budget must refuse through the tool with the holder named, because that

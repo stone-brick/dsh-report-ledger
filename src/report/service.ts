@@ -776,6 +776,21 @@ export class ReportService {
           : outcome.action === 'kept'
             ? 'working tree kept'
             : `working tree kept: ${outcome.detail ?? 'removal refused'}`
+      // A removal the ledger performed is recorded as such, whatever asked for
+      // it. Without this the binding would stay `released` with nothing on disk,
+      // which is indistinguishable from a checkout that vanished behind the
+      // ledger's back — so every deliberate removal would be reported as an
+      // anomaly, and an alarm that fires on the recommended workflow is one
+      // readers learn to ignore.
+      if (outcome?.action === 'removed') {
+        await this.#record(report, {
+          at: Date.now(),
+          actor,
+          action: 'reclaimed',
+          to: [],
+          note: `checkout ${binding?.path ?? ''} removed at the owner's request`,
+        })
+      }
       const closedNote = [note, disposition]
         .filter((part): part is string => part !== undefined && part !== '')
         .join('; ')
