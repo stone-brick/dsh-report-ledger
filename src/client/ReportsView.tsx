@@ -56,6 +56,7 @@ import {
   type StatusFilter,
 } from './timeline-model.ts'
 import { CardgraphView } from './CardgraphView.tsx'
+import { getJson, POLL_INTERVAL_MS, REPORT_URL, TIMELINE_URL } from './timeline-source.ts'
 import { HOP_LABEL, LEASE_HINT, STATUS_DOT, STATUS_LABEL, STATUS_TONE, type ReportLedgerKey } from './locales.ts'
 import { SEARCH_CLASS } from './styles.ts'
 
@@ -68,33 +69,6 @@ export interface ReportsViewProps {
   sessionId?: string
   /** Injected by the registration closure from the plugin's locale namespace. */
   t: Translate
-}
-
-const TIMELINE_URL = '/api/report-ledger/timeline'
-const REPORT_URL = '/api/report-ledger/report'
-
-/**
- * How often the tab re-reads the timeline while it is on screen.
- *
- * The ledger is written by other agents in the background, so a view that loads
- * once goes stale precisely when it matters — the human is watching for a report
- * that has not been written yet. Ten seconds is quiet enough not to matter on a
- * large ledger and still fast enough to watch a collaboration happen.
- */
-const POLL_INTERVAL_MS = 10_000
-
-/** Read one endpoint and unwrap its result envelope. */
-async function getJson<T>(url: string): Promise<T> {
-  const response = await fetch(url, { credentials: 'same-origin', headers: { accept: 'application/json' } })
-  let body: unknown
-  try {
-    body = await response.json()
-  } catch {
-    throw new Error(`HTTP ${response.status}`)
-  }
-  const envelope = body as { ok?: boolean; code?: string; value?: T }
-  if (envelope.ok !== true) throw new Error(envelope.code ?? `HTTP ${response.status}`)
-  return envelope.value as T
 }
 
 /** Substitute `{name}` placeholders. */

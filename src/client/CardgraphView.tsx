@@ -68,6 +68,16 @@ export interface CardgraphViewProps {
   readonly onOpen: (report: string) => void
   /** Full id plus session title, for the frame's hover label. */
   readonly idHint: (id: string) => string
+  /**
+   * Fill the host's height instead of the tab's fixed measure.
+   *
+   * The conversation tab needs a fixed box, because the page below it scrolls and
+   * an unbounded drawing would push that page around. A docked panel is the
+   * opposite: it owns the height, and a fixed measure there floats the drawing in
+   * a half-empty column. The box is measured either way — this only decides who
+   * sets the height.
+   */
+  readonly fill?: boolean
 }
 
 /**
@@ -114,7 +124,7 @@ const clamp = (value: number, low: number, high: number): number => Math.min(hig
  * @param props - payload, the reports to plot, translations, and the open handler.
  * @returns the canvas box with its controls.
  */
-export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint }: CardgraphViewProps): ReactElement {
+export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint, fill = false }: CardgraphViewProps): ReactElement {
   const boxRef = useRef<HTMLDivElement | null>(null)
   const baseRef = useRef<HTMLCanvasElement | null>(null)
   const pathRef = useRef<HTMLCanvasElement | null>(null)
@@ -348,7 +358,7 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint 
 
   const percent = Math.round(zoom * 100)
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', ...(fill ? fillRoot : {}) }}>
       <div style={controls}>
         <Button variant="outline" size="sm" aria-label={t('cardgraph.zoomOut')} onClick={() => { setZoom((z) => clamp(z / ZOOM_STEP, MIN_ZOOM, MAX_ZOOM)) }}>−</Button>
         <span style={percentStyle}>{t('cardgraph.zoom', { percent })}</span>
@@ -365,7 +375,7 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint 
         onPointerLeave={onPointerLeave}
         style={{
           ...box,
-          height: `${VIEW_HEIGHT}px`,
+          ...(fill ? fillBox : { height: `${VIEW_HEIGHT}px` }),
           cursor: drag.current?.moved === true ? 'grabbing' : hover.report === undefined ? 'grab' : 'pointer',
         }}
       >
@@ -418,6 +428,15 @@ const box: Record<string, string> = {
   border: '1px solid var(--dsw-alias-border-l1)',
   touchAction: 'none',
 }
+
+/**
+ * A filling host owns the height: the root takes the whole body and lets the
+ * measured box keep whatever the toolbar left. `minHeight` is what stops a flex
+ * child from refusing to shrink, which would push the toolbar off the top of a
+ * short panel instead of shrinking the drawing.
+ */
+const fillRoot: Record<string, string> = { flex: '1 1 auto', height: '100%', minHeight: '0' }
+const fillBox: Record<string, string> = { flex: '1 1 auto', minHeight: '0' }
 
 const layer: Record<string, string> = {
   position: 'absolute',

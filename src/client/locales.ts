@@ -90,14 +90,10 @@ export const zh = {
   'cardgraph.summary': '{frames} 个框 · {cards} 份汇报',
   'cardgraph.empty': '没有汇报',
   // The right-Sidebar tab this plugin contributes: the capsule that makes it
-  // discoverable on the guide page, the chip an open tab shows, and the probe
-  // body that stands in until the canvas is mounted there.
+  // discoverable on the guide page, and the chip an open tab shows.
   'sidebar.guideTitle': '汇报画布',
   'sidebar.guideDescription': '把拓扑画布停靠进右侧栏',
   'sidebar.chip': '汇报画布',
-  'sidebar.probeSession': '会话 {session}',
-  'sidebar.probeNoSession': '（未收到 sessionId）',
-  'sidebar.probeBody': '1 厘米探针：右栏 tab 类型注册成功，正文将在这里渲染。',
   'body.copy': '复制',
   'body.copied': '已复制',
   'body.footnotes': '脚注',
@@ -184,9 +180,6 @@ export const en: Record<keyof typeof zh, string> = {
   'sidebar.guideTitle': 'Report canvas',
   'sidebar.guideDescription': 'Dock the topology canvas into the right sidebar',
   'sidebar.chip': 'Report canvas',
-  'sidebar.probeSession': 'Session {session}',
-  'sidebar.probeNoSession': '(no sessionId received)',
-  'sidebar.probeBody': 'One-centimetre probe: the right-sidebar tab type registered; the canvas will render here.',
   'body.copy': 'Copy',
   'body.copied': 'Copied',
   'body.footnotes': 'Footnotes',

@@ -27,11 +27,23 @@
  * registered types through exactly the entries they declare. Without one, this
  * tab could only ever be opened by code.
  *
+ * ## What the body draws
+ *
+ * The same drawing the conversation tab shows, for the session the panel is
+ * bound to, read through the same endpoint and polled on the same cadence
+ * (`timeline-source.ts`). The box fills the panel instead of taking the tab's
+ * fixed 420px, because here the panel owns the height — and a docked panel can
+ * also be split or taken fullscreen, which is most of the reason to put a
+ * drawing in this column at all.
+ *
  * @module dsh-report-ledger/client/sidebar-tab
  */
 
-import { createElement } from 'react'
+import { createElement, useCallback, useMemo, useState } from 'react'
 import type { ReactElement } from 'react'
+import { CardgraphView } from './CardgraphView.tsx'
+import { buildRows, sessionTitles, shortId } from './timeline-model.ts'
+import { useTimeline } from './timeline-source.ts'
 import type { Translate } from './ReportsView.tsx'
 
 /** This type's identity in the tab system: unique, and the key both seats use. */
@@ -106,29 +118,58 @@ export interface TabBodyProps {
   readonly sessionId?: string
 }
 
+/** The sentences that stand in for a drawing that cannot be made yet. */
+const muted: Record<string, string> = {
+  padding: '12px',
+  color: 'var(--dsw-alias-label-caption)',
+}
+
 /**
- * Bind the probe body to the plugin's copy.
+ * Bind the tab body to the plugin's copy.
  *
  * The body is the *second* registration and carries the runtime face: a
- * component, receiving the session it was opened in.
+ * component, receiving the session it was opened in — which is the only input
+ * the drawing needs, since the ledger is read from the session tree's root.
  * @param t - namespace-bound translate, read on every render.
  * @returns the tab body component.
  */
 function bodyFor(t: Translate): (props: TabBodyProps) => ReactElement {
   return function LedgerCanvasBody(props: TabBodyProps): ReactElement {
     const sessionId = typeof props.sessionId === 'string' ? props.sessionId : ''
-    const line = { opacity: 0.7 }
-    return createElement(
-      'div',
-      { style: { display: 'flex', flexDirection: 'column', gap: '6px', padding: '12px' } },
-      createElement('strong', null, t('sidebar.chip')),
-      createElement(
-        'div',
-        { style: line },
-        sessionId === '' ? t('sidebar.probeNoSession') : t('sidebar.probeSession', { session: sessionId }),
-      ),
-      createElement('div', { style: line }, t('sidebar.probeBody')),
+    const { payload, error } = useTimeline(sessionId)
+    // Which card's path is being read. Unlike the conversation tab there is no
+    // list to expand a row into, so clicking a card selects it and clicking it
+    // again clears the selection.
+    const [openReport, setOpenReport] = useState<string | undefined>(undefined)
+
+    const rows = useMemo(() => (payload === undefined ? [] : buildRows(payload)), [payload])
+    // Unfiltered on purpose: a docked canvas has no toolbar of its own to filter
+    // with, and the conversation tab beside it is where narrowing belongs.
+    const reports = useMemo(() => rows.flatMap((row) => (row.kind === 'report' ? [row.front] : [])), [rows])
+    const titles = useMemo(
+      () => (payload === undefined ? new Map<string, string>() : sessionTitles(payload)),
+      [payload],
     )
+    const idHint = useCallback((id: string): string => {
+      const title = titles.get(id)
+      return title === undefined ? id : `${title} · ${id}`
+    }, [titles])
+    const onOpen = useCallback((report: string) => {
+      setOpenReport((current) => (current === report ? undefined : report))
+    }, [])
+
+    if (error !== undefined) return createElement('div', { style: muted }, t('view.error', { code: error }))
+    if (payload === undefined) return createElement('div', { style: muted }, t('view.loading'))
+    if (reports.length === 0) return createElement('div', { style: muted }, t('view.empty'))
+    return createElement(CardgraphView, {
+      payload,
+      reports,
+      t,
+      ...(openReport === undefined ? {} : { openReport }),
+      onOpen,
+      idHint,
+      fill: true,
+    })
   }
 }
 
