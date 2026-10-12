@@ -89,6 +89,7 @@ export const zh = {
   'cardgraph.fit': '填满宽度',
   'cardgraph.summary': '{frames} 个框 · {cards} 份汇报',
   'cardgraph.empty': '没有汇报',
+  'cardgraph.gestureHint': '滚轮平移 · Ctrl+滚轮缩放',
   // The right-Sidebar tab this plugin contributes: the capsule that makes it
   // discoverable on the guide page, and the chip an open tab shows.
   'sidebar.guideTitle': '汇报画布',
@@ -177,6 +178,7 @@ export const en: Record<keyof typeof zh, string> = {
   'cardgraph.fit': 'Fill width',
   'cardgraph.summary': '{frames} frames · {cards} reports',
   'cardgraph.empty': 'no reports',
+  'cardgraph.gestureHint': 'Wheel pans · Ctrl+wheel zooms',
   'sidebar.guideTitle': 'Report canvas',
   'sidebar.guideDescription': 'Dock the topology canvas into the right sidebar',
   'sidebar.chip': 'Report canvas',

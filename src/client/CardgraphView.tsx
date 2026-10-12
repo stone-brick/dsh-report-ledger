@@ -36,8 +36,17 @@ import type { Translate } from './ReportsView.tsx'
 /** How far the reader may zoom out and in. */
 const MIN_ZOOM = 0.25
 const MAX_ZOOM = 2.5
-/** One wheel notch. */
+/** One step of the `+`/`−` controls. */
 const ZOOM_STEP = 1.25
+/**
+ * Wheel-zoom exponent per pixel of delta, so that one 100px notch — a mouse
+ * wheel's usual magnitude — is exactly the {@link ZOOM_STEP} the buttons take.
+ * A trackpad pinch arrives as the same event with much smaller deltas, which is
+ * why the zoom is exponential in the delta rather than one step per event.
+ */
+const WHEEL_ZOOM_RATE = Math.log(ZOOM_STEP) / 100
+/** How close to the box's edge a wheel-pan stops, in screen pixels. */
+const EDGE_MARGIN = 12
 /** Drawing units to keep beyond the viewport, so a pan does not reveal a blank band. */
 const OVERSCAN = 160
 /** How tall the canvas box is, inside the tab. */
@@ -147,6 +156,9 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
 
   const lod = lodFor(zoom)
   const layout = useMemo(() => buildCardgraph(payload, reports, { lod }), [payload, reports, lod])
+  /** The drawing as of this render, for that same listener: it needs its extent. */
+  const layoutRef = useRef(layout)
+  layoutRef.current = layout
 
   const labels = useMemo(() => {
     const status: Record<string, string> = {}
@@ -313,28 +325,59 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
   }, [fit, layout, size])
 
   // A real, non-passive wheel listener: React's `onWheel` is passive at the root,
-  // where `preventDefault` is a no-op and the page scrolls under the zoom.
+  // where `preventDefault` is a no-op and the page scrolls under the drawing.
   //
-  // The listener is attached once, so it reads the current transform through refs
-  // rather than closing over it. The obvious alternative — computing the next zoom
-  // inside a `setZoom` updater and calling `setOffset` from in there — is a side
-  // effect inside an updater, which React is free to invoke twice; the offset would
-  // then be shifted twice per notch and the zoom would drift away from the cursor.
+  // **The wheel pans; Ctrl/⌘-wheel zooms.** The drawing is read top to bottom — a
+  // frame is a column of its session's own timeline, oldest card first — so the
+  // wheel is the reader's way down the drawing, which is what every other scroll
+  // surface on the page does with it; zoom moves to the modifier, the way editors
+  // split the two. Shift is the browser's own "horizontally", and a mouse reports
+  // that on the vertical delta.
+  //
+  // An axis only moves while the drawing overflows it, so a wheel over a drawing
+  // that fits cannot nudge it off-centre, and the travel stops one margin short of
+  // the edge rather than scrolling the drawing out of the box.
+  //
+  // The listener is attached once, so it reads the current transform and extent
+  // through refs rather than closing over them. The obvious alternative — computing
+  // the next zoom inside a `setZoom` updater and calling `setOffset` from in there —
+  // is a side effect inside an updater, which React is free to invoke twice; the
+  // offset would then be shifted twice per notch and the zoom would drift away from
+  // the cursor.
   useEffect(() => {
     const box = boxRef.current
     if (box === null) return
     const onWheel = (event: WheelEvent): void => {
       event.preventDefault()
-      const rect = box.getBoundingClientRect()
-      const px = event.clientX - rect.left
-      const py = event.clientY - rect.top
-      const current = zoomRef.current
-      const next = clamp(current * (event.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP), MIN_ZOOM, MAX_ZOOM)
-      const ratio = next / current
+      // `deltaMode` 1 is lines and 2 is pages; a mouse on Windows reports pixels.
+      const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? box.clientHeight : 1
+      const dy = event.deltaY * unit
+      const dx = event.deltaX * unit
       const previous = offsetRef.current
-      // Keep the point under the cursor fixed: the offset scales about it.
-      setOffset({ x: px - (px - previous.x) * ratio, y: py - (py - previous.y) * ratio })
-      setZoom(next)
+      if (event.ctrlKey || event.metaKey) {
+        const rect = box.getBoundingClientRect()
+        const px = event.clientX - rect.left
+        const py = event.clientY - rect.top
+        const current = zoomRef.current
+        const next = clamp(current * Math.exp(-dy * WHEEL_ZOOM_RATE), MIN_ZOOM, MAX_ZOOM)
+        const ratio = next / current
+        // Keep the point under the cursor fixed: the offset scales about it.
+        setOffset({ x: px - (px - previous.x) * ratio, y: py - (py - previous.y) * ratio })
+        setZoom(next)
+        return
+      }
+      const drawing = layoutRef.current
+      const zoom = zoomRef.current
+      const width = drawing.width * zoom
+      const height = drawing.height * zoom
+      const overflowX = width - box.clientWidth
+      const overflowY = height - box.clientHeight
+      const panX = event.shiftKey && dx === 0 ? dy : dx
+      const panY = event.shiftKey ? 0 : dy
+      setOffset({
+        x: overflowX > 0 ? clamp(previous.x - panX, box.clientWidth - width - EDGE_MARGIN, EDGE_MARGIN) : previous.x,
+        y: overflowY > 0 ? clamp(previous.y - panY, box.clientHeight - height - EDGE_MARGIN, EDGE_MARGIN) : previous.y,
+      })
     }
     box.addEventListener('wheel', onWheel, { passive: false })
     return () => { box.removeEventListener('wheel', onWheel) }
@@ -405,6 +448,7 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onPointerLeave={onPointerLeave}
+        title={t('cardgraph.gestureHint')}
         style={{
           ...box,
           ...(fill ? fillBox : { height: `${VIEW_HEIGHT}px` }),
