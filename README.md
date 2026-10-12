@@ -45,7 +45,7 @@ GitHub 每次推送后由 `.github/workflows/mirror-to-gitee.yml` 自动镜像 `
 ### 装完你会得到什么
 
 - **宿主半**（任何 profile）：十二个 `report_*` 工具 + `peer_list` / `peer_start`、
-  两段 `systemPrompt` 段，以及 web profile 下的两个只读 HTTP 端点；
+  两段 `systemPrompt` 段，以及 web profile 下的三个只读 HTTP 端点；
   工作区功能默认关闭，因此 `report_lease` 与各工具的 `worktree` 参数默认**不出现**；
 - **浏览器半**（仅 web profile）：会话头部多一个「汇报」标签页 —— 时间线、状态芯片、
   搜索、线程跳转与就地展开的传递路径；若开启了工作区，报告行上另有检出标记。
@@ -59,13 +59,13 @@ GitHub 每次推送后由 `.github/workflows/mirror-to-gitee.yml` 自动镜像 `
   外部依赖只有一个：`@deepseek-ai/dsh-tools`，由 profile 提供；浏览器半 require
   `react`、`react/jsx-runtime` 与 `@deepseek-ai/dsh-client-ui-primitives`（面板里的
   按钮、芯片、悬停、状态点、输入框与正文渲染全部用它，与内置的 Chat / 轨迹视图同一套），
-  其余全部内联。宿主半在 headless profile 里同样可用（没有 web server 时只是少了那两个端点）。
+  其余全部内联。宿主半在 headless profile 里同样可用（没有 web server 时只是少了那三个端点）。
   ⚠️ 于是浏览器半多了一条硬依赖：**shell 的冻结模块表里必须有
   `dsh-client-ui-primitives`**。它自带的对话视图就依赖它，所以缺了它意味着那个 shell
   本身已经坏了；真缺的话失败模式是「汇报标签页不出现」而不是整个 GUI 崩。
 - **账本是本机文件**：`$DSH_HOME/report-ledger/`（可用 `DSH_REPORT_LEDGER_ROOT`
   覆盖），不上传任何地方。
-- **浏览器读数据走两个 GET 路由**，注册在 DSH 的 web server 上，守卫仅放行 loopback
+- **浏览器读数据走三个 GET 路由**，注册在 DSH 的 web server 上，守卫仅放行 loopback
   对端与 loopback `Host`；细节与信任假设见下文「守卫与信任假设」。
 - **同伴工具会新建根会话**（在你自己的工作目录下），这是本插件唯一会新增活代理的能力，
   每次创建都记进名册日志，并受 `maxPeersPerAgent`（默认 8）约束。
