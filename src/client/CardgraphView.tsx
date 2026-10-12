@@ -45,6 +45,17 @@ const ZOOM_STEP = 1.25
  * why the zoom is exponential in the delta rather than one step per event.
  */
 const WHEEL_ZOOM_RATE = Math.log(ZOOM_STEP) / 100
+/**
+ * How far the fit may magnify past the drawing's own size.
+ *
+ * Filling the width on a tree with one card in it would otherwise ask for several
+ * times the design's size — one card stretched across the whole box, larger than
+ * any reading needs and carrying no more in it, because a tier is drawn at a fixed
+ * size and zooming past 100% only magnifies. One control step is the ceiling: the
+ * fit may lean in, not stretch. (The `+` control still reaches every zoom a reader
+ * asks for by hand.)
+ */
+const MAX_FIT_ZOOM = ZOOM_STEP
 /** How close to the box's edge a wheel-pan stops, in screen pixels. */
 const EDGE_MARGIN = 12
 /** Drawing units to keep beyond the viewport, so a pan does not reveal a blank band. */
@@ -285,7 +296,8 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
    *
    * Width is the target because time runs **down** here: a frame is a column, so
    * the horizontal axis is what has to fit on screen and the vertical axis is
-   * what the reader pans along.
+   * what the reader pans along. Magnification stops at {@link MAX_FIT_ZOOM}, so a
+   * tree too narrow to fill the box is left at its own size instead of stretched.
    *
    * The scale and the tier are mutually dependent — the tier is derived from the
    * zoom (`lodFor`) and the zoom is computed from a layout — so a single pass
@@ -305,7 +317,7 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
       .map(({ tier, drawing }) => ({
         tier,
         drawing,
-        scale: clamp((width - 24) / drawing.width, MIN_ZOOM, MAX_ZOOM),
+        scale: clamp((width - 24) / drawing.width, MIN_ZOOM, MAX_FIT_ZOOM),
       }))
       .find(({ tier, scale }) => lodFor(scale) === tier)
     if (chosen === undefined) return
