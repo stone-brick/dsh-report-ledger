@@ -29,12 +29,12 @@
  *
  * ## What the body draws
  *
- * The same drawing the conversation tab shows, for the session the panel is
- * bound to, read through the same endpoint and polled on the same cadence
- * (`timeline-source.ts`). The box fills the panel instead of taking the tab's
- * fixed 420px, because here the panel owns the height — and a docked panel can
- * also be split or taken fullscreen, which is most of the reason to put a
- * drawing in this column at all.
+ * The drawing the conversation tab used to carry, filling the panel instead of
+ * sitting in a fixed 420px box — the panel owns its height, and it can be split
+ * or taken fullscreen, which is most of the reason to put a drawing in this
+ * column at all. Picking a card opens that report's detail underneath, through
+ * the same view the conversation tab's rows use, so one report cannot read
+ * differently in the two places.
  *
  * @module dsh-report-ledger/client/sidebar-tab
  */
@@ -42,8 +42,9 @@
 import { createElement, useCallback, useMemo, useState } from 'react'
 import type { ReactElement } from 'react'
 import { CardgraphView } from './CardgraphView.tsx'
-import { buildRows, sessionTitles, shortId } from './timeline-model.ts'
-import { useTimeline } from './timeline-source.ts'
+import { ReportDetailView } from './ReportDetailView.tsx'
+import { buildRows, reportIds, sessionTitles, shortId } from './timeline-model.ts'
+import { useReportDetail, useTimeline } from './timeline-source.ts'
 import type { Translate } from './ReportsView.tsx'
 
 /** This type's identity in the tab system: unique, and the key both seats use. */
@@ -125,6 +126,22 @@ const muted: Record<string, string> = {
 }
 
 /**
+ * The canvas over the open report's detail.
+ *
+ * The split is even on purpose: the drawing keeps half the panel while a report
+ * is read, and all of it otherwise. A reader who wants more of either has the
+ * panel's own fullscreen and split rather than a second control here.
+ */
+const stack: Record<string, string> = {
+  display: 'flex',
+  flexDirection: 'column',
+  height: '100%',
+  minHeight: '0',
+}
+const stackCanvas: Record<string, string> = { flex: '1 1 50%', minHeight: '0' }
+const stackDetail: Record<string, string> = { flex: '1 1 50%', minHeight: '0', overflow: 'hidden' }
+
+/**
  * Bind the tab body to the plugin's copy.
  *
  * The body is the *second* registration and carries the runtime face: a
@@ -138,14 +155,21 @@ function bodyFor(t: Translate): (props: TabBodyProps) => ReactElement {
     const sessionId = typeof props.sessionId === 'string' ? props.sessionId : ''
     const { payload, error } = useTimeline(sessionId)
     // Which card's path is being read. Unlike the conversation tab there is no
-    // list to expand a row into, so clicking a card selects it and clicking it
-    // again clears the selection.
+    // list to expand a row into, so clicking a card opens its detail under the
+    // drawing and clicking it again puts the drawing back on its own.
     const [openReport, setOpenReport] = useState<string | undefined>(undefined)
+    // The detail rides the timeline's own tick: a report amended while the reader
+    // watches it keeps up, without a second cadence to reason about.
+    const { detail, error: detailError } = useReportDetail(openReport, payload?.generatedAt ?? 0)
 
     const rows = useMemo(() => (payload === undefined ? [] : buildRows(payload)), [payload])
     // Unfiltered on purpose: a docked canvas has no toolbar of its own to filter
     // with, and the conversation tab beside it is where narrowing belongs.
     const reports = useMemo(() => rows.flatMap((row) => (row.kind === 'report' ? [row.front] : [])), [rows])
+    // Which reports this tree actually holds — a thread link can lead to one it
+    // does not (a co-author's report, or a child living in another tree), and the
+    // detail says so rather than pretending the drawing lost it.
+    const inList = useMemo(() => (payload === undefined ? new Set<string>() : reportIds(payload)), [payload])
     const titles = useMemo(
       () => (payload === undefined ? new Map<string, string>() : sessionTitles(payload)),
       [payload],
@@ -161,7 +185,8 @@ function bodyFor(t: Translate): (props: TabBodyProps) => ReactElement {
     if (error !== undefined) return createElement('div', { style: muted }, t('view.error', { code: error }))
     if (payload === undefined) return createElement('div', { style: muted }, t('view.loading'))
     if (reports.length === 0) return createElement('div', { style: muted }, t('view.empty'))
-    return createElement(CardgraphView, {
+
+    const canvas = createElement(CardgraphView, {
       payload,
       reports,
       t,
@@ -170,6 +195,30 @@ function bodyFor(t: Translate): (props: TabBodyProps) => ReactElement {
       idHint,
       fill: true,
     })
+    if (openReport === undefined) return canvas
+    return createElement(
+      'div',
+      { style: stack },
+      createElement('div', { style: stackCanvas }, canvas),
+      createElement(
+        'div',
+        { style: stackDetail },
+        createElement(ReportDetailView, {
+          report: openReport,
+          detail,
+          error: detailError,
+          t,
+          idHint,
+          variant: 'pane',
+          onOpenReport: setOpenReport,
+          inList: inList.has(openReport),
+          // The drawing plots every report of the tree, so anything reachable from
+          // it is admitted by construction; the filter lives in the other surface.
+          visibleInFilter: true,
+          onClose: () => { setOpenReport(undefined) },
+        }),
+      ),
+    )
   }
 }
 

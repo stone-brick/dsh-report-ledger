@@ -12,7 +12,7 @@
  */
 
 import { useCallback, useEffect, useState } from 'react'
-import type { TimelinePayload } from '../shared/wire.ts'
+import type { ReportDetail, TimelinePayload } from '../shared/wire.ts'
 
 /** The timeline read endpoint, addressed by the tree's root session. */
 export const TIMELINE_URL = '/api/report-ledger/timeline'
@@ -98,4 +98,45 @@ export function useTimeline(sessionId: string): TimelineRead {
 
   const refresh = useCallback(() => { setNonce((value) => value + 1) }, [])
   return { payload, error, refresh }
+}
+
+/** What one report's detail read returns. */
+export interface ReportDetailRead {
+  /** The detail once it has arrived; `undefined` while loading or after a failure. */
+  readonly detail: ReportDetail | undefined
+  /** The failure code of the last read, or `undefined` while reads are succeeding. */
+  readonly error: string | undefined
+}
+
+/**
+ * Read one report's detail, for whichever surface is showing it.
+ *
+ * Not polled on its own: the caller owns the cadence, because the two surfaces
+ * want different ones — the conversation tab re-reads it when the reader hits
+ * refresh, while a docked panel passes its own timeline tick so a report being
+ * written under the reader's eyes keeps up.
+ * @param report - the report to read; `undefined` clears the read.
+ * @param nonce - bump to re-read the same report.
+ * @returns the detail, its error, and nothing else.
+ */
+export function useReportDetail(report: string | undefined, nonce: number): ReportDetailRead {
+  const [detail, setDetail] = useState<ReportDetail | undefined>(undefined)
+  const [error, setError] = useState<string | undefined>(undefined)
+
+  useEffect(() => {
+    if (report === undefined) {
+      setDetail(undefined)
+      setError(undefined)
+      return undefined
+    }
+    let cancelled = false
+    setDetail(undefined)
+    setError(undefined)
+    getJson<ReportDetail>(`${REPORT_URL}?id=${encodeURIComponent(report)}`)
+      .then((value) => { if (!cancelled) setDetail(value) })
+      .catch((cause: unknown) => { if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause)) })
+    return () => { cancelled = true }
+  }, [report, nonce])
+
+  return { detail, error }
 }

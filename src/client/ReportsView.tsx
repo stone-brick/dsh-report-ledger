@@ -17,28 +17,22 @@
  * @module dsh-report-ledger/client/ReportsView
  */
 
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import type { ReactElement } from 'react'
 import {
   Button,
-  IconCheckOutlineRegular,
   IconChevronDownOutlineRegular,
   IconChevronRightOutlineRegular,
-  IconCopyOutlineRegular,
   IconRefreshOutlineRegular,
   Input,
-  MarkdownText,
   Pill,
   StateDot,
   Tag,
   Tooltip,
-  writeClipboard,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ReportDetail, TimelinePayload, WorktreeLane } from '../shared/wire.ts'
 import {
   buildRows,
-  closeOpenFence,
-  displayBody,
   emptyState,
   filterRows,
   isFiltering,
@@ -55,8 +49,9 @@ import {
   type Row,
   type StatusFilter,
 } from './timeline-model.ts'
-import { CardgraphView } from './CardgraphView.tsx'
-import { getJson, POLL_INTERVAL_MS, REPORT_URL, TIMELINE_URL } from './timeline-source.ts'
+import { ReportDetailView } from './ReportDetailView.tsx'
+import { getJson, POLL_INTERVAL_MS, TIMELINE_URL, useReportDetail } from './timeline-source.ts'
+import { fill, stamp } from './format.ts'
 import { HOP_LABEL, LEASE_HINT, STATUS_DOT, STATUS_LABEL, STATUS_TONE, type ReportLedgerKey } from './locales.ts'
 import { SEARCH_CLASS } from './styles.ts'
 
@@ -70,31 +65,6 @@ export interface ReportsViewProps {
   /** Injected by the registration closure from the plugin's locale namespace. */
   t: Translate
 }
-
-/** Substitute `{name}` placeholders. */
-function fill(template: string, params: Record<string, string | number>): string {
-  return template.replace(/\{(\w+)\}/g, (whole, name: string) =>
-    Object.prototype.hasOwnProperty.call(params, name) ? String(params[name]) : whole)
-}
-
-/** Format one timestamp for a timeline row. */
-function stamp(at: number | undefined): string {
-  if (at === undefined || at <= 0) return ''
-  return new Date(at).toLocaleString()
-}
-
-/** Dom id of one report's card, so the topology can scroll to it. */
-function rowDomId(report: string): string {
-  return `report-ledger-row-${report}`
-}
-
-/**
- * How long the copy control keeps its "copied" label.
- *
- * The chat view uses the same one-second acknowledgement through the same
- * `writeClipboard`, so a copy here feels like a copy there.
- */
-const COPIED_HOLD_MS = 1000
 
 /** Storage key for the remembered status filter. */
 const FILTER_KEY = 'dsh.reportLedger.filter.v1'
@@ -129,23 +99,12 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
   // while somebody is reading it. Only the explicit refresh button advances both.
   const [detailNonce, setDetailNonce] = useState(0)
   const [openReport, setOpenReport] = useState<string | undefined>(undefined)
-  const [detail, setDetail] = useState<ReportDetail | undefined>(undefined)
-  const [detailError, setDetailError] = useState<string | undefined>(undefined)
   const [status, setStatus] = useState<StatusFilter>(rememberedStatus)
   const [text, setText] = useState('')
   const [basis, setBasis] = useState<ReportTimeBasis>('created')
-  const [copiedPath, setCopiedPath] = useState(false)
-  const copyTimer = useRef<ReturnType<typeof globalThis.setTimeout> | undefined>(undefined)
-  // The topology is an overview over the same data, so it is expanded by default
-  // and collapses rather than being a separate mode: the list stays the place
-  // where a report is read, and the graph stays above it.
-  const [showTopology, setShowTopology] = useState(true)
-  /** Set when the topology asks for a card, so the list can scroll to it once. */
-  const scrollTo = useRef<string | undefined>(undefined)
-
-  useEffect(() => () => {
-    if (copyTimer.current !== undefined) globalThis.clearTimeout(copyTimer.current)
-  }, [])
+  // The open report's detail, read through the same hook the right column's canvas
+  // tab uses — one read path, so the two surfaces cannot disagree about a report.
+  const { detail, error: detailError } = useReportDetail(openReport, detailNonce)
 
   useEffect(() => {
     try {
@@ -186,37 +145,12 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
     }
   }, [sessionId])
 
-  useEffect(() => {
-    if (openReport === undefined) return
-    let cancelled = false
-    setDetail(undefined)
-    setDetailError(undefined)
-    getJson<ReportDetail>(`${REPORT_URL}?id=${encodeURIComponent(openReport)}`)
-      .then((value) => { if (!cancelled) setDetail(value) })
-      .catch((cause: unknown) => { if (!cancelled) setDetailError(cause instanceof Error ? cause.message : String(cause)) })
-    return () => { cancelled = true }
-  }, [openReport, detailNonce])
-
   const rows = useMemo<Row[]>(() => (payload === undefined ? [] : buildRows(payload, basis)), [payload, basis])
   const counts = useMemo(() => statusCounts(payload?.reports ?? []), [payload])
   const inList = useMemo(() => (payload === undefined ? new Set<string>() : reportIds(payload)), [payload])
   // The lease state is not on the digest: liveness comes from the hop stream, and
   // the host derives it once so the browser never needs a second copy of the rule.
   const lanes = useMemo(() => (payload === undefined ? new Map<string, WorktreeLane>() : laneIndex(payload)), [payload])
-  const shownBody = useMemo(() => displayBody(detail?.body ?? ''), [detail])
-  // The text the renderer gets. A cut body can end mid-fence, and an unterminated
-  // fence would turn the rest of the report into a code block — see
-  // `closeOpenFence`. Only applied when the body was actually cut, so a whole
-  // body always renders exactly as written.
-  const bodyText = useMemo(() => {
-    const text = shownBody.text.trim()
-    return shownBody.truncated ? closeOpenFence(text) : text
-  }, [shownBody])
-  /** Strings for the prose renderer's own controls, from this plugin's dictionary. */
-  const markdownLabels = useMemo(
-    () => ({ code: { copyLabel: t('body.copy'), copiedLabel: t('body.copied') }, footnotes: t('body.footnotes') }),
-    [t],
-  )
   const filter = useMemo(() => ({ status, text }), [status, text])
   const visible = useMemo<Row[]>(() => {
     const kept = filterRows(rows, filter)
@@ -260,17 +194,6 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
   }, [titles])
 
   /**
-   * The reports the topology plots.
-   *
-   * Taken from the same filtered row set the list renders, so the graph is a view
-   * of the current filter rather than a second source of truth — narrowing the
-   * toolbar narrows both.
-   */
-  const plotted = useMemo(
-    () => filterRows(rows, filter).flatMap((row) => (row.kind === 'report' ? [row.front] : [])),
-    [rows, filter],
-  )
-  /**
    * One session id the way a dense row shows it: shortened, with the full value
    * and the session title on hover. The hover is not decoration — it is where
    * the human name lives, because titles are unbounded and a row is not.
@@ -284,43 +207,6 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
   const refresh = useCallback(() => {
     setTimelineNonce((value) => value + 1)
     setDetailNonce((value) => value + 1)
-  }, [])
-
-  /**
-   * Open a report from the topology.
-   *
-   * The graph does not get its own detail surface: it opens the card in the list
-   * and brings it into view, which keeps one reading surface for the body and the
-   * transfer path — and inherits the card's guarantees for free (a filtered-out
-   * report still gets a row to render into).
-   */
-  const openFromTopology = useCallback((report: string) => {
-    scrollTo.current = report
-    setOpenReport(report)
-  }, [])
-
-  // Scroll after the row exists, not before: the card may only be synthesized by
-  // the render this state change is about to cause.
-  useEffect(() => {
-    const target = scrollTo.current
-    if (target === undefined || openReport !== target) return
-    scrollTo.current = undefined
-    globalThis.document?.getElementById(rowDomId(target))?.scrollIntoView({ block: 'center', behavior: 'smooth' })
-  }, [openReport])
-
-  /**
-   * Copy the ledger path, acknowledging through the control's own label.
-   *
-   * Uses the shell's `writeClipboard` rather than `navigator.clipboard`, so the
-   * plugin inherits whatever fallback chain the rest of the GUI relies on.
-   */
-  const copyPath = useCallback((path: string) => {
-    void writeClipboard(path).then((ok) => {
-      if (!ok) return
-      setCopiedPath(true)
-      if (copyTimer.current !== undefined) globalThis.clearTimeout(copyTimer.current)
-      copyTimer.current = globalThis.setTimeout(() => { setCopiedPath(false) }, COPIED_HOLD_MS)
-    })
   }, [])
 
   const shell: Record<string, string | number> = {
@@ -396,36 +282,6 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
   /** The muted caption colour, for the empty-state sentences. */
   const muted: Record<string, string | number> = {
     color: 'var(--dsw-alias-label-tertiary, #888)',
-  }
-  /** The frame the rendered body sits in — a block, not a scroll box. */
-  const bodyFrame: Record<string, string | number> = {
-    padding: '8px 10px',
-    background: 'var(--dsw-alias-bg-base, rgba(0,0,0,0.02))',
-    border: '1px solid var(--dsw-alias-border-l1, rgba(0,0,0,0.06))',
-    borderRadius: '4px',
-  }
-  /** The transcript's footer line: ledger path plus its copy control. */
-  const pathRow: Record<string, string | number> = {
-    ...wrap,
-    marginTop: '6px',
-    display: 'flex',
-    alignItems: 'baseline',
-    gap: '6px',
-  }
-  /** The topology's frame: an overview that sits above the list, not instead of it. */
-  const topoSection: Record<string, string | number> = {
-    marginBottom: '12px',
-    border: '1px solid var(--dsw-alias-border-l1, rgba(0,0,0,0.06))',
-    borderRadius: '6px',
-    background: 'var(--dsw-alias-bg-layer-1, rgba(0,0,0,0.02))',
-    overflow: 'hidden',
-  }
-  const topoHead: Record<string, string | number> = {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '10px',
-    padding: '6px 10px',
-    borderBottom: '1px solid var(--dsw-alias-border-l1, rgba(0,0,0,0.06))',
   }
 
   if (error !== undefined) {
@@ -506,32 +362,6 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
       {empty === 'no-reports' ? <div style={muted}>{t('view.empty')}</div> : null}
       {empty === 'filtered-out' ? <div style={muted}>{t('filter.none')}</div> : null}
 
-      {payload !== undefined && plotted.length > 0 ? (
-        <section style={topoSection}>
-          <div style={topoHead}>
-            <strong>{t('topology.title')}</strong>
-            <Button
-              variant="ghost"
-              size="sm"
-              icon={showTopology ? <IconChevronDownOutlineRegular size={14} /> : <IconChevronRightOutlineRegular size={14} />}
-              onClick={() => { setShowTopology((value) => !value) }}
-            >
-              {showTopology ? t('topology.hide') : t('topology.show')}
-            </Button>
-          </div>
-          {showTopology ? (
-            <CardgraphView
-              payload={payload}
-              reports={plotted}
-              t={t}
-              idHint={idHint}
-              openReport={openReport}
-              onOpen={openFromTopology}
-            />
-          ) : null}
-        </section>
-      ) : null}
-
       {visible.map((row, index) => {
         const pad = 8 + row.depth * 18
         if (row.kind === 'session') {
@@ -573,7 +403,7 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
         const wtLane = lanes.get(front.report)
         const toggleLabel = fill(expanded ? t('row.collapse') : t('row.expand'), { report: front.report })
         return (
-          <div key={`r-${front.report}`} id={rowDomId(front.report)} style={{ paddingLeft: `${pad}px` }}>
+          <div key={`r-${front.report}`} style={{ paddingLeft: `${pad}px` }}>
             {/* The row is a plain container, not a `role="button"`.
                 It used to be one, and it contained a real <button> (the task
                 chip) — nested interactive content. Worse, a role="button" takes
@@ -693,129 +523,18 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
             </div>
 
             {expanded ? (
-              <div id={panelId} style={{
-                margin: '4px 0 10px 24px',
-                padding: '10px 12px',
-                borderRadius: '6px',
-                background: 'var(--dsw-alias-bg-layer-2, rgba(0,0,0,0.03))',
-                border: '1px solid var(--dsw-alias-border-l1, rgba(0,0,0,0.06))',
-              }}>
-                {detailError !== undefined ? <div style={{ color: 'var(--dsw-alias-state-error-label, #b00)' }}>{t('view.error', { code: detailError })}</div> : null}
-                {detail === undefined && detailError === undefined ? <div style={time}>{t('view.detail.loading')}</div> : null}
-                {detail === undefined ? null : (
-                  <>
-                    <div style={{ marginBottom: '6px' }}><strong>{t('view.detail.route')}</strong></div>
-                    {detail.hops.length === 0 ? <div style={time}>{t('view.detail.routeEmpty')}</div> : (
-                      <div style={{ display: 'grid', gridTemplateColumns: 'auto auto auto 1fr', gap: '2px 10px', marginBottom: '8px' }}>
-                        {detail.hops.map((hop, hopIndex) => (
-                          <Fragment key={`h-${hopIndex}`}>
-                            <span style={time}>{stamp(hop.at)}</span>
-                            <span><strong>{t(HOP_LABEL[hop.action])}</strong></span>
-                            <span style={wrap}><Tooltip label={idHint(hop.actor)} side="bottom" delayMs={400}><span>{hop.actor}</span></Tooltip></span>
-                            <span style={wrap}>{hop.to.length === 0 ? (hop.note ?? '') : `→ ${hop.to.join(', ')}${hop.note === undefined ? '' : ` (${hop.note})`}`}</span>
-                          </Fragment>
-                        ))}
-                      </div>
-                    )}
-                    {/* "Still owed" is a state, so it gets the shell's state dot
-                        instead of a colour mixed by hand. */}
-                    {detail.pending.length === 0 ? null : (
-                      <div style={{ ...wrap, display: 'flex', alignItems: 'baseline', gap: '6px' }}>
-                        <StateDot state="warning" size={8} />
-                        <span>{fill(t('view.detail.pending'), { targets: detail.pending.join(', ') })}</span>
-                      </div>
-                    )}
-
-                    {(() => {
-                      const parent = detail.front.parent
-                      const children = detail.front.children
-                      if (parent === undefined && children.length === 0) return null
-                      const link = (target: string): ReactElement => (
-                        <span key={target} style={{ marginRight: '6px' }}>
-                          <Tooltip label={fill(t('detail.openLinked'), { report: target })} side="bottom" delayMs={400}>
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() => { setOpenReport(target) }}
-                            >
-                              {target}
-                            </Button>
-                          </Tooltip>
-                        </span>
-                      )
-                      return (
-                        <div style={{ marginBottom: '8px' }}>
-                          <strong>{t('detail.thread')}</strong>
-                          {parent === undefined ? null : (
-                            <div style={{ marginTop: '2px' }}>
-                              <span style={time}>{`${t('detail.parent')}: `}</span>{link(parent)}
-                            </div>
-                          )}
-                          {children.length === 0 ? null : (
-                            <div style={{ marginTop: '2px' }}>
-                              <span style={time}>{`${t('detail.children')}: `}</span>{children.map(link)}
-                            </div>
-                          )}
-                        </div>
-                      )
-                    })()}
-
-                    {/* Kept OUT of the thread block above: that block returns early
-                        when a report has no thread links, which is the common case
-                        for exactly the reports this notice is about. */}
-                    {inList.has(detail.front.report) ? null : (
-                      <div style={{ ...wrap, marginBottom: '8px' }}>
-                        {fill(t('detail.outside'), { report: detail.front.report })}
-                        {' '}
-                        <Button variant="outline" onClick={() => { setOpenReport(undefined) }}>
-                          {t('detail.backToList')}
-                        </Button>
-                      </div>
-                    )}
-                    {inList.has(detail.front.report) && !filteredReportIds.has(detail.front.report) ? (
-                      <div style={{ ...wrap, marginBottom: '8px' }}>
-                        {fill(t('detail.filteredOut'), { report: detail.front.report })}
-                      </div>
-                    ) : null}
-
-                    <div style={{ margin: '8px 0 4px' }}><strong>{t('view.detail.body')}</strong></div>
-                    {/* Rendered with the shell's own prose renderer — the same one
-                        the Chat and Trajectory views use — so a report body reads
-                        like everything else in the GUI instead of like a raw file.
-
-                        No inner scroll box on purpose. The text is already bounded
-                        by the same limit `report_read` gives the model, so the panel
-                        grows by at most a few dozen lines; a nested scroller inside
-                        the timeline's scroller would only steal the wheel. */}
-                    <div style={bodyFrame}>
-                      <MarkdownText text={bodyText} labels={markdownLabels} />
-                    </div>
-                    {shownBody.truncated ? (
-                      <div style={{ ...wrap, marginTop: '4px' }}>
-                        {fill(t('detail.bodyTruncated'), { chars: shownBody.text.trim().length })}
-                      </div>
-                    ) : null}
-                    {/* The ledger path is the longest string on the panel and the
-                        only one that carries no spaces to break at, so it wraps
-                        mid-segment on purpose — and it now has a copy control,
-                        because "see the file" is only useful if you can get there.
-                        The copy goes through the shell's own `writeClipboard`. */}
-                    <div style={pathRow}>
-                      <StateDot state="idle" size={6} />
-                      <span style={{ wordBreak: 'break-all' }}>{t('view.detail.path')}: {detail.path}</span>
-                      <Tooltip label={copiedPath ? t('body.copied') : t('view.copyPath')} side="bottom" delayMs={300}>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          icon={copiedPath ? <IconCheckOutlineRegular size={16} /> : <IconCopyOutlineRegular size={16} />}
-                          aria-label={copiedPath ? t('body.copied') : t('view.copyPath')}
-                          onClick={() => { copyPath(detail.path) }}
-                        />
-                      </Tooltip>
-                    </div>
-                  </>
-                )}
-              </div>
+              <ReportDetailView
+                report={front.report}
+                detail={detail}
+                error={detailError}
+                t={t}
+                idHint={idHint}
+                id={panelId}
+                variant="row"
+                onOpenReport={setOpenReport}
+                inList={inList.has(front.report)}
+                visibleInFilter={filteredReportIds.has(front.report)}
+              />
             ) : null}
           </div>
         )
