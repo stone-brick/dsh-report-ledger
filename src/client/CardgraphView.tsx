@@ -148,6 +148,16 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
   const [hover, setHover] = useState<{ report?: string; frame?: number }>({})
   const [ready, setReady] = useState(false)
   const fitted = useRef(false)
+  /**
+   * Whether the transform on screen is still the fit's own.
+   *
+   * While this holds, the fit follows the box; the moment the reader zooms or pans
+   * the view themselves it stops following, because from then on the transform is
+   * a decision rather than a consequence — see the resize effect below.
+   */
+  const fittedTransform = useRef(true)
+  /** The last box the resize effect saw, so a re-measure is not a resize. */
+  const measured = useRef({ width: 0, height: 0 })
   /** The transform as of this render, for the one listener that is attached once. */
   const zoomRef = useRef(zoom)
   const offsetRef = useRef(offset)
@@ -299,6 +309,8 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
       }))
       .find(({ tier, scale }) => lodFor(scale) === tier)
     if (chosen === undefined) return
+    // The transform is the fit's own again, so it follows the box again.
+    fittedTransform.current = true
     setZoom(chosen.scale)
     setOffset({
       x: Math.max(8, (width - chosen.drawing.width * chosen.scale) / 2),
@@ -307,6 +319,18 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
       y: 12,
     })
   }, [layoutFor])
+
+  /**
+   * The `+`/`−` controls.
+   *
+   * An explicit zoom is the reader's decision, so the fit stops following the box
+   * from here — the same reason the wheel and the drag clear the flag.
+   * @param factor - what to multiply the current zoom by.
+   */
+  const stepZoom = useCallback((factor: number) => {
+    fittedTransform.current = false
+    setZoom((z) => clamp(z * factor, MIN_ZOOM, MAX_ZOOM))
+  }, [])
 
   /**
    * The first view is the fit — the same rule the control runs.
@@ -323,6 +347,26 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
     fitted.current = true
     fit()
   }, [fit, layout, size])
+
+  /**
+   * Follow the box, but only while the box is what chose the view.
+   *
+   * A dock, a split and a fullscreen switch all change the box under a transform
+   * computed for the old one. A drawing left carrying the old offset is clipped by
+   * the new box — it reads as a broken drawing rather than as a preserved view —
+   * so a view the fit chose is fitted again. A reader who zoomed in to read one
+   * card means it, so a view they took over is left exactly where they put it.
+   *
+   * The box is compared by value, not by identity: the observer hands over a fresh
+   * object on every measure, and a re-measure of the same box is not a resize.
+   */
+  useEffect(() => {
+    const previous = measured.current
+    measured.current = size
+    if (size.width === 0 || previous.width === 0) return
+    if (previous.width === size.width && previous.height === size.height) return
+    if (fittedTransform.current) fit()
+  }, [fit, size])
 
   // A real, non-passive wheel listener: React's `onWheel` is passive at the root,
   // where `preventDefault` is a no-op and the page scrolls under the drawing.
@@ -349,6 +393,8 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
     if (box === null) return
     const onWheel = (event: WheelEvent): void => {
       event.preventDefault()
+      // Whatever the gesture is, the view is the reader's from here on.
+      fittedTransform.current = false
       // `deltaMode` 1 is lines and 2 is pages; a mouse on Windows reports pixels.
       const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? box.clientHeight : 1
       const dy = event.deltaY * unit
@@ -396,6 +442,8 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
       const dy = event.clientY - pressing.y
       if (Math.abs(dx) + Math.abs(dy) > DRAG_SLOP) pressing.moved = true
       if (pressing.moved) {
+        // A drag is the reader placing the drawing, not the box choosing it.
+        fittedTransform.current = false
         setOffset({ x: pressing.offsetX + dx, y: pressing.offsetY + dy })
         return
       }
@@ -435,9 +483,9 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', ...(fill ? fillRoot : {}) }}>
       <div style={controls}>
-        <Button variant="outline" size="sm" aria-label={t('cardgraph.zoomOut')} onClick={() => { setZoom((z) => clamp(z / ZOOM_STEP, MIN_ZOOM, MAX_ZOOM)) }}>−</Button>
+        <Button variant="outline" size="sm" aria-label={t('cardgraph.zoomOut')} onClick={() => { stepZoom(1 / ZOOM_STEP) }}>−</Button>
         <span style={percentStyle}>{t('cardgraph.zoom', { percent })}</span>
-        <Button variant="outline" size="sm" aria-label={t('cardgraph.zoomIn')} onClick={() => { setZoom((z) => clamp(z * ZOOM_STEP, MIN_ZOOM, MAX_ZOOM)) }}>+</Button>
+        <Button variant="outline" size="sm" aria-label={t('cardgraph.zoomIn')} onClick={() => { stepZoom(ZOOM_STEP) }}>+</Button>
         <Button variant="outline" size="sm" onClick={fit}>{t('cardgraph.fit')}</Button>
         <CardgraphLegend t={t} />
         <span style={percentStyle}>{t('cardgraph.summary', { frames: layout.frames.length, cards: layout.cards.length })}</span>
