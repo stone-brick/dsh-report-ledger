@@ -91,7 +91,7 @@ const host: UserConfig = {
   // external: inlining a service registry would duplicate its classes and break
   // identity. Everything else (the YAML codec) is inlined, because a third-party
   // package cannot rely on the profile's transitive resolution.
-  external: ['@deepseek-ai/cordis', /^@deepseek-ai\/dsh-/],
+  external: ['@deepseek-ai/cordis', /^@deepseek-ai\/dsh-/, 'yaml'],
 }
 
 /** Browser half: the closure-factory artifact the module loader expects. */

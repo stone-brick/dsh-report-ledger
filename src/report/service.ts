@@ -325,7 +325,7 @@ export class ReportService {
   }
 
   /** Read one report or throw a model-legible error. */
-  async #require(report: string): Promise<Report> {
+  async #load(report: string): Promise<Report> {
     const found = await readReport(report)
     if (found === undefined) throw new Error(`report-ledger: no report ${JSON.stringify(report)} in the ledger`)
     return found
@@ -398,7 +398,7 @@ export class ReportService {
       const parent = await readReport(input.parent)
       if (parent !== undefined) {
         await this.#withLock(input.parent, async () => {
-          const latest = await this.#require(input.parent as string)
+          const latest = await this.#load(input.parent as string)
           const children = latest.front.children.includes(report)
             ? latest.front.children
             : [...latest.front.children, report]
@@ -418,7 +418,7 @@ export class ReportService {
       refreshed = copied
       outcomes = [...outcomes, ...await this.#deliver(copied, input.cc ?? [], 'quiet', input.actor)]
     }
-    const final = await this.#require(report)
+    const final = await this.#load(report)
     return { front: final.front, outcomes }
   }
 
@@ -474,10 +474,10 @@ export class ReportService {
    * @param actor - the session whose activity reopened it.
    */
   async #reopenIfClosed(report: string, actor: string): Promise<void> {
-    const current = await this.#require(report)
+    const current = await this.#load(report)
     if (current.front.status !== 'closed') return
     await this.#record(report, { at: Date.now(), actor, action: 'reopened', to: [] })
-    const fresh = await this.#require(report)
+    const fresh = await this.#load(report)
     await writeReport({ front: { ...fresh.front, status: 'open', updated: Date.now() }, body: fresh.body })
   }
 
@@ -495,7 +495,7 @@ export class ReportService {
     const name = await this.#host.describe(actor)
     const header = `\n\n---\n\n### contribution by ${name ?? actor} at ${new Date().toISOString()}\n\n`
     return this.#withLock(report, async () => {
-      await this.#require(report)
+      await this.#load(report)
       await this.#reopenIfClosed(report, actor)
       // Append to the body rather than rewriting it: contributions from several
       // agents must not overwrite one another.
@@ -522,7 +522,7 @@ export class ReportService {
   async send(report: string, actor: string, targets: readonly string[], note?: string): Promise<MutationResult> {
     if (targets.length === 0) throw new Error('report-ledger: report_send requires at least one recipient')
     return this.#withLock(report, async () => {
-      await this.#require(report)
+      await this.#load(report)
       await this.#reopenIfClosed(report, actor)
       const front = await this.#record(report, {
         at: Date.now(),
@@ -532,7 +532,7 @@ export class ReportService {
         ...(note === undefined ? {} : { note }),
       })
       const outcomes = await this.#deliver(front, targets, 'wakeup', actor)
-      return { front: (await this.#require(report)).front, outcomes }
+      return { front: (await this.#load(report)).front, outcomes }
     })
   }
 
@@ -547,7 +547,7 @@ export class ReportService {
   async carbonCopy(report: string, actor: string, targets: readonly string[], note?: string): Promise<MutationResult> {
     if (targets.length === 0) throw new Error('report-ledger: report_cc requires at least one recipient')
     return this.#withLock(report, async () => {
-      await this.#require(report)
+      await this.#load(report)
       await this.#reopenIfClosed(report, actor)
       const front = await this.#record(report, {
         at: Date.now(),
@@ -557,7 +557,7 @@ export class ReportService {
         ...(note === undefined ? {} : { note }),
       })
       const outcomes = await this.#deliver(front, targets, 'quiet', actor)
-      return { front: (await this.#require(report)).front, outcomes }
+      return { front: (await this.#load(report)).front, outcomes }
     })
   }
 
@@ -583,7 +583,7 @@ export class ReportService {
   ): Promise<MutationResult> {
     if (targets.length === 0) throw new Error('report-ledger: report_forward requires at least one target')
     return this.#withLock(report, async () => {
-      await this.#require(report)
+      await this.#load(report)
       await this.#reopenIfClosed(report, actor)
       const front = await this.#record(report, {
         at: Date.now(),
@@ -593,7 +593,7 @@ export class ReportService {
         ...(note === undefined ? {} : { note }),
       })
       const outcomes = await this.#deliver(front, targets, mode === 'copy' ? 'quiet' : 'wakeup', actor)
-      return { front: (await this.#require(report)).front, outcomes }
+      return { front: (await this.#load(report)).front, outcomes }
     })
   }
 
@@ -604,7 +604,7 @@ export class ReportService {
    * @returns the model-facing rendering.
    */
   async read(report: string, actor: string): Promise<string> {
-    const found = await this.#require(report)
+    const found = await this.#load(report)
     const hops = await readHops(report)
     await this.#record(report, { at: Date.now(), actor, action: 'read', to: [] })
     const path = reportPath(report)
@@ -699,7 +699,7 @@ export class ReportService {
    */
   async acknowledge(report: string, actor: string, note?: string): Promise<MutationResult> {
     return this.#withLock(report, async () => {
-      const current = await this.#require(report)
+      const current = await this.#load(report)
       const front = await this.#record(report, {
         at: Date.now(),
         actor,
@@ -710,7 +710,7 @@ export class ReportService {
       if (current.front.status === 'open') {
         await writeReport({ front: { ...front, status: 'acked', updated: Date.now() }, body: current.body })
       }
-      return { front: (await this.#require(report)).front, outcomes: [] }
+      return { front: (await this.#load(report)).front, outcomes: [] }
     })
   }
 
@@ -735,7 +735,7 @@ export class ReportService {
     options: { worktree?: 'keep' | 'remove-if-clean' } = {},
   ): Promise<MutationResult> {
     return this.#withLock(report, async () => {
-      const current = await this.#require(report)
+      const current = await this.#load(report)
       this.#assertOwner(current.front, actor, 'close', 'closing')
       const binding = current.front.worktree
       // A concluded report cannot be holding a checkout against anyone, so
@@ -801,10 +801,10 @@ export class ReportService {
         to: [],
         ...(closedNote === '' ? {} : { note: closedNote }),
       })
-      const fresh = await this.#require(report)
+      const fresh = await this.#load(report)
       await writeReport({ front: { ...fresh.front, status: 'closed', updated: Date.now() }, body: fresh.body })
       return {
-        front: (await this.#require(report)).front,
+        front: (await this.#load(report)).front,
         outcomes: [],
         ...(outcome === undefined ? {} : { worktree: outcome }),
       }
@@ -845,7 +845,7 @@ export class ReportService {
       ?? (binding.repo === undefined ? undefined : await resolveRepo(binding.repo))
     const key = compareKey(repo?.commonDir ?? binding.path)
     return await this.#withRepoLock(key, async () => await this.#withLock(report, async () => {
-      const current = await this.#require(report)
+      const current = await this.#load(report)
       this.#assertOwner(current.front, actor, 'lease', 'leasing')
       const verdict = await evaluateLease({
         binding,
@@ -889,7 +889,7 @@ export class ReportService {
    */
   async release(report: string, actor: string, note?: string): Promise<MutationResult> {
     return await this.#withLock(report, async () => {
-      const current = await this.#require(report)
+      const current = await this.#load(report)
       this.#assertOwner(current.front, actor, 'release', 'releasing')
       if (current.front.worktree === undefined) {
         throw new Error(`report-ledger: ${report} is not bound to a working tree, so there is nothing to release`)
@@ -1177,7 +1177,7 @@ export class ReportService {
    */
   async amend(report: string, actor: string, patch: AmendInput): Promise<MutationResult> {
     return this.#withLock(report, async () => {
-      const current = await this.#require(report)
+      const current = await this.#load(report)
       if (!ReportService.owns(current.front, actor)) {
         const owners = [...new Set([current.front.from, ...current.front.authors])]
         throw new Error(
@@ -1231,7 +1231,7 @@ export class ReportService {
       if (patch.body !== undefined) {
         if (replacingBody) {
           // A true rewrite, recorded as such on the hop.
-          await writeReport({ front: (await this.#require(report)).front, body: patch.body })
+          await writeReport({ front: (await this.#load(report)).front, body: patch.body })
         } else {
           const name = await this.#host.describe(actor)
           const header = `\n\n---\n\n### amendment by ${name ?? actor} at ${new Date().toISOString()}\n\n`
@@ -1240,7 +1240,7 @@ export class ReportService {
       }
 
       if (next.subject !== undefined || next.task !== undefined || next.artifacts !== undefined) {
-        const base = await this.#require(report)
+        const base = await this.#load(report)
         // `task` is destructured out and re-added only when it survives, so an empty
         // value clears the label instead of storing an empty string — that keeps
         // `task === undefined` the single meaning of "no label".

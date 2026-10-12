@@ -56,7 +56,9 @@ GitHub 每次推送后由 `.github/workflows/mirror-to-gitee.yml` 自动镜像 `
   82 条断言均通过）。0.1.5-rc.3 已不再支持：那个 shell 的图标导出带画板尺寸后缀（如
   `IconCopyOutline16`），0.2.0 改成尺寸中立的 `…Regular` / `…Medium` 成对导出，尺寸交给
   `size` prop。宿主半的运行时
-  外部依赖只有一个：`@deepseek-ai/dsh-tools`，由 profile 提供；浏览器半 require
+  外部依赖有两条：`@deepseek-ai/dsh-tools`（由 profile 提供，**不声明**）与 `yaml`
+  （声明在 `dependencies` 里，由包管理器安装；front matter 的 YAML 编解码用它）；
+  `lib/` 随源码提交，固定 Commit 里就带着可运行的构建产物。浏览器半 require
   `react`、`react/jsx-runtime` 与 `@deepseek-ai/dsh-client-ui-primitives`（面板里的
   按钮、芯片、悬停、状态点、输入框与正文渲染全部用它，与内置的 Chat / 轨迹视图同一套），
   其余全部内联。宿主半在 headless profile 里同样可用（没有 web server 时只是少了那三个端点）。
@@ -712,10 +714,12 @@ pnpm check        # 以上三者的合并，也就是完整的本地门禁
 ### 发布（维护者）
 
 分发形态是**预构建的 bundle**：`lib/` 在发布前构建好，用户安装时不跑任何构建脚本，因此不需要 `allowBuilds` 授权。
+`lib/` 同时**随源码提交**（DSH STORE 的固定源检查要求运行产物出现在固定 Commit 里），`ci.yml` 会在构建后比对
+提交的产物与源码是否一致，避免"改了 `src` 忘了 `build`"。
 
 ```sh
 pnpm check          # 完整门禁：类型检查 + 十一套可移植检查 + 工具面那一套
-pnpm pack           # 先出 tarball 核对产物（prepare 会顺带构建）
+pnpm build && pnpm pack   # lib/ 随源码提交，pack 前显式重建一次
 npm publish         # ⚠ 本机 registry 若是镜像站，必须显式 --registry=https://registry.npmjs.org
 ```
 
@@ -760,9 +764,9 @@ profile 的官方包层（见下文 junction 一节），CI 里没有这一层�
 在浏览器里完成认证即可（放行凭据用 `--//registry.npmjs.org/:_authToken=…` 传，别写进 `.npmrc`）。
 
 
-**git 安装与 npm 安装不是一回事**：`add github:<你>/dsh-report-ledger#<sha>`（或 Gitee 地址）拉到的是**源码**，
-靠仓库里的 `prepare` 构建出 `lib/` 才能跑——本仓库实测在 pnpm 10.14 上直接通过、未要求 `allowBuilds`，
-但部分 pnpm 版本会拦截依赖的构建脚本，届时 `dsh` 会打印出要写进 profile 的 `pnpm-workspace.yaml` 的包键。
+**git 安装与 npm 安装现在是同一件事**：`lib/` 随源码提交，`add github:<你>/dsh-report-ledger#<sha>`（或 Gitee 地址）
+拉到源码后**直接就带着可运行的构建产物**，安装期不执行任何生命周期脚本、不需要 `allowBuilds` 授权。
+（0.2.0 之前靠 `prepare` 在安装时构建：那既要求 pnpm 放行构建脚本，也过不了 DSH STORE 的固定源检查。）
 **对外仍推荐 npm 安装**：预构建产物、不触发任何构建脚本、不需要授权。
 
 #### Gitee 镜像

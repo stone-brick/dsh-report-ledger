@@ -10,9 +10,10 @@ node_modules/
 # pnpm 的本地 store（本机为绕开沙箱限制而落在工作区内，约 57 MB）
 .pnpm-store/
 
-# 构建输出：pnpm build 可重现（lib/index.js 是内联了 yaml 的 host 半，
-# lib/client.js 是浏览器闭包工厂产物）。不提交以免每次改代码都产生大体积 diff。
-lib/
+# 构建输出：pnpm build 可重现。lib/ **随源码提交**——DSH STORE 的固定源检查要求
+# main/exports 指向的运行产物出现在固定 Commit 的树上，而安装期不再跑 prepare。
+# ci.yml 在构建后比对提交的产物与源码是否一致，防止"改了 src 忘了 build"。
+# （历史：0.2.0 之前 ignore 掉 lib/，靠 prepare 在安装时构建。）
 
 # 其它
 *.log
