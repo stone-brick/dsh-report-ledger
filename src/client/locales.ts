@@ -86,7 +86,7 @@ export const zh = {
   'cardgraph.zoomIn': '放大',
   'cardgraph.zoomOut': '缩小',
   'cardgraph.zoom': '{percent}%',
-  'cardgraph.fit': '适应窗口',
+  'cardgraph.fit': '填满宽度',
   'cardgraph.summary': '{frames} 个框 · {cards} 份汇报',
   'cardgraph.empty': '没有汇报',
   // The right-Sidebar tab this plugin contributes: the capsule that makes it
@@ -174,7 +174,7 @@ export const en: Record<keyof typeof zh, string> = {
   'cardgraph.zoomIn': 'Zoom in',
   'cardgraph.zoomOut': 'Zoom out',
   'cardgraph.zoom': '{percent}%',
-  'cardgraph.fit': 'Fit',
+  'cardgraph.fit': 'Fill width',
   'cardgraph.summary': '{frames} frames · {cards} reports',
   'cardgraph.empty': 'no reports',
   'sidebar.guideTitle': 'Report canvas',

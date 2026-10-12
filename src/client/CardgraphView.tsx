@@ -24,8 +24,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent, ReactElement } from 'react'
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ReportFrontMatter, TimelinePayload } from '../shared/wire.ts'
-import { buildCardgraph, hitTest, lodFor } from './cardgraph-model.ts'
-import type { CardgraphLayout, CardgraphViewport, Rect } from './cardgraph-model.ts'
+import { buildCardgraph, CARDGRAPH_LODS, hitTest, lodFor } from './cardgraph-model.ts'
+import type { CardgraphLayout, CardgraphLod, CardgraphViewport, Rect } from './cardgraph-model.ts'
 import {
   FALLBACK_THEME, WIRE_TOKENS, createCanvasPainter, createThemeReader,
 } from './cardgraph-painter.ts'
@@ -246,39 +246,71 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
   // ---------------------------------------------------------------------------
   // Fitting, zooming and panning
   // ---------------------------------------------------------------------------
-  const fit = useCallback(() => {
-    const box = boxRef.current
-    if (box === null || layout.width <= 0 || layout.height <= 0) return
-    const width = box.clientWidth
-    const height = box.clientHeight
-    const next = clamp(Math.min((width - 24) / layout.width, (height - 24) / layout.height), MIN_ZOOM, 1)
-    setZoom(next)
-    setOffset({
-      x: Math.max(8, (width - layout.width * next) / 2),
-      y: Math.max(8, (height - layout.height * next) / 2),
-    })
-  }, [layout])
+  /**
+   * The drawing at any tier, for the fit's own probing.
+   *
+   * `layout` above is the tier the current zoom draws. A fit has to look at the
+   * other tiers *before* it can know which one it will land in, and building all
+   * three on every payload change — every poll — would be paid for nothing.
+   */
+  const layoutFor = useCallback(
+    (tier: CardgraphLod): CardgraphLayout => buildCardgraph(payload, reports, { lod: tier }),
+    [payload, reports],
+  )
 
   /**
-   * The first view, which is deliberately **not** the fit.
+   * Fill the width, in the richest tier that can afford to.
    *
-   * Fitting the whole drawing into a 420px box on a three-column tree lands around
-   * 57%, which is the compact tier — so the reader's first sight of a card canvas
-   * would be a wall of one-line cards with the subjects this design is about elided.
-   * Measured on the real tab, not reasoned about: the first screenshot of the wiring
-   * came out at 57% and proved the point.
+   * Width is the target because time runs **down** here: a frame is a column, so
+   * the horizontal axis is what has to fit on screen and the vertical axis is
+   * what the reader pans along.
    *
-   * So the first view fits the **width** and never drops below the card tier: frames,
-   * columns and readable cards all visible at once, and the reader scrolls down
-   * instead of squinting. `适应窗口` still gives the whole picture on demand.
+   * The scale and the tier are mutually dependent — the tier is derived from the
+   * zoom (`lodFor`) and the zoom is computed from a layout — so a single pass
+   * that reads the *current* `layout` can leave the view drawing one tier while
+   * its offset was centred for another: the drawing then floats off-centre, small,
+   * in a box it does not fill, and the next click can undo the last one. Probing
+   * the tiers makes the result a function of the box alone: idempotent, and
+   * independent of whichever tier the reader arrived in.
+   */
+  const fit = useCallback(() => {
+    const box = boxRef.current
+    if (box === null) return
+    const width = box.clientWidth
+    const chosen = CARDGRAPH_LODS
+      .map((tier) => ({ tier, drawing: layoutFor(tier) }))
+      .filter(({ drawing }) => drawing.width > 0)
+      .map(({ tier, drawing }) => ({
+        tier,
+        drawing,
+        scale: clamp((width - 24) / drawing.width, MIN_ZOOM, MAX_ZOOM),
+      }))
+      .find(({ tier, scale }) => lodFor(scale) === tier)
+    if (chosen === undefined) return
+    setZoom(chosen.scale)
+    setOffset({
+      x: Math.max(8, (width - chosen.drawing.width * chosen.scale) / 2),
+      // Anchored to the top rather than centred: a frame's cards run oldest first,
+      // so a drawing taller than its box is read from the top down.
+      y: 12,
+    })
+  }, [layoutFor])
+
+  /**
+   * The first view is the fit — the same rule the control runs.
+   *
+   * It used to be a rule of its own (fit the width, never below the card tier,
+   * never above 100%) because the fit of the day — the whole drawing inside the
+   * box — landed around 57%, the compact tier, and opened the tab as a wall of
+   * one-line cards. With the fit now filling the width in the richest tier that
+   * can afford it, that special case has nothing left to correct, and one rule is
+   * one fewer way for the first sight and the control to disagree.
    */
   useEffect(() => {
     if (fitted.current || size.width === 0 || layout.cards.length === 0) return
     fitted.current = true
-    const next = clamp((size.width - 24) / Math.max(layout.width, 1), 0.8, 1)
-    setZoom(next)
-    setOffset({ x: Math.max(8, (size.width - layout.width * next) / 2), y: 12 })
-  }, [layout, size])
+    fit()
+  }, [fit, layout, size])
 
   // A real, non-passive wheel listener: React's `onWheel` is passive at the root,
   // where `preventDefault` is a no-op and the page scrolls under the zoom.
