@@ -18,6 +18,7 @@ import { createElement } from 'react'
 import { ReportsView, type Translate } from './ReportsView.tsx'
 import { en, zh } from './locales.ts'
 import { installStyles } from './styles.ts'
+import { installSidebarTab, type ScopedContext } from './sidebar-tab.ts'
 
 /** Locale namespace this plugin owns. */
 const NS = 'report-ledger'
@@ -54,6 +55,16 @@ interface ClientContext {
   locale: LocaleService
   effect(callback: () => (() => void) | void, label?: string): () => void
   get(name: string): unknown
+  /**
+   * Run a contribution once a service exists — and again if it comes back.
+   *
+   * The one form that is both optional (a missing service does not park this
+   * fiber) and late (a service published after this plugin still reaches it):
+   * `get` alone reads too early, and a key on `inject` above makes it a
+   * requirement whose absence is a white page rather than a missing tab. See
+   * client/sidebar-tab.ts for the case that needs it.
+   */
+  inject(keys: readonly string[], callback: (scoped: ScopedContext) => void): () => void
 }
 
 /** The slot and locale services must be mounted before this half can contribute. */
@@ -71,6 +82,11 @@ export function apply(ctx: ClientContext): void {
   ctx.effect(() => installStyles(), 'report-ledger: adapter styles')
 
   const t = ctx.locale.bind(NS)
+
+  // The right column is optional twice over — a host may not mount it at all, and
+  // this one publishes its tab registry after this plugin in the same boot — so
+  // the contribution hangs off `ctx.inject`, not the `inject` list above.
+  installSidebarTab(ctx, t)
 
   ctx.slots.inject('conversation.view', () => ctx.slots.register(
     {
