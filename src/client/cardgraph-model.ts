@@ -2,12 +2,12 @@
  * The card canvas's layout: sessions as **frames**, reports as **cards**, and the
  * transfer path as **wires** between them.
  *
- * This is the successor to `topology-model.ts`. The swimlane proved that the
- * shape of a collaboration can be drawn, but its nodes are chips: a report is an
- * `R-0001` and nothing more. Here a report is a rectangle with room for its
- * subject, so the drawing carries content instead of only structure — and a
- * session becomes a **frame that contains** its reports, so belonging is drawn by
- * containment rather than inferred from a column.
+ * This replaced the swimlane's own model, retired together with its view. The
+ * swimlane proved that the shape of a collaboration can be drawn, but its nodes
+ * are chips: a report is an `R-0001` and nothing more. Here a report is a
+ * rectangle with room for its subject, so the drawing carries content instead of
+ * only structure — and a session becomes a **frame that contains** its reports,
+ * so belonging is drawn by containment rather than inferred from a column.
  *
  * Three rules keep this module the same kind of thing as the swimlane's — pure,
  * DOM-free, byte-deterministic for one input, and pinned by assertions:

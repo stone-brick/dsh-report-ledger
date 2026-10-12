@@ -9,7 +9,7 @@
  */
 
 import type { HopAction, LeaseState, ReportStatus } from '../shared/wire.ts'
-import type { TopologyEdgeKind } from './topology-model.ts'
+import type { CardgraphEdgeKind } from './cardgraph-model.ts'
 
 /** Chinese dictionary — the source of truth for the key set. */
 export const zh = {
@@ -76,9 +76,7 @@ export const zh = {
   'detail.filteredOut': '{report} 在当前筛选下被隐藏了（用「清除」恢复）。',
   'detail.backToList': '回到列表',
   'detail.bodyTruncated': '正文过长，此处只显示开头 {chars} 字；完整内容见账本文件。',
-  'topology.external': '树外',
-  'topology.externalHint': '不属于本树的会话',
-  'topology.openHint': '点击在列表中打开',
+  'cardgraph.external': '树外',
   'cardgraph.zoomIn': '放大',
   'cardgraph.zoomOut': '缩小',
   'cardgraph.zoom': '{percent}%',
@@ -161,9 +159,7 @@ export const en: Record<keyof typeof zh, string> = {
   'detail.filteredOut': '{report} is hidden by the current filter (use Clear to restore it).',
   'detail.backToList': 'Back to the list',
   'detail.bodyTruncated': 'Body is long, so only the first {chars} characters are shown here; the ledger file has the whole thing.',
-  'topology.external': 'outside',
-  'topology.externalHint': 'Sessions outside this tree',
-  'topology.openHint': 'Click to open it in the list',
+  'cardgraph.external': 'outside',
   'cardgraph.zoomIn': 'Zoom in',
   'cardgraph.zoomOut': 'Zoom out',
   'cardgraph.zoom': '{percent}%',
@@ -221,11 +217,11 @@ export const STATUS_DOT: Record<ReportStatus, 'ongoing' | 'done' | 'idle'> = {
 /**
  * Edge kind → the word the drawing calls it.
  *
- * The topology borrows the transfer path's own vocabulary rather than inventing
- * a second one: an arrow in the graph and a row in the panel name the same
+ * The drawing borrows the transfer path's own vocabulary rather than inventing a
+ * second one: an arrow in the canvas and a row in the panel name the same
  * relation, so they say the same thing.
  */
-export const EDGE_LABEL: Record<TopologyEdgeKind, ReportLedgerKey> = {
+export const EDGE_LABEL: Record<CardgraphEdgeKind, ReportLedgerKey> = {
   to: 'hop.sent',
   cc: 'hop.cc',
   author: 'hop.contributed',

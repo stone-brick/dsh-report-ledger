@@ -184,7 +184,7 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
   const labels = useMemo(() => {
     const status: Record<string, string> = {}
     for (const [state, key] of Object.entries(STATUS_LABEL)) status[state] = t(key)
-    return { external: t('topology.external'), empty: t('cardgraph.empty'), status }
+    return { external: t('cardgraph.external'), empty: t('cardgraph.empty'), status }
   }, [t])
 
   // ---------------------------------------------------------------------------
