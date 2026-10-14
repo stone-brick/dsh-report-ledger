@@ -14,6 +14,10 @@
  *     harness web server when one is mounted (the headless profile has none, and
  *     the plugin stays fully functional without them).
  *
+ * It also registers each peer it starts with the workspace registry, when the
+ * deployment composes one. That is bookkeeping rather than a fifth feature, and
+ * it is described where it lives: {@link PeerHost.attachToWorkspace}.
+ *
  * Every adapter from an untyped harness service into this plugin's own shapes
  * lives here, so the rest of the plugin never touches a live harness object.
  *
@@ -27,13 +31,24 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-agent'
+import type {} from '@deepseek-ai/dsh-workspace'
+import type { SessionId } from '@deepseek-ai/dsh-session'
+// The one host value this plugin imports instead of reaching through a service,
+// and the exception is narrow enough to state: a pure path canonicalizer with no
+// registry, no lifecycle and no state to duplicate. The value is what makes the
+// workspace lookup correct — the registry validates a session's directory by
+// canonical real path, so matching one by string equality against the workspace
+// list would silently attribute a peer to the wrong group (or refuse a
+// registration the registry would accept) wherever a path differs by case,
+// separators, a symlink or an 8.3 short name.
+import { realpathNormalize } from '@deepseek-ai/dsh-workspace'
 import type { AgentLike } from './report/deliver.ts'
 import { pendingTargets } from './report/deliver.ts'
 import { PARTNERSHIP_SECTION_ORDER, PROTOCOL, SECTION_ORDER, partnershipText } from './report/guidance.ts'
 import { listReports, readHops, readReport, reportPath } from './report/ledger.ts'
 import { resolveWorktree, type WorktreeConfig, type WorktreeRuntime } from './report/allocate.ts'
 import { buildWorktreeReport } from './report/maintenance.ts'
-import { DEFAULT_MAX_PEERS, PeerService, type PeerHost, type PeerReceipt } from './report/peer.ts'
+import { DEFAULT_MAX_PEERS, PeerService, type PeerHost, type PeerReceipt, type WorkspaceRegistration } from './report/peer.ts'
 import { REPORT_PATH, TIMELINE_PATH, WORKTREES_PATH, createReportHandler, createTimelineHandler, createWorktreesHandler, type ReportDetail } from './report/route.ts'
 import { ReportService, type ReportServiceHost } from './report/service.ts'
 import { buildTimeline, type SessionRecordLike } from './report/timeline.ts'
@@ -119,6 +134,130 @@ interface AgentDefaultModelLike {
   currentSelection(): { readonly provider: string; readonly model: string; readonly reasoningEffort?: string }
 }
 
+/** Structural face of one workspace record. */
+interface WorkspaceLike {
+  /** Its display title, used when reporting which group the peer joined. */
+  readonly title: string
+  /**
+   * Account one session under this workspace.
+   * @param sessionId - the session to account.
+   */
+  attachSession(sessionId: SessionId): Promise<void>
+}
+
+/**
+ * Structural face of the optional workspace registry.
+ *
+ * Optional on purpose, and the reason is visible in the deployment matrix: the
+ * headless profile composes no workspace registry because there is no sidebar to
+ * group anything in, and a plugin that demanded the service would refuse to load
+ * there. Absent means "this deployment has no groups", which
+ * {@link buildPeerHost}'s registration hook reports as nothing to attach rather
+ * than as a failure.
+ */
+interface WorkspaceRegistryLike {
+  /**
+   * Resolve the workspace owning one directory, without creating anything.
+   * @param path - an existing directory path.
+   * @returns the workspace, or `undefined` when no registration owns it.
+   */
+  resolveByPath(path: string): Promise<WorkspaceLike | undefined>
+}
+
+/**
+ * The host capabilities the peer bundle reaches for, named one by one.
+ *
+ * Narrower than {@link Context} on purpose, and the narrowing earns two things:
+ * the peer seam's real dependency surface is readable in one place instead of
+ * inferred from the whole plugin context, and the seam can be exercised without
+ * a harness — which is what lets the registration path (canonical-path lookup,
+ * attach, degraded reporting) be tested deterministically instead of only in a
+ * deployment.
+ */
+export interface PeerHostContext {
+  /** The live agents, for residency, cwd inheritance and creation. */
+  readonly agents: {
+    /**
+     * One live agent.
+     * @param sessionId - the session to look up.
+     * @returns the agent, or `undefined` when it is not resident.
+     */
+    get(sessionId: never): PeerCallerAgent | undefined
+    /**
+     * Every live agent.
+     * @returns the agents.
+     */
+    list(): readonly PeerCallerAgent[]
+    /**
+     * Create one root agent.
+     * @param options - the harness creation request.
+     * @returns the handle for the created agent.
+     */
+    create(options: PeerCreateOptions): Promise<{ readonly agent: PeerCallerAgent }>
+  }
+  /**
+   * Read one optional service off the registry.
+   * @param name - the service name.
+   * @returns the service, or `undefined` when this deployment composes none.
+   */
+  get(name: string): unknown
+  /** The host logger, for failures that must also be visible in the deployment log. */
+  readonly logger?: { warn?(message: string): void }
+}
+
+/** The slice of a live agent the peer bundle reads. */
+export interface PeerCallerAgent {
+  /** Its session id. */
+  readonly id: unknown
+  /** Its creation-time options, the fallback source of the peer's model route. */
+  readonly options: PeerRoute
+  /** Its scope context, read only to join the peer to the same composition. */
+  readonly ctx: Context
+  /** Its live session. */
+  readonly session: {
+    /**
+     * The route in force after request-time selection.
+     * @returns the request header's config, when a request has been made.
+     */
+    requestHeader(): { config?: PeerRoute } | undefined
+    /**
+     * The durable header fields the peer bundle reads.
+     * @returns the header.
+     */
+    readonly header?: unknown
+    /**
+     * The events appended so far.
+     * @returns the event log.
+     */
+    snapshotEvents(): readonly unknown[]
+  }
+  /**
+   * Wake the agent with a message.
+   * @param message - the message to deliver.
+   */
+  steer(message: never): void
+  /**
+   * Resolve once the agent is quiescent.
+   * @returns a promise settled at quiescence.
+   */
+  whenIdle(): Promise<void>
+}
+
+/** The harness request one peer creation makes. */
+export interface PeerCreateOptions {
+  /** The pre-allocated session id. */
+  readonly sessionId: never
+  /** The durable creation metadata: the inherited directory and joined preset. */
+  readonly meta?: { readonly cwd?: string; readonly agentPreset?: string }
+  /** The inherited model route. */
+  readonly agentOptions: never
+  /**
+   * Join the peer to its starter's composition.
+   * @param agentCtx - the new agent's scope context.
+   */
+  setup(agentCtx: Context): void
+}
+
 /** The model route a peer inherits from its starter. */
 interface PeerRoute {
   readonly provider?: string
@@ -128,7 +267,7 @@ interface PeerRoute {
 }
 
 /** Everything this plugin reads out of the host, in its own shapes. */
-interface HostBundle extends ReportServiceHost {
+export interface HostBundle extends ReportServiceHost {
   /**
    * Read display titles for a set of sessions.
    * @param ids - session ids.
@@ -388,14 +527,20 @@ async function readDetail(id: string): Promise<ReportDetail | undefined> {
  *    header, so a cold read of the peer's log rebuilds the composition it
  *    actually ran under instead of the deployment default.
  *
+ * It is also, on a deployment that composes a workspace registry, the only place
+ * that can put the new peer into a workspace group — see
+ * {@link PeerHost.attachToWorkspace} for why no other layer can: the registry's
+ * history bootstrap runs once, long before this peer exists, and creation
+ * metadata has no workspace field to name it with.
+ *
  * `confirmPeer` closes the other half of the same problem: a peer that turns out
  * to be unable to run must be visible to the agent that just started it, rather
  * than reported as a successful hand-off.
- * @param ctx - the plugin context.
+ * @param ctx - the host capabilities this bundle reaches for.
  * @param host - the session-reading bundle.
  * @returns the peer host capability.
  */
-function buildPeerHost(ctx: Context, host: HostBundle): PeerHost {
+export function buildPeerHost(ctx: PeerHostContext, host: HostBundle): PeerHost {
   const presets = (): AgentPresetsLike | undefined => ctx.get('agentPresets') as AgentPresetsLike | undefined
   const defaultModel = (): AgentDefaultModelLike | undefined => ctx.get('agentDefaultModel') as AgentDefaultModelLike | undefined
   return {
@@ -444,6 +589,50 @@ function buildPeerHost(ctx: Context, host: HostBundle): PeerHost {
       return {
         id: String(handle.agent.id),
         steer: (message) => { handle.agent.steer(message as never) },
+      }
+    },
+    /**
+     * Put the new peer into the workspace group that owns its directory.
+     *
+     * This exists because nothing else does it. A session enters a workspace's
+     * accounting at exactly one of two moments: the one-time history bootstrap,
+     * which the registry runs only while its own `initialized` marker is false and
+     * which therefore never sees a session created afterwards, or an attach
+     * performed at creation by a caller that named a workspace. A GUI-created
+     * session takes the second route. A peer cannot: `ctx.agents.create()` takes
+     * creation metadata — `cwd`, `agentPreset` — and no workspace identity, so the
+     * peer's directory matches a registered workspace while its id is absent from
+     * that workspace's `sessionIds`. The browser groups by that accounting, not by
+     * the directory, so such a peer sits under the ungrouped bucket for the rest
+     * of its life.
+     *
+     * Registration is best-effort in three distinct senses, and each maps to one
+     * outcome: no registry means no groups exist to join (`no-workspace`); no
+     * registration owns the directory — a peer started in a fresh checkout or a
+     * temporary directory — is legitimate and also `no-workspace`; an attempt that
+     * throws is `failed` and carried back as a warning. Only the last is a defect,
+     * and none of the three is allowed to break peer creation: a partner that
+     * exists but is listed in the wrong bucket is still a working partner, while a
+     * refused peer is no partner at all.
+     * @param input - the peer session, and the directory it was created with.
+     * @returns the outcome, as the report rather than as a throw.
+     */
+    async attachToWorkspace(input: { sessionId: string; cwd?: string }): Promise<WorkspaceRegistration> {
+      const registry = ctx.get('workspaceRegistry') as WorkspaceRegistryLike | undefined
+      if (registry === undefined) return { outcome: 'no-workspace' }
+      if (input.cwd === undefined) return { outcome: 'no-workspace' }
+      try {
+        const workspace = await registry.resolveByPath(await realpathNormalize(input.cwd))
+        if (workspace === undefined) return { outcome: 'no-workspace' }
+        await workspace.attachSession(input.sessionId as SessionId)
+        return { outcome: 'registered', workspace: workspace.title }
+      } catch (error) {
+        const warning = error instanceof Error ? error.message : String(error)
+        // Logged as well as reported: the tool result is read once by the agent
+        // that started the peer, and a silently ungrouped peer is exactly the
+        // symptom this hook exists to make visible in the deployment log too.
+        ctx.logger?.warn?.(`report-ledger: peer ${input.sessionId} could not be registered with its workspace: ${warning}`)
+        return { outcome: 'failed', warning }
       }
     },
     async confirmPeer(sessionId: string, timeoutMs: number): Promise<PeerReceipt | undefined> {

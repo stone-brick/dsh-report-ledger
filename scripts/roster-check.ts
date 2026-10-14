@@ -212,6 +212,44 @@ const noHost = { ...host, confirmPeer: async () => undefined }
 const absent = await new PeerService(noHost as never, 100).receipt('session-not-here', 10)
 check('a non-resident peer yields no observation rather than a false one', absent === undefined)
 
+// ---------------------------------------------------------------------------
+// Workspace registration
+//
+// A peer is a root session created with a `cwd` and no workspace identity, and
+// the registry's one-time history bootstrap runs long before the peer exists —
+// so a peer whose directory matches a registered workspace is still absent from
+// that workspace's accounting and the browser lists it as ungrouped. The host
+// hook is the fix; what is pinned here is that the service reaches it with the
+// created session, survives its failure, and says nothing when the deployment
+// composes no workspace registry at all.
+// ---------------------------------------------------------------------------
+const attached: { sessionId: string; cwd?: string }[] = []
+const withRegistry = {
+  ...host,
+  attachToWorkspace: async (input: { sessionId: string; cwd?: string }) => {
+    attached.push(input)
+    return { outcome: 'registered' as const, workspace: 'dsh-report-ledger' }
+  },
+}
+const registered = await new PeerService(withRegistry as never, 100).start(SELF, { task: 'a peer in a known directory', name: 'grouped' })
+check('the created peer is offered to the workspace host', attached.length === 1 && attached[0]?.sessionId === registered.sessionId, JSON.stringify(attached))
+check('the peer is offered with the directory it was created in', attached[0]?.cwd === 'D:\\Projects\\demo', String(attached[0]?.cwd))
+check('the registration outcome reaches the caller', registered.workspace?.outcome === 'registered', String(registered.workspace?.outcome))
+check('a registered peer names the workspace it joined', registered.workspace?.workspace === 'dsh-report-ledger', String(registered.workspace?.workspace))
+
+const failing = {
+  ...host,
+  attachToWorkspace: async () => { throw new Error('fixture: registry refused the attach') },
+}
+const survived = await new PeerService(failing as never, 100).start(SELF, { task: 'a peer whose registration fails' })
+check('a failing registration does not fail peer creation', /^session-[0-9a-f-]{36}$/.test(survived.sessionId), survived.sessionId)
+check('a failing registration is reported as a failure', survived.workspace?.outcome === 'failed', String(survived.workspace?.outcome))
+check('the failure carries its reason', survived.workspace?.warning?.includes('registry refused the attach') === true, String(survived.workspace?.warning))
+
+const composed = await new PeerService(host as never, 100).start(SELF, { task: 'a peer where no registry is composed' })
+check('a host without the hook reports no workspace at all', composed.workspace === undefined, JSON.stringify(composed.workspace))
+check('a host without the hook still creates the peer', /^session-[0-9a-f-]{36}$/.test(composed.sessionId), composed.sessionId)
+
 let failed = 0
 for (const [label, ok, detail] of checks) {
   if (!ok) failed++

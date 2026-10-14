@@ -98,6 +98,10 @@ const registry = (rt: WorktreeRuntime): Map<string, Captured> => {
 
 // ---- peers over a fake host ------------------------------------------------
 const created: { sessionId: string; startedBy: string; cwd?: string }[] = []
+/** What the fake workspace registry was offered, in call order. */
+const registrations: { sessionId: string; cwd?: string }[] = []
+/** Whether the fake registry reports the directory as one of its workspaces. */
+let workspaceKnown = true
 let failCreation = false
 const peerHost: PeerHost = {
   // The directory is a property of the process, not of who is asking — and an
@@ -112,6 +116,14 @@ const peerHost: PeerHost = {
     if (failCreation) throw new Error('fixture: the peer could not be created')
     created.push(input)
     return { id: input.sessionId, steer: () => {} }
+  },
+  // A deployment with a workspace registry: the peer's directory is looked up
+  // after creation and the peer is accounted under whatever owns it.
+  async attachToWorkspace(input: { sessionId: string; cwd?: string }) {
+    registrations.push(input)
+    return workspaceKnown
+      ? { outcome: 'registered', workspace: 'fixture-workspace' }
+      : { outcome: 'no-workspace' }
   },
   async confirmPeer(): Promise<PeerReceipt | undefined> {
     return undefined
@@ -182,6 +194,18 @@ check('the peer directory is a working tree of the same repository',
   started?.cwd !== undefined && w.samePath((await w.resolveRepo(started.cwd))?.commonDir ?? '', located.commonDir))
 check('peer_start reports the checkout it made',
   peerOut.includes('private: working directory and index'), peerOut)
+// Registration is what keeps a peer out of the ungrouped bucket, and the group
+// it joined is the one thing the caller cannot discover from the peer id: the
+// output has to say it, or an agent that later goes looking for its peer in the
+// sidebar has nothing to look under.
+check('peer_start reports the workspace group the peer joined',
+  peerOut.includes('workspace group: fixture-workspace'), peerOut)
+check('the peer is registered under the directory it was created in',
+  registrations.length === 1 && registrations[0]?.cwd === started?.cwd,
+  JSON.stringify(registrations))
+check('the peer is registered after it exists, under its own session id',
+  registrations[0]?.sessionId === started?.sessionId,
+  `${String(registrations[0]?.sessionId)} vs ${String(started?.sessionId)}`)
 const peerDigest = (await ledger.listReports()).find((front) => front.subject === 'summarize the ledger')
 // The orientation the peer itself reads lives in the assignment report body, not
 // in the caller's tool output: the peer is a separate session that opens the
@@ -192,6 +216,16 @@ check('the peer is warned that hooks and config are shared',
   peerBody.includes('对象库与其它检出共享'), peerBody.slice(0, 160))
 check('the assignment report is bound to the peer checkout',
   peerDigest?.worktree !== undefined && started?.cwd !== undefined && w.samePath(peerDigest.worktree.path, started.cwd))
+
+// A directory no workspace owns is not a problem to report: the peer is simply
+// ungrouped, and a warning line here would train callers to ignore the one case
+// that IS a defect — a registration that was attempted and failed.
+workspaceKnown = false
+const ungrouped = await call('peer_start', { task: 'a peer in an unregistered directory' })
+workspaceKnown = true
+check('an unregistered directory yields no workspace line at all',
+  !ungrouped.includes('workspace group:') && !ungrouped.includes('could not be listed'),
+  ungrouped)
 
 // ---- 4. a checkout made for work that never started is rolled back ---------
 const worktreesBefore = (await w.listWorktrees(located)).length

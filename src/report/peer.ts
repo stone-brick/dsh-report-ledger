@@ -9,6 +9,21 @@
  * relationship, so the roster log records it, and the roster log is what makes
  * the peer addressable later by the agent that started it.
  *
+ * "Visible in the workspace session list" is the part that does not happen by
+ * itself. A workspace group is populated from two sources only: the one-time
+ * history bootstrap, which runs when the registry is first initialized and never
+ * again, and an explicit attach at session creation. A GUI-created session takes
+ * the second route because it names its workspace in the create request; a peer
+ * does not, because a fresh agent's creation metadata carries a `cwd` and
+ * nothing else. A peer whose directory matches a registered workspace is
+ * therefore NOT in that workspace's accounting, and the browser renders it under
+ * the ungrouped bucket — permanently, since nothing revisits the question later.
+ * {@link PeerHost.attachToWorkspace} is how this module closes that gap: the peer
+ * is created first (its header is what the registry validates), then registered.
+ * Registration is best-effort and reported, never fatal: a peer that exists but
+ * is ungrouped is still a working partner, and refusing to create one over a
+ * cosmetic bookkeeping miss would be the worse failure.
+ *
  * Being a root session says nothing about the CAPABILITIES it runs with, and a
  * root session is born with none: an agent published without joining a
  * composition sees the empty global layer — no preset tools and none of the
@@ -79,6 +94,33 @@ export interface StartedPeer {
   readonly cwd?: string
   /** How many peers the starter now owns, including this one. */
   readonly started: number
+  /**
+   * What became of the attempt to put the peer in a workspace group.
+   *
+   * Absent means this host implements no registration at all, so there are no
+   * groups to be in and nothing to report. `no-workspace` means a host does
+   * implement it and answered that nothing owns the peer's directory, which is
+   * the legitimate case for a peer started in a checkout nobody registered.
+   */
+  readonly workspace?: WorkspaceRegistration
+}
+
+/**
+ * The outcome of registering one peer session with the workspace registry.
+ *
+ * `outcome` is deliberately three-valued rather than a boolean: "this
+ * deployment has no workspace feature", "this directory is not a workspace" and
+ * "the registration was attempted and failed" are different facts, and only the
+ * last one is a defect. Collapsing them would turn a healthy ungrouped peer into
+ * a false alarm on every deployment without the feature.
+ */
+export interface WorkspaceRegistration {
+  /** What happened. Only `failed` is a defect; see {@link WorkspaceRegistration.warning}. */
+  readonly outcome: 'registered' | 'no-workspace' | 'failed'
+  /** The workspace title or path, when one was matched. */
+  readonly workspace?: string
+  /** The failure's text, when `outcome` is `failed`. */
+  readonly warning?: string
 }
 
 /** The harness capabilities peer management consumes. */
@@ -121,6 +163,26 @@ export interface PeerHost {
    * @returns the new session id and its wake channel.
    */
   createPeer(input: { sessionId: string; startedBy: string; cwd?: string }): Promise<{ id: string; steer(message: OutboundMessage): void }>
+  /**
+   * Put a freshly created peer session into the workspace group that owns its
+   * directory, so the GUI lists it under that workspace instead of leaving it
+   * ungrouped forever.
+   *
+   * Optional, and that is the honest shape of the dependency: a deployment may
+   * compose no workspace registry at all (the headless profile does not), and
+   * there the groups do not exist and this hook is simply absent. Implementations
+   * must resolve the peer's directory the same way the registry does — by
+   * canonical real path, not by string equality — or a registration attributed to
+   * the wrong workspace is refused. They must also never throw: the outcome is
+   * the report.
+   *
+   * Called after {@link PeerHost.createPeer}, because the registry validates a
+   * session against the `cwd` recorded in its durable header and that header does
+   * not exist until the agent does.
+   * @param input - the peer session, and the directory it was created with.
+   * @returns the registration outcome.
+   */
+  attachToWorkspace?(input: { sessionId: string; cwd?: string }): Promise<WorkspaceRegistration>
   /**
    * Observe what became of a peer's first turn, within a bound.
    *
@@ -238,6 +300,31 @@ export class PeerService {
   }
 
   /**
+   * Register one freshly created peer with the workspace registry, if the
+   * deployment has one, and never let the attempt be fatal.
+   *
+   * Three outcomes are possible and only one is a defect: no hook means there are
+   * no groups to join, an unmatched directory is a legitimate ungrouped peer, and
+   * anything that throws or answers with an unusable shape is reported back as a
+   * failure for the caller to see.
+   * @param sessionId - the peer session that now exists.
+   * @param cwd - the directory it was created in, when one was inherited or supplied.
+   * @returns the outcome, or `undefined` when this host implements no registration.
+   */
+  async #register(sessionId: string, cwd: string | undefined): Promise<WorkspaceRegistration | undefined> {
+    if (this.#host.attachToWorkspace === undefined) return undefined
+    try {
+      const result = await this.#host.attachToWorkspace({ sessionId, ...(cwd === undefined ? {} : { cwd }) })
+      if (result === null || typeof result !== 'object' || typeof result.outcome !== 'string') {
+        return { outcome: 'failed', warning: `the workspace host answered with ${JSON.stringify(result)}` }
+      }
+      return result
+    } catch (error) {
+      return { outcome: 'failed', warning: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  /**
    * Open one independent peer session.
    *
    * The peer is recorded before it is returned, so the relationship survives even
@@ -272,6 +359,19 @@ export class PeerService {
     // that live session, because a root agent has no composition or route of its own.
     const created = await this.#host.createPeer({ sessionId, startedBy: self, ...(cwd === undefined ? {} : { cwd }) })
 
+    // Registration follows creation, never precedes it: the registry validates
+    // the session against the `cwd` in its durable header, which the agent does
+    // not have until it exists. A failure here is reported and survived — the
+    // peer is real, it is attributed, and the caller can still address it.
+    //
+    // The catch is not redundant with the host contract. The contract says an
+    // implementation reports failures as outcomes rather than throwing, and this
+    // module is the only place that promise can be enforced: a registry that
+    // throws for an unrelated reason (a failing storage write, a path that
+    // vanished between create and attach) would otherwise abort a peer creation
+    // that has already succeeded and already been charged against the cap.
+    const workspace = await this.#register(created.id, cwd)
+
     await appendPeer({
       sessionId: created.id,
       startedBy: self,
@@ -285,6 +385,7 @@ export class PeerService {
       started: already + 1,
       ...(name === undefined ? {} : { name }),
       ...(cwd === undefined ? {} : { cwd }),
+      ...(workspace === undefined ? {} : { workspace }),
     }
   }
 }

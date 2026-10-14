@@ -12,7 +12,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { WorktreeRuntime } from './allocate.ts'
 import type { PeerService } from './peer.ts'
-import { DEFAULT_RECEIPT_MS, type PeerReceipt } from './peer.ts'
+import { DEFAULT_RECEIPT_MS, type PeerReceipt, type WorkspaceRegistration } from './peer.ts'
 import type { PreparedWorktree, ReportService, WorktreeOutcome } from './service.ts'
 import { renderRow } from './service.ts'
 import type { DeliveryOutcome } from './deliver.ts'
@@ -167,6 +167,29 @@ function describeReceipt(receipt: PeerReceipt | undefined, windowMs: number): st
     return `the peer's first turn completed within ${windowMs} ms — read the report for its answer`
   }
   return `the peer's first turn ended within ${windowMs} ms (${receipt.reason ?? 'settled'}) — nothing is working on it now`
+}
+
+/**
+ * Render where the new peer landed in the workspace browser.
+ *
+ * This is the group the caller will find the peer under, so it is worth one
+ * line: a peer with no group is not broken, but an agent that goes looking for
+ * it in the wrong place — or a human who never sees it appear at all — is
+ * looking at a bookkeeping fact this line states in advance. `no-workspace`
+ * covers both "this deployment has no groups" and "this directory is not a
+ * registered workspace", which is why it is phrased as an absence rather than a
+ * problem; only a failed registration is flagged, and it names the reason.
+ * @param registration - what the host reported, or `undefined` when the host
+ * implements no registration at all.
+ * @returns one line for the tool output, or `undefined` when there is nothing to say.
+ */
+function renderWorkspace(registration: WorkspaceRegistration | undefined): string | undefined {
+  if (registration === undefined) return undefined
+  if (registration.outcome === 'registered') return `workspace group: ${registration.workspace ?? 'registered'}`
+  if (registration.outcome === 'failed') {
+    return `⚠ the peer was created but could not be listed under its workspace: ${registration.warning ?? 'unknown error'}`
+  }
+  return undefined
 }
 
 /**
@@ -598,6 +621,7 @@ export function registerReportTools(
         ...(provisioned === undefined ? [] : renderProvision(provisioned.prepared)),
         renderMutation(result.front, result.outcomes),
         receipt === undefined ? '' : receipt,
+        renderWorkspace(started.workspace),
         `Address this peer later with report_send / report_cc to=${started.sessionId}, or see everyone with peer_list.`,
       ].filter((line) => line !== '').join('\n')
     },

@@ -573,7 +573,7 @@ worktree:
 
 ### 同伴是独立根会话，不是下属
 
-这是本阶段最重要的设计判断。`peer_start` 创建的会话**没有 `parentSession`、没有 `origin`、`delegationDepth` 为 0**——它是一个根会话。这样它才配得上"同伴"：不占用任何委派深度预算、出现在工作区会话列表里、**并且比开启它的那一轮活得更久**。
+这是本阶段最重要的设计判断。`peer_start` 创建的会话**没有 `parentSession`、没有 `origin`、`delegationDepth` 为 0**——它是一个根会话。这样它才配得上"同伴"：不占用任何委派深度预算、出现在工作区会话列表里（见下节：这一步需要显式挂账，不会自己发生）、**并且比开启它的那一轮活得更久**。
 
 "独立"说的是**生命周期**，不是**能力**。新生的根会话自己既没有组合（composition）也没有模型路由，缺哪一样它的第一个回合都会当场死掉：没有组合就只看得见空的全局层（没有预设工具、没有预设提示词段）；没有模型路由则在提示词组装时解析不出 `{{model}}`——回合在第 1 步就以 `error` 结束，**一个工具都没调到**。所以这两样必须**从开启者身上取**：
 
@@ -595,6 +595,42 @@ worktree:
 | `unstarted` | 收件箱里有活，但从未开过回合 |
 
 这是一次**观测**而不是状态查询：它把"交接完成"与"有人在干"分开，代价是 `peer_start` 多等一个窗口。
+
+### 同伴进哪个工作区分组
+
+"出现在工作区会话列表里"这句话需要补一句：**它不会自己发生**。
+
+侧边栏的分组只读工作区的账目（`workspace.json` 里每个工作区的 `sessionIds`），而这个账目只有两个来源：
+
+1. **一次性历史对账**——注册表首次初始化时（`initialized` 标志为 false 的那一次）把已有会话按规范路径分桶补录。**之后永不重跑**：非首次启动时只做「按 header 索引重建」，而那个索引的用途是**剔除**路径对不上的条目，不是补录；
+2. **创建时显式挂账**——调用方在 create 请求里点名 workspaceId。GUI 里从某个工作区新建会话走的就是这条；**Fork** 也走（继承源会话的工作区）。
+
+`peer_start` 两条都够不着：`ctx.agents.create()` 的创建元数据只有 `cwd` 和 `agentPreset`，**没有工作区身份**；而对账在同伴存在之前早就跑完了。于是出现一个很别扭的状态——**同伴的工作目录与某个已注册工作区逐字相等，它的 id 却不在那个工作区的账目里**，浏览器按账目分组，就把它永远放在「未分组」。
+
+修法是宿主侧一个**可选钩子**（`PeerHost.attachToWorkspace`）：同伴**创建之后**（注册表要校验会话头里的 `cwd`，而头在会话存在之前不存在），宿主解析同目录的工作区并把新会话挂进去。三个设计要点：
+
+- **按规范真实路径匹配**，不做字符串比较。注册表校验的是 `realpath` 归一化后的路径，用字符串比较会在大小写、分隔符、符号链接、8.3 短名上产生"要么挂错、要么被注册表拒绝"的分歧。所以宿主用的是注册表自己的 `resolveByPath()`。
+- **可选依赖，不是硬依赖**。headless profile 没有工作区注册表（没有侧边栏可分组），硬依赖会让插件在那里永远等待。钩子缺失时报告"这个部署没有分组"，而不是失败。
+- **三种结果，"只有一种是缺陷"**：`registered`（已挂账，报出工作区标题）、`no-workspace`（没有注册表，**或**该目录确实不属于任何工作区——同伴在自己的临时检出里就是这种，合法）、`failed`（尝试了并抛错）。`peer_start` 只对第三种打警告，因为对合法情形也警告，会让调用者学会忽略那一行——而那一行正是本机制存在的理由。注册失败**绝不**让创建失败：一个存在但归错桶的同伴仍是能用的同伴，被拒绝创建的同伴什么都不是。
+
+这条路径正是被真实数据打出来的：本机 166 个会话里有 12 个根会话长期停在「未分组」，其中一个目录（`D:\Projects\dsh`）根本没有任何工作区记录。
+
+### 这一段的验证分两层
+
+`pnpm test` 里跑的是**确定性**检查（`scripts/roster-check.ts` 管服务侧、`scripts/workspace-check.ts` 管宿主适配侧）。它们用的是假注册表，因此证明不了「真实注册表会不会接受这次挂账」——而答案恰恰在注册表自己的校验规则里：`attachSession` 会读会话头、把 `cwd` 归一化，然后要求它**等于**工作区记录里的路径。用字符串比较代替归一化，注册会全部返回 `failed`、同伴照样停在未分组，而单元测试全绿。
+
+所以还有一个**手动**探针（不进 `pnpm test`，因为它需要真实存储栈与真实会话日志）：
+
+```powershell
+# 在隔离的 DSH_HOME 上放一份真实 workspace.json 的拷贝（绝不写机器上那份），
+# 再指向真实会话日志根，让真实 WorkspaceRegistry 跑一遍完整链路
+New-Item -ItemType Directory -Force "$env:TEMP\dsh-probe-x\storages" | Out-Null
+Copy-Item "$env:USERPROFILE\.dsh\storages\workspace.json" "$env:TEMP\dsh-probe-x\storages\"
+$env:DSH_HOME = "$env:TEMP\dsh-probe-x"; $env:SESSIONS = "$env:USERPROFILE\.dsh\sessions"
+node scripts/registry-attach-probe.ts 'D:\Projects\dsh-report-ledger' 'session-<真实会话 id>'
+```
+
+它挂载真实的 JSON 存储后端、真实 storage domain、真实 JSONL 持久化与真实注册表（离线显式跑一次服务的 init hook，因为这里没有 Loader），然后断言：注册表能看见拷贝里的 8 个工作区、非规范拼写（全大写 + 尾随分隔符）也解析到规范路径、插件自己的适配层能把一个**真实会话**挂进去、活体读回成员已生效、重复挂账幂等。5/5 通过，即证明这条链在生产包上成立。
 
 ### 授权规则
 
@@ -623,6 +659,7 @@ DSH 的委派层拒绝非相邻通信，源码原话是"其他代理、祖先、
 - **绝不新增自定义会话事件类型。** `SessionEventMap` 看起来可扩展，但持久化读取路径 `assertEventsSupported` 只在 `KNOWN_SESSION_EVENT_TYPES` 命中或事件带 `ignorable: true` 时放行，而 `Session.append` 从不设置 `ignorable`；白名单是从仓库内成员生成的字面量。追加新类型会让**该会话日志在重载时不可读**。因此账本走文件，模型可见的摘要走 `source: {kind:'plugin', plugin:'report-ledger', form:'relay'}`（既有已知形状）。
 - **官方包必须保持 external。** 内联 `dsh-tools` 会复制服务注册表、破坏实例同一性。构建只内联真正的第三方依赖（`yaml`）。
 - **运行时解析需要 `node_modules/@deepseek-ai` junction。** Node 按 **realpath** 解析模块：插件包经 `~/.dsh/profiles/node_modules/dsh-report-ledger` junction 指向本仓库后，真实路径仍在工作区，因此 `import '@deepseek-ai/dsh-tools'` 只会从本仓库向上查找。工作区里的 `node_modules/@deepseek-ai` → profile 官方包层的 junction 正是为此，与生态里 `link-profile.mjs` 的做法一致。**`pnpm install` 可能清掉它，重装后需重建。**
+- **跨插件导入宿主值只允许纯函数，且必须走官方 export。** 首例是 `realpathNormalize`（`@deepseek-ai/dsh-workspace`）：注册表校验会话目录用的是 `realpath` 归一化，用字符串比较替代它就会把同伴挂错组或被注册表拒绝。这类导入的判据是「有没有要被复制的运行时身份」——纯路径函数没有（无注册表、无生命周期、无状态），而任何服务类都**有**（内联一份 `dsh-tools` 会复制服务注册表、破坏实例同一性，见上一条）。它也**只**在对应的可选服务存在时才被调用，因此部署没装 dsh-workspace 时不会被触发。
 - **工具参数规范中不能写 `required: false`。** `defineTool` 的 `ParameterSchemaSpec` 只接受 `required: true` 或**整个省略**，写 `false` 会在加载时报 `required must be true when present`。可选参数就是不带 `required` 的字段。
 - **投递与账本分层。** `deliver()` 只做传输、绝不碰账本；到达跳由 `ReportService` 统一写入，保证审计的写者唯一。
 - **可选服务用 `ctx.inject`，不要用 `ctx.get`——两者对"可能后到的服务"并不等价。** `ctx.get` 读的是**此刻**的注册表，provider 还没激活就返回 `undefined`；服务注入回调则在服务**真正出现时**运行。本项目在 web profile 上因此真实踩坑：`webserver` 行 inject 了 `webStartup`，会晚于我们的行激活，于是路由**被静默跳过**，所有请求落到 `/api` 鉴权栅栏上得到 401，而我们的 handler 从未被执行。之所以不用声明式 `inject: ['webServer']`（那样必然排在后面）：headless profile 根本没有 web server，硬依赖会让整个插件在那里永远等待、什么也不贡献。`ctx.inject(['webServer'], (scoped) => …)` 同时满足两者——可选，且与到达顺序解耦。
