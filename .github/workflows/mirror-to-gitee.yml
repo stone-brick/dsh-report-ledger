@@ -90,3 +90,39 @@ jobs:
           done
 
           echo "mirrored $(git rev-parse --short HEAD) to Gitee"
+
+      # A tag push mirrors git objects only; Gitee has no release-on-tag hook.
+      # This half creates the release and attaches the exact tarball from the
+      # tag's commit. It is idempotent, so workflow_dispatch can repair a run.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Resolve release tag
+        id: release
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tag="${GITHUB_REF_NAME}"
+          else
+            tag="v$(node -p "require('./package.json').version")"
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build release tarball from the tag
+        run: |
+          tag="${{ steps.release.outputs.tag }}"
+          version="${{ steps.release.outputs.version }}"
+          test "v$(node -p "require('./package.json').version")" = "$tag"
+          mkdir -p "$RUNNER_TEMP/release"
+          git archive "$tag" | tar -x -C "$RUNNER_TEMP/release"
+          (cd "$RUNNER_TEMP/release" && npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP")
+          test -f "$RUNNER_TEMP/dsh-report-ledger-${version}.tgz"
+
+      - name: Create Gitee release and attach tarball
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          tag="${{ steps.release.outputs.tag }}"
+          version="${{ steps.release.outputs.version }}"
+          bash scripts/gitee-release.sh "$tag" "$RUNNER_TEMP/dsh-report-ledger-${version}.tgz"
