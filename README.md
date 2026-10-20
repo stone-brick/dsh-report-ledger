@@ -823,11 +823,14 @@ Gitee 自带的「仓库镜像管理」在本账号不可用（`GET /api/v5/repo
 
 - 工作流 `.github/workflows/mirror-to-gitee.yml`，在 `main` 与 `v*` tag 的 push 后镜像**所有分支 + tags**；
   Gitee 上已存在的 tag 不会被更新（只补缺失的），所以同一个 tag 在两边的对象类型不同也不会让 job 变红；
+- **tag 推送（或手动 `workflow_dispatch`）还会创建/复用 Gitee release，并把从该 tag 归档构建的 tarball
+  附上去**（`scripts/gitee-release.sh`，幂等；main 推送只镜像 git 对象，不碰 release API）；
 - 凭据是 GitHub 仓库 Secret `GITEE_TOKEN`（Gitee 私人令牌，只需 `projects` 权限）。
   **令牌有有效期，过期后要重新生成并 `gh secret set GITEE_TOKEN`**，否则工作流会认证失败；
 - 令牌只经 `credential.helper` 按需交给 git，不写进 remote URL，所以不会落进 `.git/config` 或命令输出。
 
-发行版附件**不在自动同步范围内**，需要单独上传；注意附件接口要求令牌放在 **query** 上，
+release 创建/上传失败时，先 `gh workflow run mirror-to-gitee.yml --ref main` 重跑（脚本会复用已有 release、
+已存在的附件不重复上传）；也可以按下面的手工命令单独补传。注意附件接口要求令牌放在 **query** 上，
 放 form 里会得到 `401 登录失效`（实测）：
 
 ```sh
