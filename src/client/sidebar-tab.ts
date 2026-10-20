@@ -138,6 +138,8 @@ const stack: Record<string, string> = {
   height: '100%',
   minHeight: '0',
 }
+/** The drawing alone: it takes whatever the panel has. */
+const stackFull: Record<string, string> = { flex: '1 1 auto', minHeight: '0' }
 const stackCanvas: Record<string, string> = { flex: '1 1 50%', minHeight: '0' }
 const stackDetail: Record<string, string> = { flex: '1 1 50%', minHeight: '0', overflow: 'hidden' }
 
@@ -186,20 +188,30 @@ function bodyFor(t: Translate): (props: TabBodyProps) => ReactElement {
     if (payload === undefined) return createElement('div', { style: muted }, t('view.loading'))
     if (reports.length === 0) return createElement('div', { style: muted }, t('view.empty'))
 
-    const canvas = createElement(CardgraphView, {
-      payload,
-      reports,
-      t,
-      ...(openReport === undefined ? {} : { openReport }),
-      onOpen,
-      idHint,
-      fill: true,
-    })
-    if (openReport === undefined) return canvas
+    // The canvas keeps its place in the tree whether or not a report is open: one
+    // container, the drawing in the first cell, the detail in the second. Switching
+    // the root between the drawing and a wrapper around it (the earlier shape)
+    // unmounted and remounted `CardgraphView` on every open and close, which threw
+    // away the reader's zoom, pan and fitted state — the one view the panel is
+    // supposed to leave where the reader put it.
+    const canvasCell = createElement(
+      'div',
+      { style: openReport === undefined ? stackFull : stackCanvas },
+      createElement(CardgraphView, {
+        payload,
+        reports,
+        t,
+        ...(openReport === undefined ? {} : { openReport }),
+        onOpen,
+        idHint,
+        fill: true,
+      }),
+    )
+    if (openReport === undefined) return createElement('div', { style: stack }, canvasCell)
     return createElement(
       'div',
       { style: stack },
-      createElement('div', { style: stackCanvas }, canvas),
+      canvasCell,
       createElement(
         'div',
         { style: stackDetail },

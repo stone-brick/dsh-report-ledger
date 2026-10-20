@@ -29,7 +29,7 @@ import { existsSync } from 'node:fs'
 import { appendFile, mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { parseHop, parseReport, serializeReport } from './frontmatter.ts'
+import { parseHop, parseReport, serializeReport, splitFrontMatter } from './frontmatter.ts'
 import type { Report, ReportFrontMatter, RouteHop } from './types.ts'
 
 /** Directory name under the DSH home that holds the whole ledger. */
@@ -141,19 +141,65 @@ export async function allocateId(): Promise<string> {
 }
 
 /**
+ * File-operation codes that mean "someone else has the target open right now".
+ *
+ * Windows reports a rename over a file another handle holds (an editor, a
+ * virus scanner, a concurrent writer) as `EPERM`/`EBUSY`/`EACCES` rather than
+ * retrying it itself, and the momentary hold is almost always gone a few
+ * milliseconds later. Retrying a couple of times turns a spurious tool failure
+ * into a normal write; the final error is still thrown.
+ */
+const TRANSIENT_RENAME_CODES = new Set(['EPERM', 'EBUSY', 'EACCES'])
+
+/**
+ * Rename, retrying briefly on a transient Windows sharing violation.
+ * @param from - the temp file.
+ * @param to - the report document.
+ */
+async function renameWithRetry(from: string, to: string): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await rename(from, to)
+      return
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (attempt >= 2 || code === undefined || !TRANSIENT_RENAME_CODES.has(code)) throw error
+      await new Promise((resolve) => setTimeout(resolve, 10 + attempt * 10))
+    }
+  }
+}
+
+/**
  * Write one report atomically.
  *
  * The temp-file-plus-rename form keeps a reader from ever observing a half
  * written document, which matters because the ledger is read by other sessions
- * and by the timeline UI while a turn is still running.
+ * and by the timeline UI while a turn is still running. A failed rename leaves
+ * no litter: the temp file is removed in a `finally`.
+ *
+ * The destination is `id`, not `report.front.report`. The digest's own identity
+ * field is data a human can edit, and a write path that trusted it let a copied
+ * or hand-edited file redirect the next mutation into another report's document
+ * — or, with `../`, outside the ledger entirely. The file name is the identity;
+ * the field is normalized from it on every write.
  * @param report - the report to persist.
+ * @param id - the report id that owns the destination; defaults to the digest's own.
+ * @throws when `id` is not a usable report id.
  */
-export async function writeReport(report: Report): Promise<void> {
+export async function writeReport(report: Report, id: string = report.front.report): Promise<void> {
+  if (!isValidReportId(id)) throw new Error(`report-ledger: ${JSON.stringify(id)} is not a usable report id`)
   await ensureDirs()
-  const target = reportPath(report.front.report)
+  const target = reportPath(id)
   const temp = `${target}.${randomBytes(6).toString('hex')}.tmp`
-  await writeFile(temp, serializeReport(report), 'utf8')
-  await rename(temp, target)
+  const front: ReportFrontMatter = report.front.report === id ? report.front : { ...report.front, report: id }
+  try {
+    await writeFile(temp, serializeReport({ front, body: report.body }), 'utf8')
+    await renameWithRetry(temp, target)
+  } finally {
+    // Best effort: after a successful rename the temp is already gone, and after
+    // a failed write or rename it must not stay behind as an invisible `.tmp`.
+    await unlink(temp).catch(() => undefined)
+  }
 }
 
 /**
@@ -172,6 +218,27 @@ export async function readReport(id: string): Promise<Report | undefined> {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
     throw error
   }
+}
+
+/**
+ * The 1-based document line at which a report's body begins.
+ *
+ * Read on demand by the one caller that has to point a model at the rest of an
+ * oversized body: a character budget cannot be turned into a line offset without
+ * knowing how many lines the front matter occupies, and guessing either wastes
+ * a read or skips body text.
+ * @param id - report identifier.
+ * @returns the line, or `undefined` when the document is missing or malformed.
+ */
+export async function bodyStartLine(id: string): Promise<number | undefined> {
+  if (!isValidReportId(id)) return undefined
+  let raw: string
+  try {
+    raw = await readFile(reportPath(id), 'utf8')
+  } catch {
+    return undefined
+  }
+  return splitFrontMatter(raw)?.bodyLine
 }
 
 /**
@@ -221,6 +288,13 @@ async function readDigest(id: string): Promise<ReportFrontMatter | undefined> {
  *
  * Only front matter is parsed, so this stays cheap regardless of body sizes —
  * the property that lets a timeline or an index scan the whole ledger.
+ *
+ * A single unreadable entry is skipped rather than allowed to take the index
+ * down: a directory where a file is expected, a sharing violation, a permissions
+ * problem — any of them used to make the whole listing (and therefore the tools,
+ * the timeline, and the deferred-delivery pump, which all list first) fail. One
+ * record the ledger cannot read is a record to look at; it is not a reason to
+ * stop showing the others. Parse-level damage is already skipped a layer down.
  * @returns every readable digest.
  */
 export async function listReports(): Promise<ReportFrontMatter[]> {
@@ -229,8 +303,18 @@ export async function listReports(): Promise<ReportFrontMatter[]> {
   for (const name of await readdir(reportsDir())) {
     const match = REPORT_FILE.exec(name)
     if (match === null) continue
-    const digest = await readDigest(`R-${match[1]}`)
-    if (digest !== undefined) digests.push(digest)
+    const id = `R-${match[1]}`
+    try {
+      const digest = await readDigest(id)
+      // The file name is the identity; the digest's own `report` field is a
+      // normalized cache of it. Reporting the field verbatim would let one file
+      // masquerade as another record in a listing, and would misdirect the
+      // delivery pump, which keys each holding by `digest.report`.
+      if (digest !== undefined) digests.push({ ...digest, report: id })
+    } catch {
+      // Deliberately silent: the listing has no diagnostic channel, and throwing
+      // here would hide every healthy report behind one broken one.
+    }
   }
   digests.sort((left, right) => right.updated - left.updated || right.report.localeCompare(left.report))
   return digests

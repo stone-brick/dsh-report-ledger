@@ -20,7 +20,6 @@ export const zh = {
   'view.refresh': '刷新',
   'view.retry': '重试',
   'view.error': '读取失败：{code}',
-  'view.root': '本会话',
   'view.live': '在线',
   'view.delegated': '子代理',
   'view.detail.loading': '正在读取传递路径…',
@@ -103,7 +102,6 @@ export const en: Record<keyof typeof zh, string> = {
   'view.refresh': 'Refresh',
   'view.retry': 'Retry',
   'view.error': 'Read failed: {code}',
-  'view.root': 'this session',
   'view.live': 'live',
   'view.delegated': 'subagent',
   'view.detail.loading': 'Reading the transfer path…',
@@ -207,13 +205,6 @@ export const STATUS_TONE: Record<ReportStatus, 'warning' | 'success' | 'neutral'
   closed: 'neutral',
 }
 
-/** Lifecycle state → the shell's state dot. `ongoing` is the animated one. */
-export const STATUS_DOT: Record<ReportStatus, 'ongoing' | 'done' | 'idle'> = {
-  open: 'ongoing',
-  acked: 'done',
-  closed: 'idle',
-}
-
 /**
  * Edge kind → the word the drawing calls it.
  *
@@ -228,14 +219,6 @@ export const EDGE_LABEL: Record<CardgraphEdgeKind, ReportLedgerKey> = {
   thread: 'detail.thread',
 }
 
-/**
- * Transfer-path hop action → dictionary key.
- *
- * These are ledger vocabulary: the model and the ledger files keep the raw
- * tokens (`authored`, `delivered`, …), and only the human view speaks a
- * language. Keyed by the full action union so a new hop action cannot ship
- * without a word for it.
- */
 /** Lease-state description, for the checkout chip's tooltip. */
 export const LEASE_HINT: Record<LeaseState, ReportLedgerKey> = {
   held: 'row.leaseHeld',
@@ -244,7 +227,14 @@ export const LEASE_HINT: Record<LeaseState, ReportLedgerKey> = {
   none: 'row.leaseNone',
 }
 
-/** Hop action label, for the transfer-path rendering. */
+/**
+ * Transfer-path hop action → dictionary key.
+ *
+ * These are ledger vocabulary: the model and the ledger files keep the raw
+ * tokens (`authored`, `delivered`, …), and only the human view speaks a
+ * language. Keyed by the full action union so a new hop action cannot ship
+ * without a word for it.
+ */
 export const HOP_LABEL: Record<HopAction, ReportLedgerKey> = {
   authored: 'hop.authored',
   contributed: 'hop.contributed',

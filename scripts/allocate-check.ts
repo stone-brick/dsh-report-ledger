@@ -20,6 +20,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { WorktreeSettings } from '../src/report/allocate.ts'
+import type { ReportFrontMatter, RouteHop } from '../src/report/types.ts'
 
 const scratch = await mkdtemp(join(tmpdir(), 'report-ledger-allocate-'))
 process.env.DSH_REPORT_LEDGER_ROOT = join(scratch, 'ledger')
@@ -385,6 +386,166 @@ check('an unused id can be given back', await ledger.discardUnwrittenId(spare))
 check('the given-back id is no longer a document', !ledger.reportExists(spare))
 check('an id with content is never discarded', !(await ledger.discardUnwrittenId(abandoned.report)))
 check('the written report survived', ledger.reportExists(abandoned.report))
+
+// ---- 11. configuration is validated, not trusted ---------------------------
+// A count that cannot be honoured falls back to its default: `maxActive: 0`
+// would otherwise refuse every allocation forever, naming no holder at all.
+const sane = a.resolveWorktree({ enabled: true })
+check('the documented defaults are four and four',
+  sane.settings.maxActive === 4 && sane.settings.maxRetained === 4,
+  JSON.stringify(sane.settings))
+check('a zero or negative maxActive falls back to the default',
+  a.resolveWorktree({ maxActive: 0 }).settings.maxActive === 4
+  && a.resolveWorktree({ maxActive: -2 }).settings.maxActive === 4)
+check('a negative maxRetained falls back to the default',
+  a.resolveWorktree({ maxRetained: -3 }).settings.maxRetained === 4)
+check('a fractional count is not obeyed', a.resolveWorktree({ maxActive: 1.5 }).settings.maxActive === 4)
+check('a usable count is kept verbatim',
+  a.resolveWorktree({ maxActive: 2, maxRetained: 0 }).settings.maxActive === 2
+  && a.resolveWorktree({ maxActive: 2, maxRetained: 0 }).settings.maxRetained === 0)
+const sanePlan = await a.planAllocation({
+  report: 'R-9999', subject: 'probe', repo: located, digests: [], hopsOf: async () => [], isLive: () => false,
+}, a.resolveWorktree({ maxActive: 0 }).settings)
+check('a zero maxActive no longer refuses a plan with nobody holding anything', !('kind' in sanePlan),
+  JSON.stringify(sanePlan))
+
+// ---- 12. the relativePaths gate asks git before using the flag ------------
+// The flag only exists from git 2.48, and passing it to an older git fails every
+// allocation with `unknown option` after the work started. The version is
+// injected here so the check does not depend on the git installed on the runner.
+const oldGitPlan = await a.planAllocation({
+  report: 'R-9999', subject: 'probe', repo: located, digests: [], hopsOf: async () => [], isLive: () => false,
+  version: 'git version 2.47.1',
+}, { ...generous, relativePaths: true })
+check('relativePaths on an old git is refused before anything is created',
+  'kind' in oldGitPlan && oldGitPlan.kind === 'git-version', JSON.stringify(oldGitPlan))
+check('the refusal names the required version and the way out',
+  'kind' in oldGitPlan && oldGitPlan.message.includes('2.48')
+  && oldGitPlan.message.includes('relativePaths: false'), JSON.stringify(oldGitPlan))
+const modernPlan = await a.planAllocation({
+  report: 'R-9999', subject: 'probe', repo: located, digests: [], hopsOf: async () => [], isLive: () => false,
+  version: 'git version 2.49.0.windows.1',
+}, { ...generous, relativePaths: true })
+check('a git that supports the flag passes the gate', !('kind' in modernPlan), JSON.stringify(modernPlan))
+
+// ---- 13. reclamation never takes a checkout someone is working in ---------
+// The dangerous shape: a report closes and keeps its allocated checkout, a
+// second live report adopts it, and the *closed* report's binding still names the
+// same path. Reclamation reads that binding as litter while an agent is at work.
+const hop = (action: RouteHop['action'], at = 1): RouteHop => ({ at, actor: 'fixture', action, to: [] })
+const claimFront = (
+  report: string,
+  worktree: NonNullable<ReportFrontMatter['worktree']>,
+  status: ReportFrontMatter['status'] = 'open',
+): ReportFrontMatter => ({
+  report, subject: 'fixture claim', status, from: 'owner-b', to: [], cc: [], authors: ['owner-b'],
+  created: 0, updated: 0, children: [], artifacts: [], hops: 1, worktree,
+})
+
+const guardedTarget = await leaseInto('reclaim guard target', 'owner-a')
+await service.close(guardedTarget.report, 'owner-a', 'done')
+const guardedPath = guardedTarget.prepared.binding.path
+const guardedBranch = guardedTarget.prepared.binding.branch
+check('the guarded fixture is a closed, kept, allocated checkout',
+  (await digestOf(guardedTarget.report))?.status === 'closed'
+  && leaseState(await ledger.readHops(guardedTarget.report)) === 'released'
+  && await w.isWorktreeClean(guardedPath))
+const liveAdopter = claimFront('R-9100', {
+  path: guardedPath, branch: guardedBranch, repo: located.commonDir, allocated: false,
+})
+const guardedPlan = await a.planAllocation({
+  report: 'R-9999', subject: 'probe', repo: located,
+  digests: [...(await ledger.listReports()), liveAdopter],
+  hopsOf: async (id) => (id === liveAdopter.report ? [hop('leased')] : await ledger.readHops(id)),
+  isLive: () => false,
+}, { ...generous, maxRetained: 0, reclaim: 'oldest-closed' })
+check('a closed binding whose checkout a live report holds is not a candidate',
+  !('kind' in guardedPlan) && guardedPlan.reclaimed?.report !== guardedTarget.report,
+  JSON.stringify(!('kind' in guardedPlan) ? guardedPlan.reclaimed : guardedPlan))
+check('the skipped candidate names the report holding it',
+  !('kind' in guardedPlan) && guardedPlan.reclaimSkipped.some((entry) => entry.includes(guardedTarget.report)
+    && entry.includes(liveAdopter.report)),
+  JSON.stringify(!('kind' in guardedPlan) ? guardedPlan.reclaimSkipped : []))
+
+// The same checks are asked again right before the delete, from a helper the
+// service can call: the plan was made from the filesystem and it can move.
+check('a target that is no longer a checkout is refused at delete time',
+  a.reclaimRefusal({ report: 'R-0001', path: '/gone' }, { presence: 'not-a-worktree' }) !== undefined)
+check('a target that vanished is refused at delete time',
+  a.reclaimRefusal({ report: 'R-0001', path: '/gone' }, { presence: 'missing' }) !== undefined)
+check('a target on another branch is refused at delete time',
+  (a.reclaimRefusal({ report: 'R-0001', path: '/wt', branch: 'b' }, { presence: 'worktree', branch: 'c' }) ?? '')
+    .includes("'c'"),
+  String(a.reclaimRefusal({ report: 'R-0001', path: '/wt', branch: 'b' }, { presence: 'worktree', branch: 'c' })))
+check('a target that still matches is safe to remove',
+  a.reclaimRefusal({ report: 'R-0001', path: '/wt', branch: 'b' }, { presence: 'worktree', branch: 'b' }) === undefined)
+
+// End to end: the same shape through the real ledger, then a real allocation.
+const adopterId = await ledger.allocateId()
+await service.author({ reportId: adopterId, subject: 'adopts the guarded checkout', body: 'b', actor: 'owner-b' })
+await service.lease(adopterId, 'owner-b', { path: guardedPath })
+const guardedRun = await service.prepareWorktree({
+  report: 'R-9998', subject: 'guard run', actor: 'owner-c', repo: located, base: 'main',
+  settings: { ...generous, maxRetained: 0, reclaim: 'oldest-closed' },
+})
+check('an allocation does not reclaim the checkout its live holder is working in',
+  guardedRun.reclaimed?.report !== guardedTarget.report, JSON.stringify(guardedRun.reclaimed))
+check('the adopted checkout is still on disk', await w.isWorktreeClean(guardedPath))
+check('the live holder still records the claim',
+  leaseState(await ledger.readHops(adopterId)) === 'held',
+  leaseState(await ledger.readHops(adopterId)))
+check('the closed owner was not told its checkout was cleared',
+  leaseState(await ledger.readHops(guardedTarget.report)) === 'released',
+  leaseState(await ledger.readHops(guardedTarget.report)))
+await service.discardWorktree(guardedRun.binding)
+
+// ---- 14. a path that exists but is no longer a checkout is stale, not dirty -
+const deadPath = join(scratch, 'dead-checkout')
+await mkdir(deadPath, { recursive: true })
+await writeFile(join(deadPath, 'leftover.txt'), 'x\n')
+const deadId = await ledger.allocateId()
+await service.author({
+  reportId: deadId, subject: 'binding to a plain directory', body: 'b', actor: 'owner-a',
+  worktree: { path: deadPath, branch: 'dsh/R-0000-gone', repo: located.commonDir, allocated: true },
+})
+await service.close(deadId, 'owner-a', 'done')
+const deadPlan = await a.planAllocation({
+  report: 'R-9999', subject: 'probe', repo: located,
+  digests: await ledger.listReports(),
+  hopsOf: async (id) => await ledger.readHops(id),
+  isLive: () => false,
+}, { ...generous, maxRetained: 0, reclaim: 'oldest-closed' })
+const deadStale = !('kind' in deadPlan) ? deadPlan.stale.find((entry) => entry.report === deadId) : undefined
+check('a directory that is not a checkout is reported stale', deadStale !== undefined,
+  JSON.stringify(!('kind' in deadPlan) ? deadPlan.stale : deadPlan))
+check('the stale record says what was found there instead',
+  (deadStale?.detail ?? '').includes('no longer a working tree'), String(deadStale?.detail))
+check('it is not misreported as having uncommitted changes',
+  !('kind' in deadPlan) && !deadPlan.reclaimSkipped.some((entry) => entry.includes(deadId)),
+  JSON.stringify(!('kind' in deadPlan) ? deadPlan.reclaimSkipped : []))
+check('it is not eligible for reclamation',
+  !('kind' in deadPlan) && deadPlan.reclaimed?.report !== deadId,
+  JSON.stringify(!('kind' in deadPlan) ? deadPlan.reclaimed : deadPlan))
+const deadRun = await service.prepareWorktree({
+  report: 'R-9997', subject: 'stale run', actor: 'owner-c', repo: located, base: 'main', settings: generous,
+})
+check('provisioning records the belief once', deadRun.stale.some((entry) => entry.report === deadId),
+  JSON.stringify(deadRun.stale))
+check('the record stops it being re-examined',
+  leaseState(await ledger.readHops(deadId)) === 'reclaimed',
+  leaseState(await ledger.readHops(deadId)))
+check('the record says there was nothing to remove',
+  (await ledger.readHops(deadId)).some((h) => h.action === 'reclaimed' && (h.note ?? '').includes('nothing to remove')))
+const afterDead = await a.planAllocation({
+  report: 'R-9999', subject: 'probe', repo: located,
+  digests: await ledger.listReports(),
+  hopsOf: async (id) => await ledger.readHops(id),
+  isLive: () => false,
+}, { ...generous, maxRetained: 0, reclaim: 'oldest-closed' })
+check('the next plan no longer mentions it',
+  !('kind' in afterDead) && !afterDead.stale.some((entry) => entry.report === deadId),
+  JSON.stringify(!('kind' in afterDead) ? afterDead.stale : afterDead))
+await service.discardWorktree(deadRun.binding)
 
 // ---- report -----------------------------------------------------------------
 try {

@@ -20,12 +20,14 @@
 
 import { appendFile } from 'node:fs/promises'
 import { basename } from 'node:path'
-import { planAllocation, type ReclaimedLease, type StaleBinding, type WorktreeSettings } from './allocate.ts'
+import { planAllocation, reclaimRefusal, type ReclaimedLease, type StaleBinding, type WorktreeSettings } from './allocate.ts'
 import type { AgentLike } from './deliver.ts'
-import { deliver, pendingTargets, type DeliveryOutcome } from './deliver.ts'
+import { deliver, pendingMode, pendingTargets, type DeliveryOutcome } from './deliver.ts'
 import { evaluateLease, leaseState } from './lease.ts'
-import { allocateId, appendHop, discardUnwrittenId, isValidReportId, listReports, readHops, readReport, reportExists, reportPath, writeReport } from './ledger.ts'
-import { addWorktree, classifyGitRefusal, compareKey, headOf, removeWorktree, resolveRepo } from './worktree.ts'
+import { allocateId, appendHop, bodyStartLine, discardUnwrittenId, isValidReportId, listReports, readHops, readReport, reportExists, reportPath, writeReport } from './ledger.ts'
+import {
+  addWorktree, classifyGitRefusal, compareKey, headOf, inspectCheckout, isWorktreeClean, removeWorktree, resolveRepo,
+} from './worktree.ts'
 import type { RepoLocation } from './worktree.ts'
 import type { DeliveryMode, Report, ReportFrontMatter, ReportWorktree, RouteHop } from './types.ts'
 
@@ -210,6 +212,35 @@ function worktreeLabel(worktree: ReportWorktree): string {
   return basename(worktree.path) || worktree.path
 }
 
+/** A truncated head of a body, with the number of document lines it spans. */
+interface BodyHead {
+  /** The head text itself. */
+  readonly text: string
+  /** How many lines the head occupies. */
+  readonly lines: number
+}
+
+/**
+ * Cut a body head to a character budget without splitting a surrogate pair.
+ *
+ * The budget is expressed in characters because that is what a model reads, but
+ * `slice` counts UTF-16 code units: a cut inside an astral character (an emoji, a
+ * rare CJK ideograph) leaves a lone surrogate that renders as a replacement
+ * glyph and can even corrupt the surrounding text. Backing up one unit when the
+ * cut lands on a high surrogate keeps the excerpt a valid string.
+ * @param body - the rendered body.
+ * @param budget - maximum characters to keep.
+ * @returns the head text and its line count.
+ */
+function bodyHead(body: string, budget: number): BodyHead {
+  if (body.length <= budget) return { text: body, lines: body.split('\n').length }
+  let end = budget
+  const last = body.charCodeAt(end - 1)
+  if (last >= 0xd800 && last <= 0xdbff) end--
+  const text = body.slice(0, end)
+  return { text, lines: text.split('\n').length }
+}
+
 /** Serialize one report for model-facing output. */
 function renderFrontLine(front: ReportFrontMatter): string {
   const parts = [
@@ -320,7 +351,9 @@ export class ReportService {
       ...projected,
       updated: options.touch === false ? current.front.updated : Date.now(),
     }
-    await writeReport({ front, body: current.body })
+    // The destination is the id this operation is about, never the digest's own
+    // identity field: a hand-edited identity must not redirect the write.
+    await writeReport({ front, body: current.body }, report)
     return front
   }
 
@@ -354,31 +387,42 @@ export class ReportService {
     if (subject === '') throw new Error('report-ledger: report_author requires a non-empty subject')
     // A caller that had to know the id in advance — because it names the working
     // tree it is about to create — claims the id itself and passes it back.
+    const allocated = input.reportId === undefined
     const report = input.reportId ?? await allocateId()
-    if (!isValidReportId(report)) {
-      throw new Error(`report-ledger: ${JSON.stringify(report)} is not a usable report id (expected the form R-0001)`)
-    }
     const now = Date.now()
-    const fromName = await this.#host.describe(input.actor)
-    const front: ReportFrontMatter = {
-      report,
-      subject,
-      status: 'open',
-      from: input.actor,
-      ...(fromName === undefined ? {} : { fromName }),
-      to: [],
-      cc: [],
-      authors: [],
-      created: now,
-      updated: now,
-      children: [],
-      artifacts: [...(input.artifacts ?? [])],
-      hops: 0,
-      ...(input.parent === undefined ? {} : { parent: input.parent }),
-      ...(input.task === undefined ? {} : { task: input.task }),
-      ...(input.worktree === undefined ? {} : { worktree: input.worktree }),
+    try {
+      if (!isValidReportId(report)) {
+        throw new Error(`report-ledger: ${JSON.stringify(report)} is not a usable report id (expected the form R-0001)`)
+      }
+      const fromName = await this.#host.describe(input.actor)
+      const front: ReportFrontMatter = {
+        report,
+        subject,
+        status: 'open',
+        from: input.actor,
+        ...(fromName === undefined ? {} : { fromName }),
+        to: [],
+        cc: [],
+        authors: [],
+        created: now,
+        updated: now,
+        children: [],
+        artifacts: [...(input.artifacts ?? [])],
+        hops: 0,
+        ...(input.parent === undefined ? {} : { parent: input.parent }),
+        ...(input.task === undefined ? {} : { task: input.task }),
+        ...(input.worktree === undefined ? {} : { worktree: input.worktree }),
+      }
+      await writeReport({ front, body: input.body }, report)
+    } catch (error) {
+      // Allocating an id claims it by creating an empty document. Anything that
+      // fails before the document exists has to give the name back, or a failed
+      // author burns a number and leaves a placeholder no listing will show. An
+      // id handed in by the caller is not ours to give back: it belongs to a
+      // provisioning that rolls itself back (`rollbackProvision`).
+      if (allocated) await discardUnwrittenId(report)
+      throw error
     }
-    await writeReport({ front, body: input.body })
     let refreshed = await this.#record(report, { at: now, actor: input.actor, action: 'authored', to: [] })
 
     // A binding handed in at authoring time is a claim already made: the caller
@@ -402,7 +446,10 @@ export class ReportService {
           const children = latest.front.children.includes(report)
             ? latest.front.children
             : [...latest.front.children, report]
-          await writeReport({ front: { ...latest.front, children, updated: Date.now() }, body: latest.body })
+          await writeReport(
+            { front: { ...latest.front, children, updated: Date.now() }, body: latest.body },
+            input.parent as string,
+          )
         })
       }
     }
@@ -413,10 +460,15 @@ export class ReportService {
       refreshed = sent
       outcomes = await this.#deliver(sent, input.to ?? [], 'wakeup', input.actor)
     }
-    if ((input.cc?.length ?? 0) > 0) {
-      const copied = await this.#record(report, { at: Date.now(), actor: input.actor, action: 'cc', to: [...(input.cc ?? [])] })
+    // A session named in both lists was addressed, and addressing wins: copying
+    // it as well would deliver the same digest twice and record two arrivals for
+    // one intended hand-off. The carbon copy adds nothing the address did not.
+    const addressed = input.to ?? []
+    const copies = [...new Set((input.cc ?? []).filter((target) => !addressed.includes(target)))]
+    if (copies.length > 0) {
+      const copied = await this.#record(report, { at: Date.now(), actor: input.actor, action: 'cc', to: copies })
       refreshed = copied
-      outcomes = [...outcomes, ...await this.#deliver(copied, input.cc ?? [], 'quiet', input.actor)]
+      outcomes = [...outcomes, ...await this.#deliver(copied, copies, 'quiet', input.actor)]
     }
     const final = await this.#load(report)
     return { front: final.front, outcomes }
@@ -463,6 +515,30 @@ export class ReportService {
   }
 
   /**
+   * Throw unless the actor holds the report as an originator, author or recipient.
+   *
+   * A receipt says "the one this was handed to has it", and a sender reads it as
+   * the delivery having landed. Listing and reading are open to every session, so
+   * without this check any agent that merely saw a row could acknowledge on
+   * behalf of a recipient that never received anything — closing the sender's
+   * loop on a hand-off that did not land. Carbon copies are recipients too: a
+   * quiet copy is still a copy, and it is the one who may confirm it.
+   * @param front - the report's digest.
+   * @param actor - the session attempting to acknowledge.
+   * @throws when the actor is none of the above.
+   */
+  #assertRecipient(front: ReportFrontMatter, actor: string): void {
+    const recipients = [...new Set([front.from, ...front.authors, ...front.to, ...front.cc])]
+    if (recipients.includes(actor)) return
+    throw new Error(
+      `report-ledger: ${actor} may not acknowledge ${front.report} — a receipt is a recipient's confirmation, not a bystander's. `
+      + (recipients.length === 0
+        ? 'It has not been addressed to anyone yet.'
+        : `It was addressed to: ${recipients.join(', ')}`),
+    )
+  }
+
+  /**
    * Return a closed report to life because fresh activity arrived.
    *
    * `closed` is a state, not a lock. If someone contributes to, sends, copies, or
@@ -478,7 +554,7 @@ export class ReportService {
     if (current.front.status !== 'closed') return
     await this.#record(report, { at: Date.now(), actor, action: 'reopened', to: [] })
     const fresh = await this.#load(report)
-    await writeReport({ front: { ...fresh.front, status: 'open', updated: Date.now() }, body: fresh.body })
+    await writeReport({ front: { ...fresh.front, status: 'open', updated: Date.now() }, body: fresh.body }, report)
   }
 
   /**
@@ -604,43 +680,64 @@ export class ReportService {
    * @returns the model-facing rendering.
    */
   async read(report: string, actor: string): Promise<string> {
-    const found = await this.#load(report)
-    const hops = await readHops(report)
-    await this.#record(report, { at: Date.now(), actor, action: 'read', to: [] })
-    const path = reportPath(report)
-    const body = found.body.trim()
-    const rendered = body.length > BODY_INLINE_LIMIT
-      ? `${body.slice(0, BODY_HEAD_LIMIT)}\n\n… body truncated (${body.length} chars total). Read the rest with the read tool at ${path} using offset/limit.`
-      : body
-    const route = hops.length === 0
-      ? '  (no hops recorded)'
-      : hops.map((hop) => {
-        const targets = hop.to.length === 0 ? '' : ` -> ${hop.to.join(',')}`
-        const note = hop.note === undefined ? '' : `  # ${hop.note}`
-        return `  ${new Date(hop.at).toISOString()}  ${hop.action.padEnd(11)} by ${hop.actor}${targets}${note}`
-      }).join('\n')
-    const pending = pendingTargets(hops)
-    // A lease's current state is derived from the hop stream, so it is not in the
-    // digest and cannot appear in renderFrontLine. Rendering it here is the
-    // difference between a reader seeing who holds a checkout and a reader
-    // counting hops by eye.
-    const worktree = found.front.worktree
-    const lease = worktree === undefined ? [] : [
-      `lease=${leaseState(hops)} ${worktree.branch ?? '(detached HEAD)'} @ ${worktree.path}`
-      + ` (${worktree.allocated === true ? 'allocated by the ledger' : 'adopted'})`,
-    ]
-    return [
-      renderFrontLine(found.front),
-      ...lease,
-      `body=${path}`,
-      '',
-      '## transfer path',
-      route,
-      ...(pending.length === 0 ? [] : ['', `## still pending delivery to: ${pending.join(', ')}`]),
-      '',
-      '## body',
-      rendered,
-    ].join('\n')
+    // A read records a hop, and recording a hop rewrites the document — so a read
+    // is a writer and takes the same per-report mutex as every other writer. It
+    // used to run unlocked, which let it collide with a mutation's rename (an
+    // `EPERM` out of a tool that is nominally read-only) and let its
+    // full-document rewrite land over a just-appended section.
+    return await this.#withLock(report, async () => {
+      const found = await this.#load(report)
+      const hops = await readHops(report)
+      // `touch: false`: the hop is still recorded, but a read is not activity
+      // that should make an old or concluded report look freshly updated in a
+      // listing, where `updated` is the sort key.
+      await this.#record(report, { at: Date.now(), actor, action: 'read', to: [] }, { touch: false })
+      const path = reportPath(report)
+      const body = found.body.trim()
+      let rendered = body
+      if (body.length > BODY_INLINE_LIMIT) {
+        const head = bodyHead(body, BODY_HEAD_LIMIT)
+        // The pointer is a line offset, not a character one: give the file line at
+        // which the body starts, add the lines the head spans, and the model can
+        // resume exactly where the excerpt stopped instead of re-reading the head.
+        // `head.lines - 1` names the line the cut lands in; the read tool returns
+        // whole lines, so re-reading that one line is the safe resume point
+        // whether the cut fell mid-line or exactly on a line break.
+        const start = (await bodyStartLine(report)) ?? 1
+        const resume = start + head.lines - 1
+        rendered = `${head.text}\n\n… body truncated (${body.length} chars total). `
+          + `The next unread line is ${resume}; read the rest with the read tool at ${path} using offset=${resume}.`
+      }
+      const route = hops.length === 0
+        ? '  (no hops recorded)'
+        : hops.map((hop) => {
+          const targets = hop.to.length === 0 ? '' : ` -> ${hop.to.join(',')}`
+          const note = hop.note === undefined ? '' : `  # ${hop.note}`
+          return `  ${new Date(hop.at).toISOString()}  ${hop.action.padEnd(11)} by ${hop.actor}${targets}${note}`
+        }).join('\n')
+      const pending = pendingTargets(hops)
+      // A lease's current state is derived from the hop stream, so it is not in the
+      // digest and cannot appear in renderFrontLine. Rendering it here is the
+      // difference between a reader seeing who holds a checkout and a reader
+      // counting hops by eye.
+      const worktree = found.front.worktree
+      const lease = worktree === undefined ? [] : [
+        `lease=${leaseState(hops)} ${worktree.branch ?? '(detached HEAD)'} @ ${worktree.path}`
+        + ` (${worktree.allocated === true ? 'allocated by the ledger' : 'adopted'})`,
+      ]
+      return [
+        renderFrontLine(found.front),
+        ...lease,
+        `body=${path}`,
+        '',
+        '## transfer path',
+        route,
+        ...(pending.length === 0 ? [] : ['', `## still pending delivery to: ${pending.join(', ')}`]),
+        '',
+        '## body',
+        rendered,
+      ].join('\n')
+    })
   }
 
   /**
@@ -700,6 +797,7 @@ export class ReportService {
   async acknowledge(report: string, actor: string, note?: string): Promise<MutationResult> {
     return this.#withLock(report, async () => {
       const current = await this.#load(report)
+      this.#assertRecipient(current.front, actor)
       const front = await this.#record(report, {
         at: Date.now(),
         actor,
@@ -708,7 +806,7 @@ export class ReportService {
         ...(note === undefined ? {} : { note }),
       })
       if (current.front.status === 'open') {
-        await writeReport({ front: { ...front, status: 'acked', updated: Date.now() }, body: current.body })
+        await writeReport({ front: { ...front, status: 'acked', updated: Date.now() }, body: current.body }, report)
       }
       return { front: (await this.#load(report)).front, outcomes: [] }
     })
@@ -802,7 +900,7 @@ export class ReportService {
         ...(closedNote === '' ? {} : { note: closedNote }),
       })
       const fresh = await this.#load(report)
-      await writeReport({ front: { ...fresh.front, status: 'closed', updated: Date.now() }, body: fresh.body })
+      await writeReport({ front: { ...fresh.front, status: 'closed', updated: Date.now() }, body: fresh.body }, report)
       return {
         front: (await this.#load(report)).front,
         outcomes: [],
@@ -858,10 +956,13 @@ export class ReportService {
       // The referee's binding, not the caller's: it is the side that read git, so
       // the digest records the branch and commit that are really there.
       const claim = verdict.binding
-      await writeReport({
-        front: { ...current.front, worktree: claim, updated: Date.now() },
-        body: current.body,
-      })
+      await writeReport(
+        {
+          front: { ...current.front, worktree: claim, updated: Date.now() },
+          body: current.body,
+        },
+        report,
+      )
       const front = await this.#record(report, {
         at: Date.now(),
         actor,
@@ -1019,7 +1120,9 @@ export class ReportService {
         actor,
         action: 'reclaimed',
         to: [],
-        note: `checkout ${gone.path} was already gone; nothing to remove`,
+        note: gone.detail === undefined
+          ? `checkout ${gone.path} was already gone; nothing to remove`
+          : `checkout ${gone.path} ${gone.detail}; nothing to remove`,
       }, { touch: false })
     })
   }
@@ -1038,14 +1141,28 @@ export class ReportService {
    * another report is precisely the act an audit exists for.
    */
   async #reclaim(actor: string, target: ReclaimedLease): Promise<void> {
-    const repo = await resolveRepo(target.path)
-    if (repo !== undefined) {
-      const removed = await removeWorktree(repo, target.path)
-      if (!removed.ok) {
-        throw new Error(
-          `report-ledger: refusing to reclaim ${target.path} from ${target.report} — ${removed.stderr.trim()}`,
-        )
-      }
+    // The plan was made from the filesystem and the filesystem moves: ask again
+    // immediately before deleting, through the same helper the plan used, and
+    // abort the allocation rather than stepping over a disagreement.
+    const reality = await inspectCheckout(target.path)
+    const changed = reclaimRefusal(target, reality)
+    if (reality.repo === undefined || changed !== undefined) {
+      throw new Error(
+        `report-ledger: refusing to reclaim ${target.path} from ${target.report} — `
+        + `${changed ?? 'its repository could not be resolved'}; nothing was removed`,
+      )
+    }
+    if (!(await isWorktreeClean(target.path))) {
+      throw new Error(
+        `report-ledger: refusing to reclaim ${target.path} from ${target.report} — `
+        + 'it has uncommitted work; nothing was removed',
+      )
+    }
+    const removed = await removeWorktree(reality.repo, target.path)
+    if (!removed.ok) {
+      throw new Error(
+        `report-ledger: refusing to reclaim ${target.path} from ${target.report} — ${removed.stderr.trim()}`,
+      )
     }
     await this.#withLock(target.report, async () => {
       if (!reportExists(target.report)) return
@@ -1231,7 +1348,7 @@ export class ReportService {
       if (patch.body !== undefined) {
         if (replacingBody) {
           // A true rewrite, recorded as such on the hop.
-          await writeReport({ front: (await this.#load(report)).front, body: patch.body })
+          await writeReport({ front: (await this.#load(report)).front, body: patch.body }, report)
         } else {
           const name = await this.#host.describe(actor)
           const header = `\n\n---\n\n### amendment by ${name ?? actor} at ${new Date().toISOString()}\n\n`
@@ -1253,7 +1370,7 @@ export class ReportService {
           updated: Date.now(),
           ...(task === undefined ? {} : { task }),
         }
-        await writeReport({ front: amended, body: base.body })
+        await writeReport({ front: amended, body: base.body }, report)
       }
 
       const summary = [...changes, ...(patch.note === undefined ? [] : [patch.note])].join('; ')
@@ -1268,15 +1385,37 @@ export class ReportService {
    * @returns the deliveries that succeeded.
    */
   async flushForAgent(sessionId: string): Promise<readonly DeliveryOutcome[]> {
-    const digests = new Map<string, ReportFrontMatter>()
-    for (const front of await listReports()) digests.set(front.report, front)
     const outcomes: DeliveryOutcome[] = []
-    for (const [report, front] of digests) {
-      const hops = await readHops(report)
-      if (!pendingTargets(hops).includes(sessionId)) continue
-      const quiet = hops.some((hop) => hop.action === 'cc' && hop.to.includes(sessionId))
-      const delivered = await this.#deliver(front, [sessionId], quiet ? 'quiet' : 'wakeup', 'report-ledger')
-      outcomes.push(...delivered)
+    const errors: unknown[] = []
+    for (const digest of await listReports()) {
+      const report = digest.report
+      // Each report is flushed under its own writer lock and in isolation:
+      //  - the lock closes the only third writer besides the tools. Without it,
+      //    `#sync` (read the document, then atomically rewrite it) can interleave
+      //    with `contribute`'s append and overwrite the appended section with the
+      //    stale body it read — a silent loss that the `contributed` hop would
+      //    still claim had happened.
+      //  - isolation matters because `agent/created` fires once: one malformed
+      //    report must not abandon every later hand-off owed to this session.
+      try {
+        await this.#withLock(report, async () => {
+          const current = await readReport(report)
+          if (current === undefined) return
+          const hops = await readHops(report)
+          if (!pendingTargets(hops).includes(sessionId)) return
+          // The latest unanswered hand-off decides whether to wake: a report
+          // copied to this session earlier must not downgrade a later re-send.
+          outcomes.push(...await this.#deliver(current.front, [sessionId], pendingMode(hops, sessionId), 'report-ledger'))
+        })
+      } catch (error) {
+        errors.push(error)
+      }
+    }
+    if (errors.length > 0) {
+      throw new AggregateError(
+        errors,
+        `report-ledger: deferred delivery to ${sessionId} failed for ${errors.length} report(s)`,
+      )
     }
     return outcomes
   }

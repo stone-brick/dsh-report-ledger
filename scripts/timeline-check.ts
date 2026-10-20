@@ -297,6 +297,15 @@ const postCase = response()
 await timelineHandler(request({ method: 'POST', url: '/api/report-ledger/timeline?root=session-root', headers: { host: '127.0.0.1:3080' } }), postCase.res)
 check('a non-GET method answers 405', postCase.captured.status === 405, String(postCase.captured.status))
 check('405 advertises the allowed methods', postCase.captured.headers.allow === 'GET, HEAD')
+check('405 keeps the shared JSON headers',
+  postCase.captured.headers['cache-control'] === 'no-store'
+  && postCase.captured.headers['x-content-type-options'] === 'nosniff'
+  && postCase.captured.headers['referrer-policy'] === 'no-referrer'
+  && typeof postCase.captured.headers['content-type'] === 'string',
+  JSON.stringify(postCase.captured.headers))
+check('405 answers the same JSON envelope as every refusal',
+  postCase.captured.body.includes('"ok":false') && postCase.captured.body.includes('method-not-allowed'),
+  postCase.captured.body)
 
 for (const badRoot of ['', '../etc/passwd', 'a b', 'x'.repeat(201)]) {
   const bad = response()
@@ -317,15 +326,34 @@ const badId = response()
 await reportHandler(request({ url: '/api/report-ledger/report?id=../../etc/passwd', headers: { host: '127.0.0.1:3080' } }), badId.res)
 check('a malformed report id answers 400', badId.captured.status === 400, String(badId.captured.status))
 
-// A failing data source must surface as JSON, never as an unhandled rejection.
+// A failing data source must surface as JSON, never as an unhandled rejection —
+// and the response must not carry the internal detail. The 500 is the one answer
+// on this surface that could otherwise echo an absolute ledger path or an OS
+// reason back to a page, so the diagnostic is asserted to go to the injected log.
+const logged: string[] = []
 const brokenHandler = route.createTimelineHandler({
-  timeline: async () => { throw new Error('ledger offline') },
+  timeline: async () => { throw new Error('ledger offline: C:/Users/someone/.dsh/report-ledger/reports/R-0001.md') },
   report: async () => undefined,
   worktrees: async () => emptyWorktreeReport,
+  log: (message) => { logged.push(message) },
 })
 const brokenCase = response()
 await brokenHandler(request({ url: '/api/report-ledger/timeline?root=session-root', headers: { host: '127.0.0.1:3080' } }), brokenCase.res)
-check('a failing source answers 500 as JSON', brokenCase.captured.status === 500 && brokenCase.captured.body.includes('ledger offline'))
+check('a failing source answers 500 as JSON',
+  brokenCase.captured.status === 500 && brokenCase.captured.body.includes('"code":"internal-error"'),
+  `${brokenCase.captured.status} ${brokenCase.captured.body}`)
+check('500 does not return the internal error text',
+  !brokenCase.captured.body.includes('ledger offline')
+  && !brokenCase.captured.body.includes('.dsh')
+  && !brokenCase.captured.body.includes('R-0001.md'),
+  brokenCase.captured.body)
+check('500 reports the detail to the injected log instead',
+  logged.some((line) => line.includes('ledger offline') && line.includes('R-0001.md')),
+  logged.join(' | '))
+check('500 keeps the shared JSON headers',
+  brokenCase.captured.headers['cache-control'] === 'no-store'
+  && brokenCase.captured.headers['x-content-type-options'] === 'nosniff',
+  JSON.stringify(brokenCase.captured.headers))
 
 let failed = 0
 for (const [label, ok, detail] of checks) {

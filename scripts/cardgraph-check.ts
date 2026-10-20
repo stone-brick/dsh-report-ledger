@@ -17,8 +17,8 @@ export {}
 
 const {
   buildCardgraph, lodFor, cardSize, CARDGRAPH_LODS,
-  intersects, contains, grow, cullByBounds, hitTest, worldViewport,
-  DEFAULT_CARDGRAPH_OPTIONS,
+  intersects, contains, grow, cullByBounds, hitTest, worldViewport, fitTransform,
+  DEFAULT_CARDGRAPH_OPTIONS, MAX_FIT_ZOOM, MAX_ZOOM, MIN_ZOOM, ZOOM_STEP,
 } = await import('../src/client/cardgraph-model.ts')
 
 /** One report digest, as the layout consumes it. */
@@ -386,6 +386,110 @@ check('picking finds a lower item when the top one does not contain the point',
   hitTest([{ bounds: box }, { bounds: overlap }], 12, 12)?.bounds === overlap)
 check('picking returns nothing outside every item',
   hitTest([{ bounds: box }, { bounds: overlap }], 100, 100) === undefined)
+
+// ---------------------------------------------------------------------------
+// Fitting: the one rule that turns a box width into a transform
+// ---------------------------------------------------------------------------
+// A chain of `count` sessions is `count` columns, whatever reports are plotted, so
+// the drawing's widths are the tier widths the fit has to probe.
+const chain = (count: number): { payload: Parameters<typeof buildCardgraph>[0]; cards: Front[] } => {
+  const sessions = Array.from({ length: count }, (_unused, index) => ({
+    id: `session-chain-${index}`,
+    depth: index,
+    delegated: index > 0,
+    live: true,
+    ...(index > 0 ? { parentId: `session-chain-${index - 1}` } : {}),
+    createdAt: at(index + 1),
+  }))
+  const cards = Array.from({ length: count }, (_unused, index) =>
+    report(`R-9${String(index).padStart(2, '0')}`, { from: `session-chain-${index}`, created: at(20 + index) }))
+  return {
+    payload: { root: 'session-chain-0', generatedAt: at(99), sessions, reports: [] } as never,
+    cards,
+  }
+}
+
+check('the zoom range is one set of numbers, shared by the controls and the fit',
+  MIN_ZOOM === 0.25 && MAX_ZOOM === 2.5 && ZOOM_STEP === 1.25 && MAX_FIT_ZOOM === ZOOM_STEP)
+
+check('a fit reports the tier its own scale lands in', (() => {
+  const { payload: tree, cards } = chain(3)
+  const fitted = fitTransform(tree, cards, 575)
+  return fitted !== undefined && fitted.lod === 'compact'
+    && Math.abs(fitted.scale - 551 / 696) < 1e-12
+})())
+check('a fit leaves the drawing where the reader reads it: centred, 12px down', (() => {
+  const { payload: tree, cards } = chain(3)
+  const fitted = fitTransform(tree, cards, 575)
+  // 575 - 24 available, compact width 696, scale 551/696 → the drawing is 551 wide
+  // and therefore centred at (575 - 551) / 2.
+  return fitted !== undefined && Math.abs(fitted.offsetX - 12) < 1e-9 && fitted.offsetY === 12
+})())
+check('a fit of one column at fullscreen leans in no further than one control step', (() => {
+  const { payload: tree, cards } = chain(1)
+  const fitted = fitTransform(tree, cards, 1279)
+  return fitted !== undefined && fitted.lod === 'card' && fitted.scale === MAX_FIT_ZOOM
+    && fitted.offsetX === (1279 - 312 * MAX_FIT_ZOOM) / 2 && fitted.offsetY === 12
+})())
+check('a box narrower than the cheapest tier still answers, at the zoom floor', (() => {
+  const { payload: tree, cards } = chain(1)
+  const fitted = fitTransform(tree, cards, 50)
+  return fitted !== undefined && fitted.lod === 'chip' && fitted.scale === MIN_ZOOM
+})())
+check('a box with no width has nothing to fit',
+  fitTransform(payload, plotted, 0) === undefined && fitTransform(payload, plotted, Number.NaN) === undefined)
+check('a drawing with nothing in it has nothing to fit',
+  fitTransform({ root: 'nobody', generatedAt: 0, sessions: [], reports: [] } as never, [], 800) === undefined)
+
+// The bands the first cut of the fit could not resolve: at the card tier's fill
+// scale the box was below the card tier, at the compact tier's it was above it, so
+// `lodFor(scale) === tier` matched nothing, the fit wrote nothing, and the drawing
+// kept whatever transform it already had — the state dependence the tier probing
+// exists to remove. One row per column count, from the audit.
+const formerDeadBands: readonly (readonly [number, number, number])[] = [
+  [1, 210, 273], [2, 396, 523], [3, 581, 772], [4, 767, 1022], [5, 952, 1271], [6, 1138, 1521],
+]
+check('every former dead band now resolves to a self-consistent fit',
+  formerDeadBands.every(([count, from, to]) => {
+    const { payload: tree, cards } = chain(count)
+    return [from, Math.floor((from + to) / 2), to].every((width) => {
+      const fitted = fitTransform(tree, cards, width)
+      return fitted !== undefined && lodFor(fitted.scale) === fitted.lod
+    })
+  }))
+
+/** The first box width a sweep cannot fit, or `''` when every one of them fits. */
+const sweepFailure = (() => {
+  for (let count = 1; count <= 6; count++) {
+    const { payload: tree, cards } = chain(count)
+    for (let width = 160; width <= 1600; width++) {
+      const fitted = fitTransform(tree, cards, width)
+      if (fitted === undefined) return `columns=${count} width=${width}: no fit`
+      if (lodFor(fitted.scale) !== fitted.lod) return `columns=${count} width=${width}: ${fitted.lod} drawn at ${fitted.scale}`
+      if (fitted.scale < MIN_ZOOM || fitted.scale > MAX_FIT_ZOOM) return `columns=${count} width=${width}: scale ${fitted.scale}`
+      if (!Number.isFinite(fitted.offsetX) || !Number.isFinite(fitted.offsetY)) return `columns=${count} width=${width}: offset`
+    }
+  }
+  return ''
+})()
+check('every box width from 160 to 1600 fits in every tier a reader can reach', sweepFailure === '', sweepFailure)
+check('a fit is idempotent: the same box gives the same transform, click after click', (() => {
+  const { payload: tree, cards } = chain(3)
+  const once = JSON.stringify(fitTransform(tree, cards, 620))
+  return once === JSON.stringify(fitTransform(tree, cards, 620))
+    && once === JSON.stringify(fitTransform(tree, cards, 620))
+})())
+check('a fit never magnifies past the box it was asked to fill', (() => {
+  const { payload: tree, cards } = chain(2)
+  const fitted = fitTransform(tree, cards, 420)
+  const drawing = buildCardgraph(tree, cards, { lod: fitted?.lod ?? 'card' })
+  return fitted !== undefined && drawing.width * fitted.scale <= 420 - 24 + 1e-9
+})())
+
+check('the layout carries the title-bar height, so the painter need not know it',
+  DEFAULT_CARDGRAPH_OPTIONS.frameHeaderHeight === 26 && layout.frameHeaderHeight === 26)
+check('the title-bar height is an option the layout reports',
+  buildCardgraph(payload, plotted, { frameHeaderHeight: 40 }).frameHeaderHeight === 40)
 
 let failed = 0
 for (const [label, ok, detail] of checks) {

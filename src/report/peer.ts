@@ -44,6 +44,14 @@
  * the peer's later contributions turn that one report into the conversation
  * thread.
  *
+ * The budget is a lifetime quota, not a concurrency limit: {@link
+ * DEFAULT_MAX_PEERS} bounds how many peers one session may ever start, and the
+ * roster log is the count. A peer that is no longer resident — or that died on
+ * its first turn — still holds its slot exactly as its log line says, and there
+ * is no retire tool. Recovering a slot is therefore a deliberate human act: back
+ * up `$DSH_HOME/report-ledger/peers.jsonl`, delete the lines of peers that are
+ * truly finished, and the budget is available again.
+ *
  * @module dsh-report-ledger/report/peer
  */
 
@@ -276,10 +284,15 @@ export class PeerService {
   }
 
   /**
-   * Whether the caller holds a channel to a session.
+   * Classify the relationship for display and discovery.
+   *
+   * This is **not** an authorization check before delivery: report_send and
+   * report_cc accept any session id by design, because reaching out through the
+   * ledger is how contact is established. Nothing in the delivery path consults
+   * this predicate; it answers the narrower question the roster shows.
    * @param self - the caller's session id.
    * @param target - the session being addressed.
-   * @returns true when the relationship grants a direct channel.
+   * @returns true when the relationship classifier places them in contact.
    */
   async holdsChannel(self: string, target: string): Promise<boolean> {
     return holdsChannelTo(await this.#inputs(self), target)
@@ -339,14 +352,16 @@ export class PeerService {
   async start(self: string, input: StartPeerInput): Promise<StartedPeer> {
     const task = input.task.trim()
     if (task === '') throw new Error('report-ledger: peer_start requires a non-empty task')
-    const name = input.name?.trim()
+    const name = input.name?.trim() || undefined
     if (name !== undefined && name.length > 60) throw new Error('report-ledger: peer_start name must be 60 characters or fewer')
 
     const already = await this.startedCount(self)
     if (already >= this.#maxPeers) {
       throw new Error(
-        `report-ledger: this session already started ${already} peers (limit ${this.#maxPeers}); `
-        + 'reuse an existing peer, or report to one you already hold a channel to instead of opening another',
+        `report-ledger: this session has already started ${already} peers (lifetime limit ${this.#maxPeers}, `
+        + 'counting peers that are no longer resident or that died on their first turn); reuse an existing peer by '
+        + 'sending it a report instead of opening another, or recover a slot as a human act: back up '
+        + '$DSH_HOME/report-ledger/peers.jsonl, then delete the lines of peers that are finished',
       )
     }
 

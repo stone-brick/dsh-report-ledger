@@ -118,6 +118,17 @@ check('relative paths are refused on 2.47.1', !w.supportsRelativePaths('git vers
 check('relative paths are refused on a 1.x version', !w.supportsRelativePaths('git version 1.8.5'))
 check('an unparsable version refuses the feature', !w.supportsRelativePaths('unknown'))
 
+// The gate has to be *askable*, not just present: a version that cannot carry
+// the flag must yield a sentence naming it, because git's own "unknown option"
+// arrives after the allocation started and says nothing about the way out.
+check('a supported version has no gate refusal', w.relativePathsRefusal('git version 2.49.0.windows.1') === undefined,
+  String(w.relativePathsRefusal('git version 2.49.0.windows.1')))
+const oldGit = w.relativePathsRefusal('git version 2.47.1')
+check('an old version is refused by name', (oldGit ?? '').includes('2.48') && (oldGit ?? '').includes('2.47.1'),
+  String(oldGit))
+check('a host where git cannot be asked is refused too', w.relativePathsRefusal(undefined) !== undefined,
+  String(w.relativePathsRefusal(undefined)))
+
 // ---- 4. locating a repository ----------------------------------------------
 const repo = await makeRepo('repo')
 const located = await w.resolveRepo(repo)
@@ -163,6 +174,22 @@ check('the new branch is reported as held',
 check('the holder is the new path',
   w.samePath(w.branchHolders(afterAdd).get('dsh/R-0007-first')?.path ?? '', linked))
 check('a fresh worktree is clean', await w.isWorktreeClean(linked))
+
+// What is at a recorded path has three answers, and "missing" vs "something that
+// is not a checkout" is the distinction reclamation needs: collapsing them makes
+// a dead directory read as dirty forever.
+const linkedReality = await w.inspectCheckout(linked)
+check('an existing checkout is recognized as a working tree', linkedReality.presence === 'worktree',
+  linkedReality.presence)
+check('the reality carries the branch git reports', linkedReality.branch === 'dsh/R-0007-first',
+  String(linkedReality.branch))
+const plainDir = join(repo, 'plain-dir')
+await mkdir(plainDir, { recursive: true })
+const plainReality = await w.inspectCheckout(plainDir)
+check('a directory inside the repository that is not a checkout is not a working tree',
+  plainReality.presence === 'not-a-worktree', plainReality.presence)
+const missingReality = await w.inspectCheckout(join(scratch, 'never-existed'))
+check('a path that does not exist reads as missing', missingReality.presence === 'missing', missingReality.presence)
 check('the new worktree starts at the base commit',
   (await w.headOf(linked)) === entries[0]?.head,
   `${await w.headOf(linked)} vs ${entries[0]?.head}`)

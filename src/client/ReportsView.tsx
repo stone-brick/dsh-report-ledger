@@ -17,7 +17,7 @@
  * @module dsh-report-ledger/client/ReportsView
  */
 
-import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import {
   Button,
@@ -39,6 +39,7 @@ import {
   laneIndex,
   LEASE_TONE,
   reportIds,
+  sessionDepths,
   sessionTitles,
   shortId,
   statusCounts,
@@ -52,7 +53,7 @@ import {
 import { ReportDetailView } from './ReportDetailView.tsx'
 import { getJson, POLL_INTERVAL_MS, TIMELINE_URL, useReportDetail } from './timeline-source.ts'
 import { fill, stamp } from './format.ts'
-import { HOP_LABEL, LEASE_HINT, STATUS_DOT, STATUS_LABEL, STATUS_TONE, type ReportLedgerKey } from './locales.ts'
+import { HOP_LABEL, LEASE_HINT, STATUS_LABEL, STATUS_TONE, type ReportLedgerKey } from './locales.ts'
 import { SEARCH_CLASS } from './styles.ts'
 
 /** Translate one key, substituting `{name}` placeholders. */
@@ -99,12 +100,22 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
   // while somebody is reading it. Only the explicit refresh button advances both.
   const [detailNonce, setDetailNonce] = useState(0)
   const [openReport, setOpenReport] = useState<string | undefined>(undefined)
+  // A thread link points at a row that may be filtered out or outside this tree,
+  // so the row it wants may not exist yet. The request is remembered until that
+  // row mounts; see the scroll effect below.
+  const [scrollTarget, setScrollTarget] = useState<string | undefined>(undefined)
+  /** Row containers, so a thread jump can bring its target on screen. */
+  const rowRefs = useRef<Map<string, HTMLDivElement>>(new Map())
   const [status, setStatus] = useState<StatusFilter>(rememberedStatus)
   const [text, setText] = useState('')
   const [basis, setBasis] = useState<ReportTimeBasis>('created')
   // The open report's detail, read through the same hook the right column's canvas
   // tab uses — one read path, so the two surfaces cannot disagree about a report.
   const { detail, error: detailError } = useReportDetail(openReport, detailNonce)
+  // Belt and braces on top of the hook's own report keying: everything below that
+  // renders the panel, or synthesizes a row for it, uses only a detail that was
+  // read for the report currently open.
+  const shown = detail !== undefined && detail.front.report === openReport ? detail : undefined
 
   useEffect(() => {
     try {
@@ -114,16 +125,29 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
     }
   }, [status])
 
+  // A different session is a different tree, and everything above was read for
+  // the old one: the payload, the failure, the open report and the pending jump.
+  // Resetting them together is what keeps a switched-to session from rendering
+  // the previous session's collaboration (or leaving its report open in it).
+  useEffect(() => {
+    setPayload(undefined)
+    setError(undefined)
+    setOpenReport(undefined)
+    setScrollTarget(undefined)
+  }, [sessionId])
+
   useEffect(() => {
     if (sessionId === undefined || sessionId === '') {
       setError('no-session')
-      return
+      return undefined
     }
     let cancelled = false
-    setError(undefined)
     getJson<TimelinePayload>(`${TIMELINE_URL}?root=${encodeURIComponent(sessionId)}`)
-      .then((value) => { if (!cancelled) setPayload(value) })
+      .then((value) => { if (!cancelled) { setPayload(value); setError(undefined) } })
       .catch((cause: unknown) => { if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause)) })
+    // Note the asymmetry: a new read does NOT clear the previous failure. The
+    // banner below stays until a read actually succeeds, so a failing host is a
+    // steady, readable statement instead of a strobe of "failed / stale / failed".
     return () => { cancelled = true }
   }, [sessionId, timelineNonce])
 
@@ -151,16 +175,37 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
   // The lease state is not on the digest: liveness comes from the hop stream, and
   // the host derives it once so the browser never needs a second copy of the rule.
   const lanes = useMemo(() => (payload === undefined ? new Map<string, WorktreeLane>() : laneIndex(payload)), [payload])
+  // The author's depth, for the row a synthesized report needs. Taken from the
+  // model so the payload's depth rule has one implementation.
+  const depths = useMemo(() => (payload === undefined ? new Map<string, number>() : sessionDepths(payload)), [payload])
   const filter = useMemo(() => ({ status, text }), [status, text])
   const visible = useMemo<Row[]>(() => {
     const kept = filterRows(rows, filter)
-    if (openReport === undefined || detail === undefined) return kept
+    if (openReport === undefined || shown === undefined) return kept
     // The panel is anchored to a report row, so the open report must have one —
     // see `withSynthesizedRow` for the two user paths that would otherwise leave
     // the panel with nowhere to render, and why the row is inserted in time
-    // order instead of appended.
-    return withSynthesizedRow(kept, detail.front, basis)
-  }, [rows, filter, openReport, detail, basis])
+    // order instead of appended. The depth is the author's, so a filtered-out
+    // report does not jump to the root of the tree it is rendered under.
+    return withSynthesizedRow(kept, shown.front, basis, depths.get(shown.front.from) ?? 0)
+  }, [rows, filter, openReport, shown, basis, depths])
+  // A thread link can point at a row that does not exist yet: a report outside
+  // this tree, or one the current filter hides, only gets its row once its detail
+  // read arrives. So the request is not a one-shot — it waits for the row to
+  // mount, and is abandoned the moment the open report moves away from it.
+  useEffect(() => {
+    if (scrollTarget === undefined) return
+    if (openReport !== scrollTarget) {
+      setScrollTarget(undefined)
+      return
+    }
+    const element = rowRefs.current.get(scrollTarget)
+    if (element === undefined) return
+    setScrollTarget(undefined)
+    // `scrollIntoView` is the one call here that a non-browser DOM may not have;
+    // skipping it only costs the jump, never the expansion that already happened.
+    if (typeof element.scrollIntoView === 'function') element.scrollIntoView({ block: 'nearest' })
+  }, [scrollTarget, openReport, visible])
   // Reports surviving the FILTER, as opposed to `visible`, which also carries a
   // synthesized row for the open report. Keeping the two apart is what lets the
   // panel say which of the two reasons applies: outside this tree, or hidden by
@@ -207,6 +252,20 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
   const refresh = useCallback(() => {
     setTimelineNonce((value) => value + 1)
     setDetailNonce((value) => value + 1)
+  }, [])
+
+  /**
+   * Open a report that was reached through a link rather than its own row.
+   *
+   * A row click expands in place — the row is already under the pointer and needs
+   * no help. A thread link is different: its target can be off screen, or have no
+   * row at all yet (outside this tree, or hidden by the filter), so the request to
+   * bring it on screen is recorded here and satisfied by the effect above when
+   * the row finally mounts.
+   */
+  const openLinked = useCallback((report: string | undefined) => {
+    setOpenReport(report)
+    setScrollTarget(report)
   }, [])
 
   const shell: Record<string, string | number> = {
@@ -257,34 +316,36 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
     display: 'inline-flex',
     alignItems: 'center',
   }
+  /** The caption look for a timestamp; the digest's meta line reuses its colour. */
   const time: Record<string, string | number> = {
     color: 'var(--dsw-alias-label-caption, #999)',
     fontSize: 'var(--dsw-font-xxxs-11, 11)',
     whiteSpace: 'nowrap',
   }
-  /**
-   * The same caption look, for content that must be allowed to WRAP.
-   *
-   * `time` sets `white-space: nowrap`, which is right for a timestamp and wrong
-   * for anything whose length the ledger decides. A nowrap element has a
-   * min-content width equal to its whole unbreakable line, so inside a `1fr`
-   * grid track — or a flex item without `min-width: 0` — it grows the track past
-   * its container. Recipient lists and hop notes are exactly that: unbounded
-   * text, which is how the transfer path used to push the whole tab into a
-   * horizontal scrollbar and cut the notes off screen.
-   */
-  const wrap: Record<string, string | number> = {
-    ...time,
-    whiteSpace: 'normal',
-    minWidth: 0,
-    overflowWrap: 'anywhere',
-  }
   /** The muted caption colour, for the empty-state sentences. */
   const muted: Record<string, string | number> = {
     color: 'var(--dsw-alias-label-tertiary, #888)',
   }
+  /**
+   * The strip that reports a failed re-read WITHOUT replacing the list.
+   *
+   * A warning, not an error: the ledger on screen is still the last thing that was
+   * successfully read, and the poll keeps trying. Colouring it like a page failure
+   * would teach the reader to stop believing the colour. The token is the shell's
+   * warn label rather than a mixed colour, so it follows the theme.
+   */
+  const notice: Record<string, string | number> = {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '6px',
+    marginBottom: '10px',
+    color: 'var(--dsw-alias-state-warn-label, #a60)',
+  }
 
-  if (error !== undefined) {
+  // The full-page failure is only for "there is nothing to show yet". Once a
+  // payload has arrived, a failed re-read is a fact ABOUT the list on screen — not
+  // a reason to replace it, drop the open report and lose the reader's position.
+  if (payload === undefined && error !== undefined) {
     return (
       <div style={shell}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -318,6 +379,16 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
 
   return (
     <div style={shell}>
+      {/* Kept above the toolbar on purpose: the header still shows when the last
+          read failed, so the failure has to be readable next to it rather than
+          instead of the whole tab. */}
+      {error === undefined ? null : (
+        <div style={notice}>
+          <StateDot state="warning" size={8} />
+          <span style={{ flex: '1 1 auto' }}>{t('view.error', { code: error })}</span>
+          <Button variant="outline" onClick={refresh}>{t('view.retry')}</Button>
+        </div>
+      )}
       <div style={head}>
         <strong>{t('view.tab')}</strong>
         <span style={summary}>
@@ -362,11 +433,11 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
       {empty === 'no-reports' ? <div style={muted}>{t('view.empty')}</div> : null}
       {empty === 'filtered-out' ? <div style={muted}>{t('filter.none')}</div> : null}
 
-      {visible.map((row, index) => {
+      {visible.map((row) => {
         const pad = 8 + row.depth * 18
         if (row.kind === 'session') {
           return (
-            <div key={`s-${row.id}-${index}`} style={{ display: 'flex', gap: '8px', padding: `4px 0 4px ${pad}px`, alignItems: 'baseline' }}>
+            <div key={`s-${row.id}`} style={{ display: 'flex', gap: '8px', padding: `4px 0 4px ${pad}px`, alignItems: 'baseline' }}>
               {/* The shell's state dot, not a text bullet: `ongoing` is the
                   animated one, so a resident session reads as alive at a glance. */}
               <Tooltip label={idHint(row.id)} side="bottom" delayMs={400}>
@@ -403,7 +474,16 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
         const wtLane = lanes.get(front.report)
         const toggleLabel = fill(expanded ? t('row.collapse') : t('row.expand'), { report: front.report })
         return (
-          <div key={`r-${front.report}`} style={{ paddingLeft: `${pad}px` }}>
+          <div
+            key={`r-${front.report}`}
+            // The row container (row + its panel) is what a thread jump scrolls to:
+            // bringing the row on screen is what makes the expansion visible.
+            ref={(element) => {
+              if (element === null) rowRefs.current.delete(front.report)
+              else rowRefs.current.set(front.report, element)
+            }}
+            style={{ paddingLeft: `${pad}px` }}
+          >
             {/* The row is a plain container, not a `role="button"`.
                 It used to be one, and it contained a real <button> (the task
                 chip) — nested interactive content. Worse, a role="button" takes
@@ -411,11 +491,11 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
                 read out a line of session uuids and then the task label twice,
                 once inside the row's own name.
                 The disclosure now lives on the leading control: the shell's own
-                Button, whose name says what it does and whose `aria-controls`
-                points at the panel it opens. Clicking anywhere on the row stays
-                as the pointer convenience, which is why the container keeps a
-                click handler with no role: the keyboard path is the button, and
-                the pointer path is the row. */}
+                Button, whose name says what it does and which points at the panel
+                it opens for as long as that panel exists. Clicking anywhere on the
+                row stays as the pointer convenience, which is why the container
+                keeps a click handler with no role: the keyboard path is the
+                button, and the pointer path is the row. */}
             <div
               onClick={() => { setOpenReport(expanded ? undefined : front.report) }}
               style={{
@@ -435,7 +515,10 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
                 size="sm"
                 icon={expanded ? <IconChevronDownOutlineRegular size={14} /> : <IconChevronRightOutlineRegular size={14} />}
                 aria-expanded={expanded}
-                aria-controls={panelId}
+                // Only a mounted panel has an id to point at; a collapsed
+                // disclosure claiming `aria-controls` names an absent element and
+                // gives assistive tech a relationship that does not exist.
+                {...(expanded ? { 'aria-controls': panelId } : {})}
                 aria-label={toggleLabel}
                 title={toggleLabel}
                 onClick={(event) => {
@@ -473,6 +556,13 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
                     state, which is the one thing the digest cannot carry — a
                     checkout nobody holds and one being worked in look identical
                     from the binding alone. */}
+                {/* The chip's handler stays on the inner span: the shell's `Tag`
+                    takes tone, className and children only and renders a span, so
+                    there is no `onClick` to hoist onto it. Promoting the chip to a
+                    `Pill` would be the other way — and it would turn a read-only
+                    status label into a second button in the row, which is a product
+                    change rather than a fix. The cost is the tag's own padding not
+                    being part of the click target. */}
                 {wtLabel === undefined ? null : (
                   <Tag tone={LEASE_TONE[wtLane?.state ?? 'none']}>
                     <span
@@ -519,19 +609,22 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
                   {front.last === undefined ? '' : ` · ${t('row.last')} ${t(HOP_LABEL[front.last.action])}`}
                 </div>
               </span>
-              <span style={time}>{stamp(front.updated)}</span>
+              {/* The row prints the value it was SORTED by, not a fixed field: a
+                  list ordered by creation must not read as ordered by last
+                  activity, and the basis toggle moves both at once. */}
+              <span style={time}>{stamp(row.at)}</span>
             </div>
 
             {expanded ? (
               <ReportDetailView
                 report={front.report}
-                detail={detail}
+                detail={shown}
                 error={detailError}
                 t={t}
                 idHint={idHint}
                 id={panelId}
                 variant="row"
-                onOpenReport={setOpenReport}
+                onOpenReport={openLinked}
                 inList={inList.has(front.report)}
                 visibleInFilter={filteredReportIds.has(front.report)}
               />

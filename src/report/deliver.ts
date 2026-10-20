@@ -23,14 +23,24 @@
 import { randomUUID } from 'node:crypto'
 import type { DeliveryMode, ReportFrontMatter, RouteHop } from './types.ts'
 
-/** A message handed to an agent inbox. Structurally a `UserMessage`. */
+/**
+ * A message handed to an agent inbox. Structurally a `UserMessage`.
+ *
+ * `source.kind` is the producer's own name, not a catch-all. DSH's session
+ * format v4 retired the shared `kind: 'plugin'` wrapper: native admission
+ * refuses it outright (`format v4 message requires a producer-owned source
+ * kind`), so a delivery written with it kills the recipient's first turn at
+ * step 1 — before any model call, which is why the failure used to look like a
+ * silent hand-off. The value below is the same string the v3→v4 migration
+ * derives for this plugin (`plugin:<id>`), so messages written before and
+ * after this change name one producer.
+ */
 export interface OutboundMessage {
   readonly id: string
   readonly role: 'user'
   readonly content: readonly { readonly type: 'text'; readonly text: string }[]
   readonly source: {
-    readonly kind: 'plugin'
-    readonly plugin: string
+    readonly kind: 'plugin:report-ledger'
     readonly form: 'relay'
   }
 }
@@ -54,9 +64,6 @@ export interface DeliveryHost {
    */
   getAgent(sessionId: string): AgentLike | undefined
 }
-
-/** Plugin tag stamped on every injected message source. */
-export const PLUGIN_ID = 'report-ledger'
 
 /** Where one hand-off went. */
 export interface DeliveryOutcome {
@@ -102,7 +109,7 @@ export function renderDigest(front: ReportFrontMatter, path: string, mode: Deliv
     id: randomUUID(),
     role: 'user',
     content: [{ type: 'text', text: lines.join('\n') }],
-    source: { kind: 'plugin', plugin: PLUGIN_ID, form: 'relay' },
+    source: { kind: 'plugin:report-ledger', form: 'relay' },
   }
 }
 
@@ -156,13 +163,44 @@ export async function deliver(
  * @returns session ids that were addressed but have no recorded arrival.
  */
 export function pendingTargets(hops: readonly RouteHop[]): string[] {
-  const addressed: string[] = []
-  const arrived = new Set<string>()
+  // Ordered, not set-difference: a hand-off is owed until a LATER arrival for
+  // that target. A recipient delivered once and then addressed again while
+  // absent has a new, unanswered hand-off, so it must become pending again —
+  // computing "addressed minus ever-arrived" would silently drop that re-send,
+  // which is the exact durable-mailbox promise this derivation exists to keep.
+  const owed = new Set<string>()
   for (const hop of hops) {
     if (hop.action === 'sent' || hop.action === 'cc' || hop.action === 'forwarded' || hop.action === 'copied') {
-      for (const target of hop.to) if (!addressed.includes(target)) addressed.push(target)
+      for (const target of hop.to) owed.add(target)
     }
-    if (hop.action === 'delivered') for (const target of hop.to) arrived.add(target)
+    if (hop.action === 'delivered') {
+      for (const target of hop.to) owed.delete(target)
+    }
   }
-  return addressed.filter((target) => !arrived.has(target))
+  return [...owed]
+}
+
+/**
+ * The wake policy of the hand-off a target is still owed.
+ *
+ * Decided per window, not by the last hop: if the target is owed even one
+ * **addressed** hand-off (`sent`/`forwarded`) that has not been answered by an
+ * arrival, the delivery must wake it. A later carbon copy must not downgrade
+ * that — the recipient would receive the digest but never run, which is
+ * indistinguishable from a dropped hand-off. Read the other way ("the latest
+ * addressing hop wins") a `sent` followed by a `cc` while the target is absent
+ * silently loses the wake, which is the same failure the mailbox exists to
+ * prevent. Arrivals close the window, so a `cc` after an answered send is quiet.
+ * @param hops - the report's complete transfer path, oldest first.
+ * @param target - the recipient that is pending.
+ * @returns `wakeup` when an unanswered addressed hand-off exists, else `quiet`.
+ */
+export function pendingMode(hops: readonly RouteHop[], target: string): DeliveryMode {
+  let addressed = false
+  for (const hop of hops) {
+    if (!hop.to.includes(target)) continue
+    if (hop.action === 'delivered') addressed = false
+    else if (hop.action === 'sent' || hop.action === 'forwarded') addressed = true
+  }
+  return addressed ? 'wakeup' : 'quiet'
 }

@@ -10,13 +10,18 @@
  * That choice means lineage cannot express the relationship, so this module keeps
  * the one record that can: an append-only peer log beside the ledger.
  *
- * The log is also the authority record. DSH's delegation seam refuses
- * non-adjacent messaging with the note that "other agents, ancestors, teams,
- * workflows, and hosts remain rejected until an explicit authority protocol has
- * a production consumer" — this plugin is that consumer, and the rule it
- * implements is deliberately narrow: **lineage grants a channel, a prior
- * recorded exchange grants a channel, and starting a session grants a channel
- * over what you started.**
+ * The log is the relationship record, not an authority gate. DSH's delegation
+ * seam refuses non-adjacent messaging with the note that "other agents,
+ * ancestors, teams, workflows, and hosts remain rejected until an explicit
+ * authority protocol has a production consumer". This plugin does not claim to
+ * be that consumer for its own tools: report_send and report_cc are open to any
+ * session id by design, because reaching out through the ledger is how contact
+ * is established in the first place. What {@link holdsChannelTo} and {@link
+ * buildRoster} provide is **classification for display and discovery** — lineage
+ * in either direction, a sibling under the same parent, a prior recorded
+ * exchange, and a session the caller started — so an agent can see who it is
+ * related to instead of guessing. Nothing in the delivery path consults it, and
+ * the docs must not imply otherwise.
  *
  * @module dsh-report-ledger/report/roster
  */
@@ -296,16 +301,19 @@ export function buildRoster(input: RosterInput): PeerRow[] {
 }
 
 /**
- * Whether a session already holds a channel to another.
+ * The relationship predicate behind the roster's classification.
  *
- * This is the authority predicate the roster documents: lineage in either
- * direction, a sibling under the same parent, or a session the caller started.
+ * Lineage in either direction, a sibling under the same parent, or a session
+ * the caller started. It is deliberately **not** consulted before delivery:
+ * report_send / report_cc accept any session id by design, so this answers a
+ * display-and-discovery question, not an authorization one.
+ *
  * A ledger contact is deliberately **not** sufficient on its own for a fresh
  * channel — reaching out through the ledger is how contact is established, and
  * the recorded exchange is what makes the relationship real.
  * @param input - the roster inputs (scope and limit are ignored).
  * @param target - the session id being addressed.
- * @returns true when the caller may address it.
+ * @returns true when the relationship classifier places the two in contact.
  */
 export function holdsChannelTo(input: Omit<RosterInput, 'scope' | 'limit'>, target: string): boolean {
   if (target === input.self || target === '') return false

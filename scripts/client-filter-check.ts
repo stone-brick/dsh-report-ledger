@@ -14,7 +14,7 @@ export {}
  * Run: node scripts/client-filter-check.ts
  */
 
-const { buildRows, filterRows, isFiltering, statusCounts, visibleReports, rowMatches, emptyState, shortId, sessionTitles, withSynthesizedRow, laneIndex, worktreeLabel, LEASE_TONE } =
+const { buildRows, filterRows, isFiltering, statusCounts, visibleReports, rowMatches, emptyState, shortId, sessionTitles, withSynthesizedRow, laneIndex, worktreeLabel, LEASE_TONE, sessionDepths } =
   await import('../src/client/timeline-model.ts')
 
 const checks: [string, boolean, string][] = []
@@ -257,8 +257,8 @@ check('an empty payload has no titles',
 // it made a report created at 11:12 appear below one created at 14:30 — a broken
 // sort at exactly the moment the user is asking why something is missing.
 const middle = report('R-0042', { created: at(4), updated: at(30) })
-const byCreated = withSynthesizedRow(rows, middle, 'created')
-const byActivity = withSynthesizedRow(rows, middle, 'updated')
+const byCreated = withSynthesizedRow(rows, middle, 'created', 0)
+const byActivity = withSynthesizedRow(rows, middle, 'updated', 0)
 
 check('a missing report gains a row', byCreated.filter((r) => r.kind === 'report').length === 5)
 check('the synthesized row keeps the list sorted',
@@ -266,9 +266,22 @@ check('the synthesized row keeps the list sorted',
 check('the synthesized row is inserted, not appended', byCreated[byCreated.length - 1]?.at !== at(4))
 check('the synthesized row follows the time basis', byActivity[byActivity.length - 1]?.at === at(30))
 check('an already-present report is not duplicated',
-  withSynthesizedRow(rows, report('R-0001')).length === rows.length, String(withSynthesizedRow(rows, report('R-0001')).length))
+  withSynthesizedRow(rows, report('R-0001'), 'created', 0).length === rows.length, String(withSynthesizedRow(rows, report('R-0001'), 'created', 0).length))
 check('the synthesized row carries the fetched digest',
   byCreated.some((row) => row.kind === 'report' && row.front.report === 'R-0042'))
+// Every report row is printed at the value it is sorted by, so the list cannot be
+// ordered by one axis (creation) while its timestamps read as another (activity)
+// — the bug that made a correctly sorted timeline look broken.
+check('a report row sits and reads at the same time axis',
+  buildRows(payload, 'created').every((row) => row.kind !== 'report' || row.at === row.front.created)
+  && buildRows(payload, 'updated').every((row) => row.kind !== 'report' || row.at === row.front.updated))
+// A filtered-out report keeps the depth of the session that authored it: the
+// synthesized row is not allowed to fall back to the root.
+const synthesizedDepth = withSynthesizedRow([], middle, 'created', 2)[0]
+check('a synthesized row keeps the depth it was given',
+  synthesizedDepth?.kind === 'report' && synthesizedDepth.depth === 2)
+check('sessionDepths maps every session, and only sessions',
+  sessionDepths(payload).get('session-grand') === 2 && sessionDepths(payload).size === 3)
 
 // ---------------------------------------------------------------------------
 // Thread links and body display
@@ -304,6 +317,16 @@ check('text with no fence is left alone', closeOpenFence('just prose') === 'just
 check('an open fence is closed', closeOpenFence('intro\n```\nlet x = 1') === 'intro\n```\nlet x = 1\n```')
 check('an indented fence still counts', closeOpenFence('  ```\nx') === '  ```\nx\n```')
 check('two open fences are treated as one pair', closeOpenFence('```\na\n```\nb') === '```\na\n```\nb')
+// A fence is a RUN, not a token: CommonMark allows a four-backtick opener so the
+// body can hold a literal three-backtick line, and requires the closer to be at
+// least as long. Counting every line that merely starts with three backticks
+// calls the nested document balanced while its real fence stays open.
+check('a shorter fence inside a longer block does not close it',
+  closeOpenFence('````\n```\nstill code\n````') === '````\n```\nstill code\n````')
+check('an unclosed four-backtick block is closed with four',
+  closeOpenFence('intro\n````\ncode') === 'intro\n````\ncode\n````')
+check('a fence may be closed by a longer run',
+  closeOpenFence('```\ncode\n`````') === '```\ncode\n`````')
 
 // ---------------------------------------------------------------------------
 // The time basis

@@ -318,6 +318,17 @@ try {
 }
 check('re-claiming your own checkout is allowed', doubleClaim === '', doubleClaim)
 
+// A relative path is not a checkout: it names whatever directory the resolving
+// process happens to be in, so the digest would keep meaning something new every
+// time it is read. The refusal has to ask for the absolute path instead.
+let relativeClaim = ''
+try {
+  await call('report_lease', { report: adopterDigest?.report ?? '', path: '.' })
+} catch (error) {
+  relativeClaim = error instanceof Error ? error.message : String(error)
+}
+check('report_lease refuses a relative path', relativeClaim.includes('absolute path'), relativeClaim)
+
 // A checkout a *different* live report holds is refused, and the refusal names
 // the holder — that is what makes the claim a lock rather than a hope.
 const intruder = await call('report_author', { subject: 'wants a held checkout', body: 'b' })

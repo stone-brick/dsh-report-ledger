@@ -218,6 +218,10 @@ export interface ThemeReader {
   read(): PaintTheme
 }
 
+/** Whether the reader was handed a list of candidates rather than one element. */
+const isElementList = (value: Element | readonly Element[]): value is readonly Element[] =>
+  Array.isArray(value)
+
 /**
  * Watch the theme through one token.
  *
@@ -225,22 +229,51 @@ export interface ThemeReader {
  * them per repaint would be paying for the theme on every hover. The canary is the
  * page background: if it did not move, nothing else did, and the cached theme is
  * returned.
- * @param root - the element carrying the tokens, normally `document.documentElement`.
+ *
+ * **The palette lives on `body`, so the candidates are a chain.** DSH declares
+ * every `--dsw-alias-*` colour and every `--dsw-font-<tier>-*` part on `body` —
+ * `:root` carries only the family and the radii — and custom properties inherit
+ * downwards, so a reader pointed at `document.documentElement` reads the empty
+ * string for all of them and the whole drawing collapses onto the fallback theme
+ * (a white canvas in a dark shell). Handing over both elements, `body` first,
+ * keeps the drawing on the palette the shell actually painted it with, and still
+ * works if a host ever moves the tokens up to `:root`. The first candidate whose
+ * canary is non-empty is the source; the probe runs per read, not once, because a
+ * host may mount `body` after this reader exists.
+ * @param root - one element, or the candidates in order of preference.
  * @param win - the window to read styles from.
  * @returns the reader.
  */
-export function createThemeReader(root: Element, win: Window): ThemeReader {
-  const style = win.getComputedStyle(root)
-  const read: ReadToken = (name) => style.getPropertyValue(name)
+export function createThemeReader(root: Element | readonly Element[], win: Window): ThemeReader {
+  const roots: readonly Element[] = isElementList(root) ? root : [root]
+  const sources = new Map<Element, ReadToken>()
+  const readerOf = (element: Element): ReadToken => {
+    const known = sources.get(element)
+    if (known !== undefined) return known
+    const style = win.getComputedStyle(element)
+    const read: ReadToken = (name) => style.getPropertyValue(name)
+    sources.set(element, read)
+    return read
+  }
   let canary: string | undefined
   let cached: PaintTheme | undefined
   return {
     read(): PaintTheme {
-      const current = read(CANARY)
-      if (cached === undefined || current !== canary) {
-        canary = current
-        cached = readTheme(read)
+      let current = ''
+      let source: ReadToken | undefined
+      for (const element of roots) {
+        const read = readerOf(element)
+        const value = read(CANARY)
+        if (value === '') continue
+        current = value
+        source = read
+        break
       }
+      if (cached !== undefined && current === canary) return cached
+      canary = current
+      // A host that declares no palette at all keeps the guaranteed-visible theme;
+      // every field of it is a usable value, so nothing can blank the drawing.
+      cached = readTheme(source ?? (() => ''))
       return cached
     },
   }
@@ -523,8 +556,14 @@ export function createCanvasPainter(canvas: HTMLCanvasElement): CardgraphPainter
     ctx.stroke()
 
     // Title bar: a band across the top, clipped to the frame so its square corners
-    // do not cut across the rounded ones.
-    const bar: Rect = { x: frame.bounds.x, y: frame.bounds.y, width: frame.bounds.width, height: 26 }
+    // do not cut across the rounded ones. Its height is the layout's, not a number
+    // of the painter's own: cards start below it and ports stay out of it.
+    const bar: Rect = {
+      x: frame.bounds.x,
+      y: frame.bounds.y,
+      width: frame.bounds.width,
+      height: scene.layout.frameHeaderHeight,
+    }
     ctx.save()
     pathRoundRect(ctx, frame.bounds, FRAME_RADIUS)
     ctx.clip()
@@ -626,13 +665,16 @@ export function createCanvasPainter(canvas: HTMLCanvasElement): CardgraphPainter
     ctx.font = fontString(theme.fonts.id)
     ctx.fillStyle = accent ? theme.accent : theme.secondary
     if (card.lod === 'compact') {
-      // One line: the id, then as much subject as is left of the card.
+      // One line: the id, then as much subject as is left of the card. Each half is
+      // measured in the font it is drawn in — folding the subject against the
+      // heavier id font shortened it for no reason, and would overflow the card in
+      // a theme whose body font is the larger of the two.
       const id = card.report
       const idWidth = measure(id)
-      const rest = foldText(`· ${card.subject}`, textWidth - idWidth - 4, measure, 1)[0] ?? ''
       ctx.fillText(id, textLeft, box.y + box.height / 2 - theme.fonts.id.size / 2 - 1)
       ctx.font = fontString(theme.fonts.body)
       ctx.fillStyle = theme.caption
+      const rest = foldText(`· ${card.subject}`, textWidth - idWidth - 4, measure, 1)[0] ?? ''
       ctx.fillText(rest, textLeft + idWidth + 4, box.y + box.height / 2 - theme.fonts.body.size / 2 - 1)
       return
     }

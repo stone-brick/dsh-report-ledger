@@ -26,26 +26,31 @@ export interface ParsedDocument {
   readonly front: ReportFrontMatter
   /** Everything after the closing fence. */
   readonly body: string
+  /** 1-based line in the document where the body begins. */
+  readonly bodyLine: number
 }
 
 /**
  * Split a document into its YAML front matter and body.
  *
- * The opening fence must be the very first line (a BOM and a trailing `\r` are
- * tolerated). Importing the fence from an indented position is not accepted, so
- * a body that happens to start with a horizontal rule is never mistaken for
- * metadata.
+ * The opening fence must be the very first line. A BOM and CRLF line endings are
+ * tolerated: both are normalized away before parsing, because a Windows editor
+ * saves CRLF by default and the YAML parser refuses a document whose last line
+ * is terminated by a lone `\r` — which is exactly what a CRLF file's final
+ * front-matter line looks like once the block has been joined. Getting this
+ * wrong made a hand-edited report invisible rather than merely misformatted.
+ * Importing the fence from an indented position is not accepted, so a body that
+ * happens to start with a horizontal rule is never mistaken for metadata.
  * @param raw - the file text.
- * @returns the parsed mapping and body, or `undefined` when there is no front matter.
+ * @returns the parsed mapping, the body, and the body's first line, or `undefined` when there is no front matter.
  */
-export function splitFrontMatter(raw: string): { data: Record<string, unknown>; body: string } | undefined {
-  const text = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw
+export function splitFrontMatter(raw: string): { data: Record<string, unknown>; body: string; bodyLine: number } | undefined {
+  const text = (raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw).replace(/\r\n?/g, '\n')
   const lines = text.split('\n')
-  const first = lines[0]?.replace(/\r$/, '')
-  if (first !== FENCE) return undefined
+  if (lines[0] !== FENCE) return undefined
   let close = -1
   for (let index = 1; index < lines.length; index++) {
-    if (lines[index]?.replace(/\r$/, '') === FENCE) {
+    if (lines[index] === FENCE) {
       close = index
       break
     }
@@ -65,7 +70,17 @@ export function splitFrontMatter(raw: string): { data: Record<string, unknown>; 
     return undefined
   }
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
-  return { data: parsed as Record<string, unknown>, body: lines.slice(close + 1).join('\n').replace(/^\n/, '') }
+  const bodyLines = lines.slice(close + 1)
+  // 1-based line of the first non-blank body line, so an oversized body can be
+  // resumed by line. The blank separator that `serializeReport` writes is not
+  // part of the body a reader sees, hence the skip.
+  let lead = 0
+  while (lead < bodyLines.length && bodyLines[lead] === '') lead++
+  return {
+    data: parsed as Record<string, unknown>,
+    body: bodyLines.join('\n').replace(/^\n/, ''),
+    bodyLine: close + 2 + lead,
+  }
 }
 
 /** Read a string field, tolerating numbers and quoteless scalars. */
@@ -200,7 +215,7 @@ export function parseReport(raw: string): ParsedDocument | undefined {
   if (split === undefined) return undefined
   const front = toFrontMatter(split.data)
   if (front === undefined) return undefined
-  return { front, body: split.body }
+  return { front, body: split.body, bodyLine: split.bodyLine }
 }
 
 /**

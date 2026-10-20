@@ -81,6 +81,13 @@ check('the shared contract points at peer_list instead of guessing',
 check('the shared contract frames peer_start as a partner, not a subordinate',
   rootText.includes('会比你活得更久'))
 
+// ---- the worktree tools are deployment-dependent --------------------------
+// The protocol is a static prefix and cannot be gated per deployment, so the
+// per-assembly partnership section says what a worktree-off deployment implies.
+check('the contract says the worktree tools are deployment-dependent', rootText.includes('部署相关'))
+check('the contract says report_lease may not exist', rootText.includes('report_lease') && rootText.includes('根本不存在'))
+check('the contract says report_release may have nothing to release', rootText.includes('没有对象可交还'))
+
 // ---- the partnership contract states the requirement, unconditionally -----
 check('partnership rejects the one-shot-tool framing', rootText.includes('不是「做完一项任务就可以终止的工具」'))
 check('partnership says a settled task is not the end of the relationship', rootText.includes('逗号而不是句号'))

@@ -59,6 +59,8 @@ const payload = {
 interface Box { x: number; y: number; width: number; height: number }
 interface Shape { seq: number; style: string; alpha: number; box: Box; points: number; dash: readonly number[]; lineWidth: number }
 interface Drawn { seq: number; text: string; x: number; y: number; style: string }
+/** One measurement, with the font it was measured in: folding is font-dependent. */
+interface Measured { readonly text: string; readonly font: string }
 
 /** A context stand-in. Coordinates are recorded raw, so they are world coordinates. */
 class Recorder {
@@ -67,6 +69,7 @@ class Recorder {
   readonly strokes: Shape[] = []
   readonly rects: Shape[] = []
   readonly texts: Drawn[] = []
+  readonly measurements: Measured[] = []
   measureCalls = 0
   /** Width one character reports, so a test can make text as wide or narrow as it likes. */
   charWidth = 7
@@ -91,7 +94,11 @@ class Recorder {
   clearRect(): void { this.calls.push('clearRect') }
   clip(): void { this.calls.push('clip') }
   setLineDash(segments: readonly number[]): void { this.calls.push('setLineDash'); this.dash = segments }
-  measureText(text: string): { width: number } { this.measureCalls++; return { width: text.length * this.charWidth } }
+  measureText(text: string): { width: number } {
+    this.measureCalls++
+    this.measurements.push({ text, font: this.font })
+    return { width: text.length * this.charWidth }
+  }
 
   fillRect(x: number, y: number, width: number, height: number): void {
     this.calls.push('fillRect')
@@ -139,6 +146,7 @@ class Recorder {
     this.strokes.length = 0
     this.rects.length = 0
     this.texts.length = 0
+    this.measurements.length = 0
     this.path = []
   }
 }
@@ -205,6 +213,54 @@ check('a second read of an unchanged theme only reads the canary', reads === aft
 tokens['--dsw-alias-bg-base'] = '#303030'
 const changed = reader.read()
 check('a theme change is picked up', changed.canvas === '#303030' && first.canvas === '#101010')
+
+// ---------------------------------------------------------------------------
+// Reading the theme through a chain of elements
+// ---------------------------------------------------------------------------
+// DSH declares the palette on `body`, not on `:root`, so the reader is handed a
+// chain: pointing it at the document element alone reads the empty string for every
+// token and collapses the drawing onto the fallback theme — a white canvas in a dark
+// shell. These pin the contract the view relies on.
+/** A window whose elements each carry their own token map. */
+const chainWindow = (byElement: Map<Element, Record<string, string>>): Window => ({
+  getComputedStyle: (element: Element) => ({
+    getPropertyValue: (name: string) => byElement.get(element)?.[name] ?? '',
+  }),
+}) as unknown as Window
+const bodyCandidate = {} as Element
+const rootCandidate = {} as Element
+const paletteOnBody: Record<string, string> = { '--dsw-alias-bg-base': '#0b0b0b', '--dsw-alias-bg-layer-3': '#1b1b1b' }
+const paletteOnRoot: Record<string, string> = { '--dsw-alias-bg-base': '#2b2b2b' }
+const noTokens: Record<string, string> = {}
+check('a chain reads the candidate that declares the palette', (() => {
+  const fakeWindow = chainWindow(new Map([[bodyCandidate, paletteOnBody], [rootCandidate, noTokens]]))
+  return createThemeReader([bodyCandidate, rootCandidate], fakeWindow).read().canvas === '#0b0b0b'
+})())
+check('a chain still finds the palette when a host puts it on the root instead', (() => {
+  const fakeWindow = chainWindow(new Map([[bodyCandidate, noTokens], [rootCandidate, paletteOnRoot]]))
+  return createThemeReader([bodyCandidate, rootCandidate], fakeWindow).read().canvas === '#2b2b2b'
+})())
+check('a chain with no palette anywhere stays on the guaranteed-visible theme', (() => {
+  const fakeWindow = chainWindow(new Map([[bodyCandidate, noTokens], [rootCandidate, noTokens]]))
+  return createThemeReader([bodyCandidate, rootCandidate], fakeWindow).read().canvas === FALLBACK_THEME.canvas
+})())
+check('one element is still a one-candidate chain', (() => {
+  const fakeWindow = chainWindow(new Map([[bodyCandidate, paletteOnBody]]))
+  return createThemeReader(bodyCandidate, fakeWindow).read().canvas === '#0b0b0b'
+})())
+// The audit's defect in one assertion: the reader used to be pointed at an element
+// that declares none of the tokens. A complete map must leave nothing on the
+// fallback, so "the palette was found" is a property of the input, not of luck.
+const complete = readTheme((name) => (
+  name.endsWith('-font-family') ? 'Inter, sans-serif'
+    : name.includes('-font-weight') ? '500'
+      : name.includes('-line-height') ? '20px'
+        : name.includes('-font-size') ? '13px'
+          : '#123456'
+))
+check('a complete token map never falls back',
+  complete.canvas === '#123456' && complete.frameBorder === '#123456' && complete.business === '#123456'
+    && complete.fonts.title.size === 13 && complete.fonts.title.family === 'Inter, sans-serif')
 
 // ---------------------------------------------------------------------------
 // Folding text
@@ -280,6 +336,20 @@ const frameFill = whole.recorder.fills.find((fill) => near(fill.box, layout.fram
 const cardFill = whole.recorder.fills.find((fill) => near(fill.box, layout.cards[0]?.bounds as Box, 6))
 const firstWire = wireStrokes(whole.recorder)[0]
 check('a frame is filled in the frame colour', frameFill !== undefined && frameFill.style === themed.frame)
+// The title bar's height is the layout's, not a number of the painter's own: cards
+// start below it, ports stay out of it, and a card pushed up into it would be drawn
+// under the title.
+check('the layout carries the title-bar height the painter draws with', layout.frameHeaderHeight === 26)
+const tallerHeader = buildCardgraph(payload, plotted, { frameHeaderHeight: 40 })
+const tallerScene = paint({ layout: tallerHeader })
+check('the title bar is as tall as the layout says',
+  tallerScene.recorder.rects.some((rect) => rect.style === themed.frameBar && rect.box.height === 40))
+check('a taller title bar moves the title into its middle', (() => {
+  const frame = tallerHeader.frames[0]
+  const label = frame?.title ?? frame?.shortId
+  const drawn = tallerScene.recorder.texts.find((text) => text.text === label)
+  return frame !== undefined && drawn !== undefined && Math.abs(drawn.y - (frame.bounds.y + 20.5)) < 1e-9
+})())
 check('a card is filled in the surface colour', cardFill !== undefined && cardFill.style === themed.surface)
 check('an unfocused frame is bordered without the accent',
   whole.recorder.strokes.some((stroke) => near(stroke.box, layout.frames[0]?.bounds as Box) && stroke.style === themed.frameBorder))
@@ -320,6 +390,17 @@ check('a compact card draws fewer words than a full one',
   `${compactScene.recorder.texts.length} vs ${whole.recorder.texts.length}`)
 check('a compact card does not draw the status words',
   !compactScene.recorder.texts.some((text) => text.text === labels.status.open))
+// Each half of a compact card is measured in the font it is drawn in. Folding the
+// subject against the heavier id font shortened it, and would overflow the card in a
+// theme whose body font is the larger of the two.
+const compactIds = (): readonly Measured[] =>
+  compactScene.recorder.measurements.filter((measured) => /^R-\d+$/.test(measured.text))
+const compactSubjects = (): readonly Measured[] =>
+  compactScene.recorder.measurements.filter((measured) => measured.text.startsWith('· '))
+check('a compact card measures its id in the id font',
+  compactIds().length > 0 && compactIds().every((measured) => measured.font === fontString(themed.fonts.id)))
+check('a compact card measures its subject in the body font',
+  compactSubjects().length > 0 && compactSubjects().every((measured) => measured.font === fontString(themed.fonts.body)))
 check('a full card says the report id, its status and its task',
   ['R-0001', '进行中', 'ledger'].every((text) => whole.recorder.texts.some((drawn) => drawn.text === text)))
 check('a card in another state draws that state\'s words',

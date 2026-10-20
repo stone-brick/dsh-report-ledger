@@ -249,15 +249,26 @@ const untrusted = response()
 await handler(request({ url: route.WORKTREES_PATH, remoteAddress: '8.8.8.8', headers: { host: '127.0.0.1:3080' } }), untrusted.res)
 check('an untrusted maintenance read is refused', untrusted.captured.status === 403, String(untrusted.captured.status))
 
+// A contained failure has to reach the browser as JSON, and the *detail* has to
+// stay out of it: the route moved the underlying error text (absolute ledger
+// paths, ids, OS reasons) to an injected log, so the response says only that the
+// read could not be served.
+const logged: string[] = []
 const failing = route.createWorktreesHandler({
   timeline: async () => { throw new Error('unused') },
   report: async () => undefined,
   worktrees: async () => { throw new Error('ledger offline') },
+  log: (message: string) => { logged.push(message) },
 })
 const broken = response()
 await failing(request({ url: route.WORKTREES_PATH, headers: { host: '127.0.0.1:3080' } }), broken.res)
 check('a failing maintenance source answers 500 as JSON',
-  broken.captured.status === 500 && broken.captured.body.includes('ledger offline'), String(broken.captured.status))
+  broken.captured.status === 500 && broken.captured.body.includes('"ok":false')
+  && broken.captured.body.includes('internal-error'),
+  `${broken.captured.status} ${broken.captured.body}`)
+check('the failure detail reaches the log, never the response',
+  logged.some((line) => line.includes('ledger offline')) && !broken.captured.body.includes('ledger offline'),
+  `${JSON.stringify(logged)} / ${broken.captured.body}`)
 
 // ---- report -----------------------------------------------------------------
 try {

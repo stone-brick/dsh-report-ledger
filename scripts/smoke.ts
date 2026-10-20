@@ -14,7 +14,7 @@ export {}
  * Run: node scripts/smoke.ts
  */
 
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -23,7 +23,7 @@ process.env.DSH_HOME = root
 
 const { ReportService, renderRow } = await import('../src/report/service.ts')
 const { ledgerRoot, reportPath, routePath } = await import('../src/report/ledger.ts')
-const { pendingTargets } = await import('../src/report/deliver.ts')
+const { pendingMode, pendingTargets, renderDigest } = await import('../src/report/deliver.ts')
 const { readHops, readReport } = await import('../src/report/ledger.ts')
 
 /** Agents that are "resident" for this run. */
@@ -66,6 +66,13 @@ check('c is absent (queued, not refused)', authored.outcomes.find((o) => o.targe
 check('the addressed recipient got a digest message', inbox.some((m) => m.target === 'session-b' && m.text.includes(authored.front.report)))
 check('the absent recipient got nothing yet', !inbox.some((m) => m.target === 'session-c'))
 
+// The message source is durable session-format data, and format v4 refuses the
+// retired catch-all kind `plugin` at admission. A digest written with it reaches
+// no model at all: the recipient's first turn dies at step 1, which is exactly
+// the silent-hand-off failure this pins against.
+const digest = renderDigest(authored.front, reportPath(authored.front.report), 'wakeup')
+check('a delivered digest carries a producer-owned source kind', digest.source.kind === 'plugin:report-ledger', digest.source.kind)
+
 // ---- 2. the pending derivation IS the mailbox ------------------------------
 const hopsAfterAuthor = await readHops(authored.front.report)
 check('pending contains exactly the absent recipient', pendingTargets(hopsAfterAuthor).join() === 'session-c', pendingTargets(hopsAfterAuthor).join())
@@ -99,6 +106,34 @@ check('flush delivers the held hand-off', flushed.some((o) => o.targetId === 'se
 check('the returned recipient now has the digest', inbox.some((m) => m.target === 'session-c'))
 const stillPending = pendingTargets(await readHops(authored.front.report))
 check('only the never-returned copy target stays pending', stillPending.join() === 'session-d', stillPending.join())
+check('a pending carbon copy stays quiet', pendingMode(hopsAfterAuthor, 'session-c') === 'quiet',
+  pendingMode(hopsAfterAuthor, 'session-c'))
+check('a later addressed hand-off overrides an earlier copy',
+  pendingMode([...hopsAfterAuthor, { at: Date.now(), actor: 'session-a', action: 'sent' as const, to: ['session-c'] }], 'session-c')
+    === 'wakeup')
+
+// A recipient that was delivered once and is addressed again while absent has a
+// NEW unanswered hand-off. Deriving pending as "addressed minus ever-arrived"
+// loses it: the target is never queued again and the second hand-off vanishes.
+const repeat = await service.author({
+  subject: 're-send after an earlier arrival',
+  body: 'second hand-off',
+  actor: 'session-a',
+  to: ['session-b'],
+})
+live.delete('session-b')
+const requeued = await service.send(repeat.front.report, 'session-a', ['session-b'])
+check('a re-send to an absent recipient is queued again',
+  requeued.outcomes.find((o) => o.targetId === 'session-b')?.status === 'queued',
+  JSON.stringify(requeued.outcomes))
+check('a re-send after an earlier arrival is pending again',
+  pendingTargets(await readHops(repeat.front.report)).includes('session-b'),
+  pendingTargets(await readHops(repeat.front.report)).join())
+live.add('session-b')
+const reflushed = await service.flushForAgent('session-b')
+check('the re-send is delivered when the recipient returns',
+  reflushed.some((o) => o.targetId === 'session-b' && o.status === 'delivered'),
+  JSON.stringify(reflushed))
 
 // ---- 6. acknowledge closes the loop --------------------------------------
 const acked = await service.acknowledge(authored.front.report, 'session-c', 'no action needed')
@@ -363,6 +398,183 @@ check('a normalized bare-string binding invents no branch', shortForm?.front.wor
 const halfBinding = parseReport('---\nreport: "R-9003"\nsubject: "half"\nworktree:\n  branch: dsh/x\n---\n\nbody\n')
 check('a binding with no path is dropped whole, not half-read',
   halfBinding?.front.worktree === undefined, JSON.stringify(halfBinding?.front.worktree))
+
+// ---- 17. hand-edited files: Windows line endings, identity, stray entries ---
+// A Windows editor saves CRLF, and the final front-matter line then ends in a
+// lone `\r` once the block is joined. The YAML parser refuses that document, so
+// the report vanished from every listing rather than reading as misformatted.
+const crlfDocument = '---\r\nreport: "R-9100"\r\nsubject: "crlf"\r\n---\r\n\r\nbody line\r\n'
+check('a CRLF document parses', parseReport(crlfDocument) !== undefined)
+check('a CRLF document keeps its body', parseReport(crlfDocument)?.body.includes('body line') === true,
+  JSON.stringify(parseReport(crlfDocument)?.body))
+check('a BOM plus CRLF document parses', parseReport(`\uFEFF${crlfDocument}`)?.front.report === 'R-9100',
+  String(parseReport(`\uFEFF${crlfDocument}`)?.front.report))
+
+// The digest's identity field is editable data; the file name is the identity.
+// A copied or hand-edited `report:` must not redirect a write into another
+// record, and `../` must not let it leave the reports directory.
+const identityA = await service.author({ subject: 'identity A', body: 'A BODY', actor: 'session-a' })
+const identityB = await service.author({ subject: 'identity B', body: 'B BODY', actor: 'session-a' })
+const identityAFile = reportPath(identityA.front.report)
+const identityBFile = reportPath(identityB.front.report)
+const identityBText = await readFile(identityBFile, 'utf8')
+await writeFile(
+  identityAFile,
+  (await readFile(identityAFile, 'utf8')).replace(`report: "${identityA.front.report}"`, `report: "${identityB.front.report}"`),
+  'utf8',
+)
+const handEditedRow = (await service.list()).find((row) => row.subject === 'identity A')
+check('a hand-edited identity is listed under its own file id',
+  handEditedRow?.report === identityA.front.report, String(handEditedRow?.report))
+await service.contribute(identityA.front.report, 'session-b', 'identity edit', 'after a hand edit')
+check('a write stays in the report it was asked to write',
+  (await readFile(identityAFile, 'utf8')).includes('identity edit'))
+check('a hand-edited identity does not write into another report',
+  (await readFile(identityBFile, 'utf8')) === identityBText)
+check('the digest identity is normalized from the file it lives in',
+  (await readReport(identityA.front.report))?.front.report === identityA.front.report)
+
+const escaped = await service.author({ subject: 'traversal', body: 'VICTIM', actor: 'session-a' })
+const escapedFile = reportPath(escaped.front.report)
+await writeFile(
+  escapedFile,
+  (await readFile(escapedFile, 'utf8')).replace(`report: "${escaped.front.report}"`, 'report: "../outside"'),
+  'utf8',
+)
+await service.contribute(escaped.front.report, 'session-b', 'traversal payload', 'escaped identity')
+check('a traversal identity cannot write outside the reports directory',
+  await stat(join(ledgerRoot(), 'outside.md')).then(() => false, () => true))
+check('the traversal report itself is still readable',
+  (await readReport(escaped.front.report))?.front.report === escaped.front.report)
+
+// One unreadable entry must not take the whole index down: listing is how every
+// other report is found, and the deferred-delivery pump lists first.
+const beforeUnreadable = (await service.list()).length
+const unreadable = join(ledgerRoot(), 'reports', 'R-9800.md')
+await mkdir(unreadable, { recursive: true })
+const afterUnreadable = await service.list()
+check('a directory where a report file is expected does not break the listing',
+  afterUnreadable.length === beforeUnreadable, `${beforeUnreadable} -> ${afterUnreadable.length}`)
+check('the healthy reports are still listed', afterUnreadable.length > 0)
+await rm(unreadable, { recursive: true, force: true })
+
+// ---- 18. receipts, reads, and failed authoring -----------------------------
+const receipt = await service.author({ subject: 'receipt authorization', body: 'b', actor: 'session-a', to: ['session-c'] })
+let bystanderReceipt = ''
+try { await service.acknowledge(receipt.front.report, 'session-a-stranger', 'not mine') } catch (error) {
+  bystanderReceipt = error instanceof Error ? error.message : String(error)
+}
+check('a bystander may not acknowledge a report', bystanderReceipt.includes('may not acknowledge'), bystanderReceipt)
+check('the refusal names who may acknowledge', bystanderReceipt.includes('session-c'), bystanderReceipt)
+check('a recipient may acknowledge',
+  (await service.acknowledge(receipt.front.report, 'session-c', 'got it')).front.status === 'acked')
+
+const copiedReceipt = await service.author({ subject: 'carbon copy receipt', body: 'b', actor: 'session-a', cc: ['session-d'] })
+check('a carbon copy may acknowledge',
+  (await service.acknowledge(copiedReceipt.front.report, 'session-d', 'copy received')).front.status === 'acked')
+
+// A read is a recorded hop, but it is not activity: it must not reorder the
+// listing by advancing `updated`, and it must not resurrect a concluded report.
+const readOld = await service.author({ subject: 'read order old', body: 'old', actor: 'session-a' })
+await new Promise((resolve) => setTimeout(resolve, 5))
+await service.author({ subject: 'read order new', body: 'new', actor: 'session-a' })
+const orderBeforeRead = (await service.list()).map((row) => row.report)
+const updatedBeforeRead = (await readReport(readOld.front.report))?.front.updated
+await service.read(readOld.front.report, 'session-a')
+check('reading a report does not reorder the listing',
+  (await service.list()).map((row) => row.report).join() === orderBeforeRead.join())
+check('reading a report does not advance its updated stamp',
+  (await readReport(readOld.front.report))?.front.updated === updatedBeforeRead)
+
+const closedForRead = await service.author({ subject: 'closed then read', body: 'b', actor: 'session-a' })
+await service.close(closedForRead.front.report, 'session-a', 'concluded before the read')
+const closedUpdated = (await readReport(closedForRead.front.report))?.front.updated
+await service.read(closedForRead.front.report, 'session-a')
+check('reading a closed report keeps it closed',
+  (await readReport(closedForRead.front.report))?.front.status === 'closed')
+check('reading a closed report does not refresh its stamp',
+  (await readReport(closedForRead.front.report))?.front.updated === closedUpdated)
+
+// A failed authoring must give an allocated id back instead of leaving an empty
+// placeholder that burns the number and appears in no listing.
+const reportsDir = join(ledgerRoot(), 'reports')
+const crashing = new ReportService({
+  getAgent: () => undefined,
+  describe: async () => { throw new Error('describe exploded') },
+})
+const placeholders = async (): Promise<number> =>
+  (await readdir(reportsDir)).filter((name) => /^R-\d+\.md$/.test(name)).length
+const beforeCrash = await placeholders()
+let authorCrash = ''
+try { await crashing.author({ subject: 'never written', body: 'b', actor: 'session-a' }) } catch (error) {
+  authorCrash = error instanceof Error ? error.message : String(error)
+}
+check('a failed authoring reports the failure', authorCrash.includes('describe exploded'), authorCrash)
+check('a failed authoring gives the allocated id back', (await placeholders()) === beforeCrash,
+  `${beforeCrash} -> ${await placeholders()}`)
+
+// A caller-supplied id belongs to a provisioning that rolls itself back; the
+// author path must not discard a claim it did not make.
+const suppliedId = 'R-0090'
+const suppliedFile = join(reportsDir, `${suppliedId}.md`)
+await writeFile(suppliedFile, '', 'utf8')
+let suppliedCrash = ''
+try {
+  await crashing.author({ subject: 'supplied id', body: 'b', actor: 'session-a', reportId: suppliedId })
+} catch (error) {
+  suppliedCrash = error instanceof Error ? error.message : String(error)
+}
+check('a failed authoring with a supplied id still reports the failure', suppliedCrash.includes('describe exploded'))
+check('a caller-supplied id is not discarded by the author path',
+  await stat(suppliedFile).then((info) => info.size === 0, () => false))
+await rm(suppliedFile, { force: true })
+
+// ---- 19. one hand-off per session, and one wake policy per window ----------
+inbox.length = 0
+const bothLists = await service.author({
+  subject: 'named in to and cc',
+  body: 'b',
+  actor: 'session-a',
+  to: ['session-b'],
+  cc: ['session-b'],
+})
+check('a session named in to and cc receives one digest',
+  inbox.filter((message) => message.target === 'session-b').length === 1,
+  String(inbox.filter((message) => message.target === 'session-b').length))
+check('it is recorded as one arrival',
+  (await readHops(bothLists.front.report)).filter((hop) => hop.action === 'delivered').length === 1)
+check('the addressed hand-off is not also recorded as a copy', bothLists.front.cc.includes('session-b') === false,
+  bothLists.front.cc.join())
+
+const sentThenCopied = [
+  { at: 1, actor: 'session-a', action: 'sent' as const, to: ['session-c'] },
+  { at: 2, actor: 'session-a', action: 'cc' as const, to: ['session-c'] },
+]
+check('a later copy does not downgrade an unanswered addressed hand-off',
+  pendingMode(sentThenCopied, 'session-c') === 'wakeup', pendingMode(sentThenCopied, 'session-c'))
+check('a copy owed on its own stays quiet',
+  pendingMode([{ at: 3, actor: 'session-a', action: 'cc' as const, to: ['session-d'] }], 'session-d') === 'quiet')
+check('a copy after an answered hand-off stays quiet',
+  pendingMode([...sentThenCopied, { at: 4, actor: 'session-a', action: 'delivered' as const, to: ['session-c'] }], 'session-c') === 'quiet')
+
+// ---- 20. an oversized body can be resumed by line --------------------------
+const emojiBody = `${'y'.repeat(1199)}\u{1F600}${'z'.repeat(8000)}`
+const oversized = await service.author({ subject: 'oversized body', body: emojiBody, actor: 'session-a' })
+const oversizedRead = await service.read(oversized.front.report, 'session-a')
+const oversizedHead = oversizedRead.split('## body\n')[1].split('\n\n…')[0]
+check('a truncated head does not split a surrogate pair',
+  !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(oversizedHead), JSON.stringify(oversizedHead.slice(-4)))
+const resumeMatch = oversizedRead.match(/using offset=(\d+)/)
+check('the truncation pointer names a document line to resume from', resumeMatch !== null,
+  oversizedRead.slice(-160))
+if (resumeMatch !== null) {
+  const resumeLine = Number(resumeMatch[1])
+  const documentLines = (await readFile(reportPath(oversized.front.report), 'utf8')).split('\n')
+  check('the resume line exists in the document', resumeLine >= 1 && resumeLine <= documentLines.length,
+    `${resumeLine}/${documentLines.length}`)
+  check('the resume line is inside the body, not the front matter',
+    documentLines[resumeLine - 1]?.startsWith('yyy') === true, String(documentLines[resumeLine - 1]?.slice(0, 12)))
+}
 
 let failed = 0
 for (const [label, ok, detail] of checks) {

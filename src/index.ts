@@ -6,13 +6,17 @@
  *
  *  1. the report service, which owns the durable ledger under
  *     `$DSH_HOME/report-ledger`;
- *  2. the eight model-facing report tools;
+ *  2. the model-facing tools: eleven `report_*` rows (twelve once the worktree
+ *     feature is enabled) plus `peer_list` / `peer_start`;
  *  3. the delivery pump — when a session becomes resident again, every hand-off
- *     the ledger is still holding for it is delivered. That is the durable
- *     mailbox the delegation seam documents as missing;
- *  4. two read-only HTTP endpoints the browser tab reads, registered on the
- *     harness web server when one is mounted (the headless profile has none, and
- *     the plugin stays fully functional without them).
+ *     the ledger is still holding for it is delivered, and one deferred sweep
+ *     does the same for sessions that were already resident when this row
+ *     loaded. That is the durable mailbox the delegation seam documents as
+ *     missing;
+ *  4. three read-only HTTP endpoints the browser tab reads — the session
+ *     timeline, one report's detail, and the working-tree maintenance view —
+ *     registered on the harness web server when one is mounted (the headless
+ *     profile has none, and the plugin stays fully functional without them).
  *
  * It also registers each peer it starts with the workspace registry, when the
  * deployment composes one. That is bookkeeping rather than a fifth feature, and
@@ -279,6 +283,15 @@ export interface HostBundle extends ReportServiceHost {
    * @returns the records.
    */
   listSessionRecords(): Promise<SessionRecordLike[]>
+  /**
+   * Drop the cached session-corpus listing.
+   *
+   * Called when a session becomes resident: `agent/created` is exactly the event
+   * that can introduce an id the previous listing did not contain, and a
+   * brand-new session must not be missing from its own timeline merely because a
+   * poll a second earlier populated the cache.
+   */
+  invalidateSessionListing?(): void
 }
 
 /**
@@ -339,6 +352,15 @@ function toSessionRecord(entry: unknown): SessionRecordLike | undefined {
  * the first request, and only a starter carrying neither falls through to the
  * deployment default. When even that is absent the peer is refused rather than
  * created doomed.
+ *
+ * Reasoning effort follows the harness rule exactly rather than the looser
+ * `??` chain the other fields use: a request header that is present but names no
+ * effort means the effort is ABSENT (the model resolves its own default), not
+ * "reuse whatever the creation options remember". That difference is not
+ * cosmetic — after the starter switches to a model whose route carries no
+ * effort, a peer handed the stale one starts on a route it cannot use, and it
+ * dies at its first request while the ledger still reports a successful
+ * hand-off. See `parentAgentOptionsForDelegation` in `@deepseek-ai/dsh-subagent`.
  * @param caller - the live starter agent, when it is resident.
  * @param fallback - the deployment default model service, when it is mounted.
  * @returns the route fields to pass as creation options.
@@ -357,7 +379,12 @@ function peerRoute(caller: { readonly options: PeerRoute; readonly session: { re
       + 'so the peer would be created unable to assemble a prompt (its first turn would fail).',
     )
   }
-  const reasoningEffort = fromHeader?.reasoningEffort ?? created?.reasoningEffort ?? selection?.reasoningEffort
+  // The header owns the effort whenever it exists; only a starter that has never
+  // issued a request inherits the creation-time effort, then the deployment
+  // default the same way provider/model do.
+  const reasoningEffort = fromHeader === undefined
+    ? (created?.reasoningEffort ?? selection?.reasoningEffort)
+    : fromHeader.reasoningEffort
   return {
     provider,
     model,
@@ -430,6 +457,16 @@ function settledWithin(agent: { whenIdle(): Promise<void> }, timeoutMs: number):
 }
 
 /**
+ * How long one session-corpus listing is reused before it is read again.
+ *
+ * Short enough that a tree a human is watching does not look stale, long enough
+ * that a burst of polls (the tab refreshes every ten seconds, and a slow answer
+ * overlaps the next) costs a single walk. Invalidation on `agent/created` is
+ * what covers the one case where freshness is not negotiable.
+ */
+const SESSION_LISTING_TTL_MS = 5000
+
+/**
  * Build every host capability this plugin consumes.
  *
  * Agent lookup goes through `ctx.agents`, and delivery uses the `Agent`'s own
@@ -441,6 +478,54 @@ function settledWithin(agent: { whenIdle(): Promise<void> }, timeoutMs: number):
  */
 function buildHost(ctx: Context): HostBundle {
   const sessionQuery = (): SessionQueryLike | undefined => ctx.get('sessionQuery') as SessionQueryLike | undefined
+
+  // The corpus listing, reused briefly and never run twice at once.
+  //
+  // Every timeline request used to re-enumerate the whole durable session
+  // corpus, and the browser tab polls it. The listing is a directory walk plus a
+  // read of each log's first frame, so on a long-lived deployment it is the most
+  // expensive thing this surface does, and overlapping requests paid it
+  // repeatedly. Two rules fix that without inventing a second source of truth:
+  //
+  //  - **in-flight dedupe** — concurrent readers join the one running listing;
+  //  - **short reuse window** — a listing is reused for SESSION_LISTING_TTL_MS
+  //    so a poll burst costs one walk. Five seconds keeps the tab's "I switched
+  //    back, show me now" honest for everything that changes independently of
+  //    the corpus (the report digests and the lanes are still read fresh on every
+  //    request), and `agent/created` drops the cache outright, so a session that
+  //    just appeared can never be missing from its own timeline.
+  let listingCache: { readonly at: number; readonly records: readonly SessionRecordLike[] } | undefined
+  let listingPending: Promise<readonly SessionRecordLike[]> | undefined
+  let listingGeneration = 0
+
+  const readListing = async (): Promise<SessionRecordLike[]> => {
+    const query = sessionQuery()
+    if (query === undefined || query.listSessions === undefined) return []
+    const list = query.listSessions.bind(query)
+    const cached = listingCache
+    if (cached !== undefined && Date.now() - cached.at < SESSION_LISTING_TTL_MS) return [...cached.records]
+    const pending = listingPending
+    if (pending !== undefined) return [...await pending]
+    const generation = listingGeneration
+    const started = (async (): Promise<readonly SessionRecordLike[]> => {
+      try {
+        const raw = await list()
+        const records: SessionRecordLike[] = []
+        for (const entry of raw) {
+          const record = toSessionRecord(entry)
+          if (record !== undefined) records.push(record)
+        }
+        // A listing that started before an invalidation must not repopulate the
+        // cache: its snapshot can predate the session that invalidated it.
+        if (generation === listingGeneration) listingCache = { at: Date.now(), records }
+        return records
+      } finally {
+        if (generation === listingGeneration) listingPending = undefined
+      }
+    })()
+    listingPending = started
+    return [...await started]
+  }
 
   const readTitles = async (ids: readonly string[]): Promise<Map<string, string>> => {
     const titles = new Map<string, string>()
@@ -481,16 +566,11 @@ function buildHost(ctx: Context): HostBundle {
       return typeof cwd === 'string' && cwd !== '' ? cwd : undefined
     },
     readTitles,
-    async listSessionRecords(): Promise<SessionRecordLike[]> {
-      const query = sessionQuery()
-      if (query?.listSessions === undefined) return []
-      const raw = await query.listSessions()
-      const records: SessionRecordLike[] = []
-      for (const entry of raw) {
-        const record = toSessionRecord(entry)
-        if (record !== undefined) records.push(record)
-      }
-      return records
+    listSessionRecords: readListing,
+    invalidateSessionListing(): void {
+      listingGeneration += 1
+      listingCache = undefined
+      listingPending = undefined
     },
   }
 }
@@ -676,6 +756,9 @@ export function apply(ctx: Context, config?: Config): void {
   ctx.on('agent/created', (payload: { agent: { id: unknown } }): undefined => {
     const sessionId = String(payload?.agent?.id ?? '')
     if (sessionId === '') return undefined
+    // A resident id is exactly what the corpus cache cannot have seen yet, so
+    // drop it before the tab can ask for that session's timeline.
+    host.invalidateSessionListing?.()
     void service.flushForAgent(sessionId).catch((error: unknown) => {
       ctx.logger?.warn?.(`report-ledger: deferred delivery to ${sessionId} failed: ${String(error)}`)
     })
@@ -711,17 +794,56 @@ export function apply(ctx: Context, config?: Config): void {
         listReports: () => listReports(),
         readHops: (report: string) => readHops(report),
       }, worktree.settings, worktree.enabled),
+      // A contained failure's detail goes here, never into the response.
+      log: (message: string) => { ctx.logger?.warn?.(message) },
     }
     scoped.effect(() => {
-      const disposeReport = webServer.register({ kind: 'exact', path: REPORT_PATH, handler: createReportHandler(deps) as never })
-      const disposeTimeline = webServer.register({ kind: 'exact', path: TIMELINE_PATH, handler: createTimelineHandler(deps) as never })
-      const disposeWorktrees = webServer.register({ kind: 'exact', path: WORKTREES_PATH, handler: createWorktreesHandler(deps) as never })
+      // `register` refuses a duplicate (kind, path) by throwing, and a half
+      // registered route set is worse than none: the tab would answer for two
+      // endpoints and 404 the third until the process restarts. Unwind whatever
+      // did register, in reverse, before letting the fiber report the failure.
+      const registered: (() => void)[] = []
+      try {
+        registered.push(webServer.register({ kind: 'exact', path: REPORT_PATH, handler: createReportHandler(deps) as never }))
+        registered.push(webServer.register({ kind: 'exact', path: TIMELINE_PATH, handler: createTimelineHandler(deps) as never }))
+        registered.push(webServer.register({ kind: 'exact', path: WORKTREES_PATH, handler: createWorktreesHandler(deps) as never }))
+      } catch (error) {
+        for (const dispose of registered.reverse()) dispose()
+        throw error
+      }
       return () => {
-        disposeWorktrees()
-        disposeTimeline()
-        disposeReport()
+        for (const dispose of registered.reverse()) dispose()
       }
     }, 'report-ledger: read endpoints')
+  })
+
+  // Catch-up for the sessions `agent/created` can never report.
+  //
+  // That event fires while a session is created or resumed, so a hand-off the
+  // ledger queued before this row mounted has no wake-up waiting for it: the
+  // recipient is already resident, is never announced again, and the pending set
+  // would sit there until its next resume. One deferred sweep closes the gap. It
+  // is deferred to a microtask so plugin load never waits on ledger I/O, and each
+  // session is flushed independently — one failing report must not starve the
+  // rest. The sweep is idempotent: pending is derived from the transfer path, so
+  // a session with nothing queued costs one pass over the digests.
+  queueMicrotask(() => {
+    let live: readonly { readonly id: unknown }[]
+    try {
+      live = ctx.agents.list()
+    } catch (error) {
+      // The registry read is the only synchronous step here; failing it must not
+      // become an uncaught microtask exception during plugin load.
+      ctx.logger?.warn?.(`report-ledger: catch-up sweep could not list live sessions: ${String(error)}`)
+      return
+    }
+    for (const agent of live) {
+      const sessionId = String(agent.id ?? '')
+      if (sessionId === '') continue
+      void service.flushForAgent(sessionId).catch((error: unknown) => {
+        ctx.logger?.warn?.(`report-ledger: catch-up delivery to ${sessionId} failed: ${String(error)}`)
+      })
+    }
   })
 
   if ((config?.announceToAgent ?? true) === false) return

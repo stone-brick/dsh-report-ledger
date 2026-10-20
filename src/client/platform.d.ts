@@ -8,15 +8,29 @@
  * all render text through it). It is deliberately external in
  * `tsdown.config.ts`.
  *
- * It is NOT resolvable from disk here: the package lives inside the deployed
- * shell's own bundle, not in the profile's `node_modules` layer that `tsconfig`
- * maps `@deepseek-ai/*` to. So the type has to be asserted rather than imported.
+ * ⚠️ **This declaration shadows the real package.** In a DSH deployment the
+ * package IS resolvable from `tsc`'s `@deepseek-ai/*` path — measured (R-0025):
+ * a name that exists only here and not in the platform at all still typechecks,
+ * because an ambient `declare module` for a resolvable package wins name
+ * resolution. So the shapes below, not the shell's own `.d.ts`, are what every
+ * call site is checked against, and a platform change is invisible to `tsc`.
  *
- * This mirrors the choice already made in `client/index.ts`, which declares the
- * structural faces of `slots` and `locale` for the same reason: the shape below
- * is exactly what this plugin uses, and nothing more is claimed about it. Adding
- * a field here that the view then passes and the shell ignores would be a silent
- * no-op, so keep it to what is actually called.
+ * It is kept on purpose: a checkout without DSH installed at that path must
+ * still typecheck, and taking the shell's package as a dependency is not an
+ * option for a third-party plugin. The price is that every DSH upgrade needs a
+ * manual re-read of the primitives' `lib/types`, checking at least:
+ *
+ *   - `MarkdownText` requires `labels`, whose `code` and `footnotes` are
+ *     required (the memoized identity also matters: a new one drops its cache);
+ *   - `Tag` takes tone / className / children ONLY — no `onClick`, no `title`;
+ *   - `StateDot` states are `done | warning | ongoing | error | idle`;
+ *   - `Button` / `Input` / `Pill` accept native element attributes (`Button` and
+ *     `Input` forward refs);
+ *   - `writeClipboard` returns `Promise<boolean>`.
+ *
+ * The shape asserted below is exactly what this plugin uses, and nothing more:
+ * adding a field here that the view then passes and the shell ignores would be a
+ * silent no-op.
  *
  * @module dsh-report-ledger/client/platform
  */
@@ -27,22 +41,22 @@ declare module '@deepseek-ai/dsh-client-ui-primitives' {
   /** Presentational strings the renderer needs for the controls it owns. */
   export interface MarkdownLabels {
     /** Labels for the copy control on a rendered code block. */
-    readonly code?: {
+    readonly code: {
       /** Shown before the code is copied. */
-      readonly copyLabel?: string
+      readonly copyLabel: string
       /** Shown after the code is copied. */
-      readonly copiedLabel?: string
+      readonly copiedLabel: string
     }
     /** Heading the renderer gives the footnote list. */
-    readonly footnotes?: string
+    readonly footnotes: string
   }
 
   /** Props of the prose renderer, as this plugin calls it. */
   export interface MarkdownTextProps {
     /** The Markdown source. */
     readonly text: string
-    /** Strings for the renderer's own controls. */
-    readonly labels?: MarkdownLabels
+    /** Strings for the renderer's own controls; pass a memoized object. */
+    readonly labels: MarkdownLabels
   }
 
   /**
@@ -86,7 +100,13 @@ declare module '@deepseek-ai/dsh-client-ui-primitives' {
     readonly 'aria-pressed'?: boolean
   }): ReactElement
 
-  /** A static label chip. Tones come from the shell's own palette. */
+  /**
+   * A static label chip. Tones come from the shell's own palette.
+   *
+   * Deliberately not interactive, and matching the platform here matters: the
+   * real `Tag` takes no `onClick` and no `title`, so a clickable tag has to put
+   * its handler on a child element (as the checkout chip does) or use `Pill`.
+   */
   export function Tag(props: {
     readonly tone?: 'outline' | 'neutral' | 'quiet' | 'solid' | 'info' | 'success' | 'warning' | 'danger'
     readonly className?: string

@@ -181,7 +181,7 @@ export function ReportDetailView(props: ReportDetailViewProps): ReactElement {
 
   const content = (
     <>
-      {error !== undefined ? <div style={{ color: 'var(--dsw-alias-state-error-label, #b00)' }}>{t('view.error', { code: error })}</div> : null}
+      {error !== undefined ? <div style={{ color: 'var(--dsw-alias-state-error-primary, #b00)' }}>{t('view.error', { code: error })}</div> : null}
       {detail === undefined && error === undefined ? <div style={time}>{t('view.detail.loading')}</div> : null}
       {detail === undefined ? null : (
         <>

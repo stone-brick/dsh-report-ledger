@@ -24,6 +24,8 @@ process.env.DSH_REPORT_LEDGER_ROOT = root
 
 const { buildRoster, holdsChannelTo, appendPeer, readPeers, peerLogPath } = await import('../src/report/roster.ts')
 const { PeerService } = await import('../src/report/peer.ts')
+const { registerReportTools } = await import('../src/report/tools.ts')
+const { resolveWorktree } = await import('../src/report/allocate.ts')
 
 const checks: [string, boolean, string][] = []
 const check = (label: string, ok: boolean, detail = ''): void => { checks.push([label, ok, detail]) }
@@ -249,6 +251,156 @@ check('the failure carries its reason', survived.workspace?.warning?.includes('r
 const composed = await new PeerService(host as never, 100).start(SELF, { task: 'a peer where no registry is composed' })
 check('a host without the hook reports no workspace at all', composed.workspace === undefined, JSON.stringify(composed.workspace))
 check('a host without the hook still creates the peer', /^session-[0-9a-f-]{36}$/.test(composed.sessionId), composed.sessionId)
+
+// ---------------------------------------------------------------------------
+// peer_start at the tool layer: the failures after the point of no return.
+//
+// The peer is created and charged before the assignment report is written, so
+// the two steps need different answers: a checkout is rolled back only while no
+// peer exists, and a later failure is reported with the created session id
+// instead of being compensated. The observation of the first turn is a courtesy
+// and must never turn a completed hand-off into an error.
+// ---------------------------------------------------------------------------
+interface ToolLike {
+  readonly name: string
+  execute(args: unknown, exec: unknown): Promise<string>
+}
+
+/** Register the tools into a map instead of a live registry, over a fake service. */
+const toolSurface = (service: unknown, peerService: unknown, worktreeConfig: unknown): Map<string, ToolLike> => {
+  const tools = new Map<string, ToolLike>()
+  registerReportTools({
+    tools: {
+      register(definition: unknown): () => void {
+        const tool = definition as ToolLike
+        tools.set(tool.name, tool)
+        return () => {}
+      },
+    },
+  } as never, service as never, peerService as never, resolveWorktree(worktreeConfig as never))
+  return tools
+}
+
+// A checkout exists before the peer does. When the peer cannot be created, the
+// checkout is rolled back; when the peer exists but its assignment cannot be
+// written, the checkout must be kept because it is the peer's working directory.
+const rollbacks: string[] = []
+const keptPath = 'D:\\fixtures\\R-0042'
+const authoringDown = {
+  provision: async () => ({
+    report: 'R-0042',
+    prepared: { binding: { path: keptPath, branch: 'dsh/R-0042', allocated: true }, retained: [], reclaimSkipped: [], stale: [] },
+  }),
+  author: async () => { throw new Error('fixture: the ledger is unwritable') },
+  rollbackProvision: async (input: { report: string }) => {
+    rollbacks.push(input.report)
+    return { worktree: true, id: true }
+  },
+}
+const authoringTools = toolSurface(authoringDown, new PeerService(host as never, 100), { enabled: true })
+let assignmentError = ''
+try {
+  await authoringTools.get('peer_start')?.execute(
+    { task: 'a peer whose assignment cannot be written', worktree: true },
+    { agent: { id: 'session-partial' } },
+  )
+} catch (error) {
+  assignmentError = error instanceof Error ? error.message : String(error)
+}
+const partialPeers = (await readPeers()).filter((record) => record.startedBy === 'session-partial')
+check('the peer exists once its assignment fails', partialPeers.length === 1, `records=${partialPeers.length}`)
+check('the assignment failure names the created peer so its caller can address it',
+  partialPeers.length === 1 && assignmentError.includes(partialPeers[0]?.sessionId ?? ''),
+  assignmentError)
+check('the assignment failure says the assignment was not delivered', assignmentError.includes('NOT delivered'), assignmentError)
+check('the assignment failure says how to finish the hand-off',
+  assignmentError.includes('report_author') && assignmentError.includes('report_send'), assignmentError)
+check('the checkout handed to a live peer is not rolled back', rollbacks.length === 0, String(rollbacks.length))
+check('the kept checkout is named so a report can adopt it', assignmentError.includes(keptPath), assignmentError)
+check('the failed assignment still counts against the lifetime peer budget',
+  (await new PeerService(host as never, 100).startedCount('session-partial')) === 1)
+
+// The observation of the first turn is a courtesy: a host that throws while
+// observing must not turn a completed hand-off into a failure the caller retries.
+const receiptHost = { ...host, confirmPeer: async () => { throw new Error('fixture: session snapshot unavailable') } }
+const authored = {
+  front: { report: 'R-0043', status: 'open', subject: 'receipt failure', from: 'session-receipt', to: [], cc: [], authors: [], created: at(40), updated: at(41), children: [], artifacts: [], hops: 1 },
+  outcomes: [],
+}
+const receiptTools = toolSurface({ author: async () => authored }, new PeerService(receiptHost as never, 100), undefined)
+let receiptOutput = ''
+let receiptFailed = ''
+try {
+  receiptOutput = await receiptTools.get('peer_start')?.execute(
+    { task: 'a peer whose observation fails' },
+    { agent: { id: 'session-receipt' } },
+  ) ?? ''
+} catch (error) {
+  receiptFailed = error instanceof Error ? error.message : String(error)
+}
+check('a receipt failure does not fail the hand-off', receiptFailed === '', receiptFailed)
+check('a receipt failure is reported as an unobserved first turn',
+  receiptOutput.includes('could not observe the peer\'s first turn'), receiptOutput)
+check('the completed hand-off is still reported', receiptOutput.includes('assignment report: R-0043'), receiptOutput)
+
+// A whitespace-only name is not a name: it must not become a bare ": " subject
+// prefix, and it must not print an empty name= field.
+let namedSubject = ''
+const named = {
+  front: { report: 'R-0044', status: 'open', subject: 'named', from: 'session-nameless', to: [], cc: [], authors: [], created: at(42), updated: at(43), children: [], artifacts: [], hops: 1 },
+  outcomes: [],
+}
+const namedTools = toolSurface(
+  { author: async (input: { subject: string }) => { namedSubject = input.subject; return named } },
+  new PeerService(host as never, 100),
+  undefined,
+)
+const namedOutput = await namedTools.get('peer_start')?.execute(
+  { task: 'do the work', name: '   ' }, { agent: { id: 'session-nameless' } },
+) ?? ''
+check('a whitespace-only name does not become a subject prefix', namedSubject === 'do the work', JSON.stringify(namedSubject))
+check('a whitespace-only name is dropped rather than printed empty', !namedOutput.includes('name='), namedOutput)
+
+// report_release exists on a deployment without the worktree feature, so its
+// refusals must name the deployment fact that explains them instead of leaving
+// a bare "not bound" for the caller to chase. A refusal about ownership is not
+// decorated, because the feature has nothing to do with it.
+const releaseTools = toolSurface(
+  {
+    release: async () => {
+      throw new Error('report-ledger: R-0001 is not bound to a working tree, so there is nothing to release')
+    },
+  },
+  new PeerService(host as never, 100),
+  undefined,
+)
+let releaseError = ''
+try {
+  await releaseTools.get('report_release')?.execute({ report: 'R-0001' }, { agent: { id: 'session-release' } })
+} catch (error) {
+  releaseError = error instanceof Error ? error.message : String(error)
+}
+check('a release refusal on a worktree-off deployment names the missing feature',
+  releaseError.includes('not bound to a working tree') && releaseError.includes('has not enabled git worktree support'),
+  releaseError)
+
+const ownerRefusal = toolSurface(
+  {
+    release: async () => {
+      throw new Error('report-ledger: session-x may not release R-0001 — releasing is the owner\'s act')
+    },
+  },
+  new PeerService(host as never, 100),
+  undefined,
+)
+let ownerError = ''
+try {
+  await ownerRefusal.get('report_release')?.execute({ report: 'R-0001' }, { agent: { id: 'session-release' } })
+} catch (error) {
+  ownerError = error instanceof Error ? error.message : String(error)
+}
+check('a release refusal about ownership is not decorated with the feature note',
+  ownerError.includes('may not release') && !ownerError.includes('has not enabled git worktree support'), ownerError)
 
 let failed = 0
 for (const [label, ok, detail] of checks) {

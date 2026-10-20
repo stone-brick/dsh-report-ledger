@@ -18,7 +18,7 @@ export {}
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { ReportWorktree, RouteHop } from '../src/report/types.ts'
+import type { ReportFrontMatter, ReportWorktree, RouteHop } from '../src/report/types.ts'
 import type { RepoLocation } from '../src/report/worktree.ts'
 
 const scratch = await mkdtemp(join(tmpdir(), 'report-ledger-lease-'))
@@ -82,10 +82,19 @@ for (const action of ['leased', 'released', 'reclaimed'] as const) {
 }
 
 // ---- 3. claim identity -----------------------------------------------------
-check('one branch is one claim however the path is spelled',
-  sameClaim({ path: 'C:/a', branch: 'b' }, { path: 'C:/b', branch: 'b' }))
-check('different branches are different claims',
-  !sameClaim({ path: 'C:/a', branch: 'b' }, { path: 'C:/a', branch: 'c' }))
+check('one branch in one repository is one claim however the path is spelled',
+  sameClaim({ path: 'C:/a', branch: 'b', repo: 'C:/r/.git' }, { path: 'C:/b', branch: 'b', repo: 'C:/r/.git' }))
+check('different branches at different paths are different claims',
+  !sameClaim({ path: 'C:/a', branch: 'b' }, { path: 'C:/b', branch: 'c' }))
+// A branch name is repository-local, so `main` here and `main` elsewhere are two
+// branches that share a spelling. Comparing the name alone refuses a legitimate
+// claim in another project and names a colleague who has nothing to do with it.
+check('the same branch name in another repository is another claim',
+  !sameClaim({ path: 'C:/a', branch: 'b', repo: 'C:/r1/.git' }, { path: 'C:/b', branch: 'b', repo: 'C:/r2/.git' }))
+// The path is the checkout's identity: a binding whose branch went stale must not
+// open a second report's road into the same directory.
+check('one directory is one claim whatever branch it is on',
+  sameClaim({ path: 'C:/a', branch: 'b' }, { path: 'C:/a', branch: 'c' }))
 check('a detached tree is identified by its path',
   sameClaim({ path: 'seg/a' }, { path: 'seg/a' }))
 // Whether the two spellings are one path is the host's answer, not ours.
@@ -195,6 +204,83 @@ check('the granted binding records the repository it was resolved against',
 check('the granted binding keeps the allocation mark it was given',
   grantOf(await judge({ ...binding, branch: undefined }, linkedRepo))?.allocated === true)
 check('the happy path is granted', (await judge(binding, linkedRepo)).kind === 'granted')
+
+// The digest is the durable record, so it has to name the tree the way git names
+// it. A caller may have reached the same checkout through a differently-cased
+// spelling; storing that spelling would make every later string comparison (and
+// every reader in another process) work from a path git never printed.
+const gitSpelling = (await w.listWorktrees(linkedRepo)).find((entry) => w.samePath(entry.path, linkedPath))?.path
+const respelled = process.platform === 'win32' ? linkedPath.toLowerCase() : linkedPath
+const grantedSpelling = grantOf(await judge({ path: respelled, branch: 'b-lease' }, linkedRepo))
+check('a granted binding records git\'s spelling of the path, not the caller\'s',
+  grantedSpelling?.path === gitSpelling, `${String(grantedSpelling?.path)} vs ${String(gitSpelling)}`)
+
+// A relative path is a question about whichever process reads it, not a claim on
+// a checkout: it names different directories in different cwds, so it is refused
+// before git is asked anything.
+const relativeBinding = refusalOf(await judge({ path: '.' }, located))
+check('a relative path is refused as not naming a checkout',
+  relativeBinding?.kind === 'invalid-binding', String(relativeBinding?.kind))
+check('the refusal asks for an absolute path',
+  (relativeBinding?.message ?? '').includes('absolute path'), relativeBinding?.message ?? '')
+
+// ---- 4b. identity across repositories, and across a branch switch ----------
+// Branch names are repository-local: two projects each on `main` are not
+// claiming the same thing, and refusing the second by name would block work in
+// one project because of a report in another.
+const otherRepoPath = join(scratch, 'other-repo')
+await mkdir(otherRepoPath, { recursive: true })
+await git(otherRepoPath, 'init', '-q', '--initial-branch=main')
+await git(otherRepoPath, 'config', 'core.autocrlf', 'false')
+await git(otherRepoPath, 'config', 'user.name', 'lease-check')
+await git(otherRepoPath, 'config', 'user.email', 'lease-check@example.invalid')
+await writeFile(join(otherRepoPath, 'f.txt'), 'l1\n')
+await git(otherRepoPath, 'add', '-A')
+await git(otherRepoPath, 'commit', '-q', '-m', 'base')
+const otherLocated = await w.resolveRepo(otherRepoPath)
+if (otherLocated === undefined) throw new Error('second fixture repository did not resolve')
+
+/** A digest for the ledger layer, built by hand so one check costs one hop read. */
+const claimFront = (
+  report: string,
+  worktree: ReportWorktree,
+  status: ReportFrontMatter['status'] = 'open',
+): ReportFrontMatter => ({
+  report, subject: 'fixture claim', status, from: 'session-owner', to: [], cc: [], authors: ['session-owner'],
+  created: 0, updated: 0, children: [], artifacts: [], hops: 1, worktree,
+})
+const heldHops = async (): Promise<readonly RouteHop[]> => [hop('leased')]
+
+const crossRepo = await judge({ path: otherLocated.repoRoot, branch: 'main' }, otherLocated, {
+  digests: [claimFront('R-9001', { path: located.repoRoot, branch: 'main', repo: located.commonDir })],
+  hopsOf: heldHops,
+})
+check('a branch held in another repository does not block this one',
+  crossRepo.kind === 'granted', JSON.stringify(crossRepo))
+
+const sameRepo = await judge({ path: located.repoRoot, branch: 'main' }, located, {
+  digests: [claimFront('R-9002', { path: linkedPath, branch: 'main', repo: located.commonDir })],
+  hopsOf: heldHops,
+})
+check('the same branch in the same repository is still one claim',
+  refusalOf(sameRepo)?.kind === 'held-by-report', JSON.stringify(sameRepo))
+
+// The directory is the identity, whatever branch it is on now: a holder that
+// checked something else out is still the report working in there.
+const switchPath = join(located.worktreeRoot, 'wt-switch')
+const switched = await w.addWorktree({ repo: located, path: switchPath, branch: 'b-switch', base: 'main' })
+if (!switched.ok) throw new Error(`fixture switch worktree failed: ${switched.stderr.trim()}`)
+await git(located.commonDir, 'branch', 'b-switch2', 'main')
+await git(switchPath, 'checkout', '-q', 'b-switch2')
+const switchRepo = await w.resolveRepo(switchPath)
+const sameDirectory = await judge({ path: switchPath, branch: 'b-switch2' }, switchRepo, {
+  digests: [claimFront('R-9003', { path: switchPath, branch: 'b-switch', repo: located.commonDir })],
+  hopsOf: heldHops,
+})
+check('a second claim on the same directory is refused even after a branch switch',
+  refusalOf(sameDirectory)?.kind === 'held-by-report', JSON.stringify(sameDirectory))
+check('the refusal names the report holding the directory',
+  (refusalOf(sameDirectory)?.message ?? '').includes('R-9003'), refusalOf(sameDirectory)?.message ?? '')
 
 // ---- 5. the ledger layer ---------------------------------------------------
 const live = new Set<string>(['session-owner', 'session-rival', 'session-third'])

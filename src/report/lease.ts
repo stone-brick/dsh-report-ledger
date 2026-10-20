@@ -27,6 +27,7 @@
  * @module dsh-report-ledger/report/lease
  */
 
+import { isAbsolute } from 'node:path'
 import { listWorktrees, branchHolders, samePath } from './worktree.ts'
 import type { RepoLocation } from './worktree.ts'
 import type { ReportFrontMatter, ReportWorktree, RouteHop } from './types.ts'
@@ -66,21 +67,37 @@ export function leaseState(hops: readonly RouteHop[]): LeaseState {
 /**
  * Whether two bindings name the same claim.
  *
- * A branch, when both sides name one, is the claim's identity: two reports bound
- * to the same branch are claiming one thing however differently they spell the
- * path. With no branch on one side there is nothing but the path to compare,
- * which is what a detached tree has instead of a name.
+ * Two rules, in order, because a checkout has two identities and they differ in
+ * scope:
+ *
+ *  - **The path is the checkout's identity.** Two reports cannot work in one
+ *    directory, whatever branch each of them believes it is on — and a binding
+ *    whose branch is stale (the holder checked something else out) must not open
+ *    a second report's road into that directory. Nothing is more local than a
+ *    directory, so this rule needs no further context.
+ *  - **A branch is the claim's identity only inside one repository.** Branch
+ *    names are repository-local, so `main` in this repository and `main` in
+ *    another are two different branches that happen to share a spelling.
+ *    Comparing only the name would refuse a legitimate claim and name a
+ *    colleague in another project as the holder.
+ *
+ * With no branch on one side, and no shared repository to compare, there is no
+ * claim identity left to assert: two detached trees at different paths are not
+ * the same claim.
  * @param left - one binding.
  * @param right - another binding.
  * @returns true when they are the same claim.
  */
 export function sameClaim(left: ReportWorktree, right: ReportWorktree): boolean {
+  if (samePath(left.path, right.path)) return true
+  if (left.repo !== undefined && right.repo !== undefined && !samePath(left.repo, right.repo)) return false
   if (left.branch !== undefined && right.branch !== undefined) return left.branch === right.branch
-  return samePath(left.path, right.path)
+  return false
 }
 
 /** Why a lease was refused. */
 export type LeaseRefusalKind =
+  | 'invalid-binding'
   | 'no-repository'
   | 'not-a-worktree'
   | 'branch-mismatch'
@@ -160,6 +177,19 @@ export async function evaluateLease(query: LeaseQuery): Promise<LeaseVerdict> {
   const { binding, repo } = query
   const refuse = (refusal: LeaseRefusal): LeaseVerdict => ({ kind: 'refused', refusal })
 
+  // A relative path is not a claim, it is a question about whoever happens to be
+  // asking: the same string names different directories in different processes,
+  // and the digest that records it would keep meaning something new every time it
+  // is read. Git reports absolute paths, so a caller that did not pass one did
+  // not name a working tree at all.
+  if (!isAbsolute(binding.path)) {
+    return refuse({
+      kind: 'invalid-binding',
+      message: `${binding.path} is not an absolute path, so it does not name a working tree. `
+        + 'Pass the checkout\'s absolute path, as git worktree list reports it.',
+    })
+  }
+
   // ---- git: is the thing being claimed real, and is it what we think? -------
   if (repo === undefined) {
     return refuse({
@@ -210,12 +240,17 @@ export async function evaluateLease(query: LeaseQuery): Promise<LeaseVerdict> {
   }
 
   // ---- the ledger: does another live report claim the same thing? -----------
+  // Compared against the claim *including its repository*, because the caller's
+  // binding may name only a path and a branch — and a branch alone is not an
+  // identity: `main` exists in every repository. The referee has resolved the
+  // repository above, so it is the side that can put the two together.
+  const claim: ReportWorktree = { ...binding, repo: repo.commonDir }
   for (const front of query.digests) {
     if (front.report === query.report) continue
     if (front.worktree === undefined) continue
     // Compared before reading hops, so a ledger with many bindings still costs
     // one hop read per actual candidate rather than one per report.
-    if (!sameClaim(front.worktree, binding)) continue
+    if (!sameClaim(front.worktree, claim)) continue
     if (front.status === 'closed') continue
     if (leaseState(await query.hopsOf(front.report)) !== 'held') continue
     const holders = [...new Set([front.from, ...front.authors])]
@@ -230,7 +265,10 @@ export async function evaluateLease(query: LeaseQuery): Promise<LeaseVerdict> {
   }
 
   // Granted. The binding is described from what git reported rather than from
-  // what the caller believed: `branch` is whatever this checkout is really on
+  // what the caller believed: `path` is git's own spelling (a caller may have
+  // reached the same tree through a differently-cased or relative spelling, and
+  // the digest is the durable record — it has to name the tree the way every
+  // later reader will find it), `branch` is whatever this checkout is really on
   // (the mismatch check above already refused any contradiction), `head` is the
   // commit actually there, and `repo` is the shared directory this was resolved
   // against. A caller that named no branch gets the real one, which is what stops
@@ -238,7 +276,7 @@ export async function evaluateLease(query: LeaseQuery): Promise<LeaseVerdict> {
   return {
     kind: 'granted',
     binding: {
-      path: binding.path,
+      path: entry.path,
       ...(entry.branch === undefined ? {} : { branch: entry.branch }),
       ...(entry.head === undefined ? {} : { head: entry.head }),
       repo: repo.commonDir,

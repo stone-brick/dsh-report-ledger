@@ -74,6 +74,16 @@ jobs:
             if [ -n "$val" ]; then echo "$v: present (${#val} chars)"; else echo "$v: MISSING"; fi
           done
 
+      # A tag is a claim about which version this is; the registry only checks
+      # whether the number was ever published. Without this gate, a tag named
+      # v0.3.0 can publish package.json's 0.2.1, because npm has never seen
+      # 0.2.1 before. workflow_dispatch stays usable for the one manual first
+      # publish, where no tag exists yet.
+      - name: Tag matches package version
+        if: github.ref_type == 'tag'
+        run: |
+          test "v$(node -p "require('./package.json').version")" = "${GITHUB_REF_NAME}"
+
       - name: Install
         run: pnpm install --frozen-lockfile
 

@@ -119,6 +119,23 @@ export const DEFAULT_CARDGRAPH_OPTIONS: CardgraphOptions = {
   margin: 24,
 }
 
+/** How far out the drawing may be zoomed, in screen pixels per drawing unit. */
+export const MIN_ZOOM = 0.25
+/** How far in the drawing may be zoomed. */
+export const MAX_ZOOM = 2.5
+/** One step of the zoom controls, in screen pixels per drawing unit. */
+export const ZOOM_STEP = 1.25
+/**
+ * The most a fit may magnify.
+ *
+ * Filling the width on a drawing that holds one card would otherwise ask for
+ * several times the design's size: one card stretched across the whole box,
+ * larger than any reading needs and carrying no more in it, because a tier is
+ * drawn at a fixed size and zooming past 100% only magnifies. One control step
+ * is the ceiling, so the fit may lean in but never stretch.
+ */
+export const MAX_FIT_ZOOM = ZOOM_STEP
+
 /** One session's frame. */
 export interface CardgraphFrame {
   /** Session id, absent for the shared frame of out-of-tree sessions. */
@@ -227,6 +244,15 @@ export interface CardgraphLayout {
   readonly edges: readonly CardgraphEdge[]
   /** Every frame is this wide, so the columns line up. */
   readonly frameWidth: number
+  /**
+   * Height of a frame's title bar.
+   *
+   * Carried in the layout rather than re-declared by the painter: the bar is
+   * geometry (cards start below it, ports stay out of it), so a painter that
+   * hardcoded the number would put the title band and the cards in the same
+   * place the moment the option moved.
+   */
+  readonly frameHeaderHeight: number
   readonly cardWidth: number
   readonly cardHeight: number
   readonly width: number
@@ -746,9 +772,105 @@ export function buildCardgraph(
     cards,
     edges,
     frameWidth,
+    frameHeaderHeight: opts.frameHeaderHeight,
     cardWidth: size.width,
     cardHeight: size.height,
     width: columnCount === 0 ? 0 : contentWidth,
     height: columnCount === 0 ? 0 : opts.margin * 2 + widest,
+  }
+}
+
+/** Where a fit puts the drawing, and the tier it read to get there. */
+export interface CardgraphFit {
+  /**
+   * The tier the fitted scale lands in.
+   *
+   * Returned rather than left for the caller to re-derive: the layout the view
+   * draws must be the layout the scale was measured against, and the view only
+   * knows the tier through `lodFor(zoom)`.
+   */
+  readonly lod: CardgraphLod
+  /** Screen pixels per drawing unit. */
+  readonly scale: number
+  /** Pan, in screen pixels. */
+  readonly offsetX: number
+  readonly offsetY: number
+}
+
+/** How far a fitted drawing is kept from the box's left edge, in screen pixels. */
+const FIT_LEFT_MIN = 8
+/** Where a fitted drawing starts, in screen pixels from the box's top. */
+const FIT_TOP = 12
+
+/**
+ * The transform that fills a box's width with the drawing, at the richest tier
+ * that can afford it.
+ *
+ * Width is the target because time runs **down** here: a frame is a column, so
+ * the horizontal axis is what has to fit on screen and the vertical axis is what
+ * the reader pans along. Magnification stops at {@link MAX_FIT_ZOOM}, so a
+ * drawing too narrow to fill the box is left at its own size instead of
+ * stretched.
+ *
+ * The scale and the tier are mutually dependent — the tier is derived from the
+ * zoom ({@link lodFor}) and the zoom is computed from a layout — so one pass over
+ * the current layout can leave the view drawing one tier while its offset was
+ * centred for another. Probing every tier makes the result a function of the box
+ * alone: idempotent, and independent of whichever tier the reader arrived in.
+ *
+ * This lives beside the geometry rather than in the view because it *is*
+ * geometry: pure, byte-deterministic for one input, and the only part of the
+ * fitting that can be tested without a browser.
+ * @param payload - the endpoint payload, for the session frames.
+ * @param reports - the reports to plot.
+ * @param boxWidth - the paint box's width in screen pixels.
+ * @param options - geometry, tier and threshold overrides.
+ * @returns the transform, or `undefined` when there is nothing to fit into or
+ *   nothing to fit (an empty drawing, or a box with no width yet).
+ */
+export function fitTransform(
+  payload: TimelinePayload,
+  reports: readonly ReportFrontMatter[],
+  boxWidth: number,
+  options: Partial<CardgraphOptions> = {},
+): CardgraphFit | undefined {
+  const opts: CardgraphOptions = { ...DEFAULT_CARDGRAPH_OPTIONS, ...options }
+  if (!Number.isFinite(boxWidth) || boxWidth <= 0) return undefined
+  // The drawing already carries a margin on both sides, so the fit leaves one of
+  // them as breathing room on the right instead of filling edge to edge.
+  const available = Math.max(0, boxWidth - opts.margin)
+  const bands: Readonly<Record<CardgraphLod, { readonly min: number; readonly max: number }>> = {
+    card: { min: opts.cardMinZoom, max: MAX_FIT_ZOOM },
+    compact: { min: opts.compactMinZoom, max: opts.cardMinZoom },
+    chip: { min: MIN_ZOOM, max: opts.compactMinZoom },
+  }
+  const probes = CARDGRAPH_LODS
+    .map((tier) => ({ tier, drawing: buildCardgraph(payload, reports, { ...options, lod: tier }) }))
+    .filter((probe) => probe.drawing.width > 0)
+  if (probes.length === 0) return undefined
+  // The richest tier the box can pay for: the scale that fills the width at that
+  // tier still reaches the tier's own floor, so the zoom the reader lands on is
+  // the tier that was measured. Demanding an exact `lodFor(scale) === tier` match
+  // instead leaves box widths where no tier can have both — a two-column drawing
+  // between 396 and 523 px, say — and a fit that finds nothing writes nothing:
+  // the drawing keeps whatever transform it already had, which is exactly the
+  // state dependence the tier probing exists to remove.
+  const affordable = probes.find((probe) => available / probe.drawing.width >= bands[probe.tier].min)
+  // Nothing can pay for its own floor only when the box is narrower than the
+  // cheapest tier's minimum zoom allows: show that tier at the floor rather than
+  // leaving the reader with a control that does nothing.
+  const chosen = affordable ?? probes[probes.length - 1]
+  const band = bands[chosen.tier]
+  let scale = Math.min(Math.max(available / chosen.drawing.width, band.min), band.max)
+  // A band's top edge belongs to the richer tier (the thresholds are inclusive on
+  // the low end), so a scale clamped exactly onto it would be laid out one tier up
+  // from the one that was measured. Step it down by a millionth: invisible to the
+  // reader, and enough for `lodFor` to agree.
+  if (lodFor(scale, opts) !== chosen.tier) scale *= 1 - 1e-9
+  return {
+    lod: chosen.tier,
+    scale,
+    offsetX: Math.max(FIT_LEFT_MIN, (boxWidth - chosen.drawing.width * scale) / 2),
+    offsetY: FIT_TOP,
   }
 }

@@ -60,6 +60,22 @@ function byTime(left: Row, right: Row): number {
 }
 
 /**
+ * The depth of every session in one payload, keyed by session id.
+ *
+ * Exported because the views need the same map for a row they synthesize rather
+ * than build: the open report keeps the indentation of the session that authored
+ * it, and asking the model for the map is what stops a second copy of "depth
+ * means the author's depth" from growing in the view.
+ * @param payload - the endpoint payload.
+ * @returns session id to depth.
+ */
+export function sessionDepths(payload: TimelinePayload): Map<string, number> {
+  const depth = new Map<string, number>()
+  for (const node of payload.sessions) depth.set(node.id, node.depth)
+  return depth
+}
+
+/**
  * Build the merged, time-ordered row list.
  *
  * Sessions are placed at their creation time and reports at theirs, so the list
@@ -67,15 +83,17 @@ function byTime(left: Row, right: Row): number {
  * branched, a report where it was opened. Report depth comes from the session
  * that authored it, which is what keeps the indentation meaningful even when the
  * session row itself is filtered out.
+ *
+ * A report row's own `at` is also the timestamp its row prints, so the list can
+ * never be ordered by one axis and read as sorted by another.
  * @param payload - the endpoint payload.
  * @param basis - whether to place a report at its creation or its last activity.
  * @returns the rows, oldest first.
  */
 export function buildRows(payload: TimelinePayload, basis: ReportTimeBasis = 'created'): Row[] {
-  const depth = new Map<string, number>()
+  const depth = sessionDepths(payload)
   const rows: Row[] = []
   for (const node of payload.sessions) {
-    depth.set(node.id, node.depth)
     rows.push({
       kind: 'session',
       at: node.createdAt ?? 0,
@@ -154,18 +172,25 @@ export function sessionTitles(payload: TimelinePayload): Map<string, string> {
  * appended. Appending made a report created at 11:12 appear below one created at
  * 14:30, which reads as a broken sort at exactly the moment the user is trying
  * to understand why something is missing.
+ *
+ * The depth is passed in rather than assumed: the caller has the payload and can
+ * ask `sessionDepths` for the author's depth, and a row that loses its
+ * indentation when a filter hides it would be a second, quieter broken sort.
+ * Reports whose author is outside the subtree are at the root (depth 0).
  * @param kept - the rows that survived the filter.
  * @param front - the digest of the open report.
  * @param basis - the active time basis, so the row moves with the rest.
+ * @param depth - the author's depth from the payload, or 0 outside the subtree.
  * @returns the rows, with the open report present exactly once.
  */
 export function withSynthesizedRow(
   kept: readonly Row[],
   front: ReportFrontMatter,
-  basis: ReportTimeBasis = 'created',
+  basis: ReportTimeBasis,
+  depth: number,
 ): Row[] {
   if (kept.some((row) => row.kind === 'report' && row.front.report === front.report)) return [...kept]
-  const row: Row = { kind: 'report', at: basis === 'created' ? front.created : front.updated, depth: 0, front }
+  const row: Row = { kind: 'report', at: basis === 'created' ? front.created : front.updated, depth, front }
   const index = kept.findIndex((candidate) => byTime(row, candidate) < 0)
   if (index < 0) return [...kept, row]
   return [...kept.slice(0, index), row, ...kept.slice(index)]
@@ -416,13 +441,26 @@ export function displayBody(
  * removed. Only backtick fences are counted; `~~~` fences are rare enough in
  * report bodies that guessing which convention the author used would be worse
  * than leaving them alone.
+ *
+ * A fence is a RUN, not a token: CommonMark lets an opener use four backticks
+ * precisely so the body can contain a literal three-backtick line, and requires
+ * the closer to be at least as long as the opener. Counting every line that
+ * merely starts with three backticks therefore gets exactly the documents this
+ * function exists for backwards — the nested block would look balanced while its
+ * real (longer) fence stayed open. So the opener's length is remembered and only
+ * a same-character run of at least that length closes it.
  * @param text - the already-truncated head.
  * @returns the head, with an unclosed fence closed.
  */
 export function closeOpenFence(text: string): string {
-  let open = false
+  let open: number | undefined
   for (const line of text.split('\n')) {
-    if (line.trimStart().startsWith('```')) open = !open
+    const stripped = line.trimStart()
+    if (!stripped.startsWith('```')) continue
+    let run = 0
+    while (stripped[run] === '`') run += 1
+    if (open === undefined) open = run
+    else if (run >= open) open = undefined
   }
-  return open ? `${text}\n\`\`\`` : text
+  return open === undefined ? text : `${text}\n${'`'.repeat(open)}`
 }

@@ -1,10 +1,13 @@
 /**
  * The model-facing tools of the report ledger.
  *
- * Eight tools cover the whole lifecycle: author, co-author, address, copy,
- * forward, read, list, acknowledge. Every one of them records a hop, so the
- * transfer path is a by-product of normal use rather than a separate discipline
- * the model has to remember.
+ * Thirteen tools are registered by default and fourteen when the worktree
+ * feature is on: author, co-author, address, copy, forward, read, list,
+ * acknowledge, amend, close and release, plus discovery (peer_list) and creation
+ * (peer_start) — and report_lease, which exists only with the feature. The
+ * report_* tools each record a hop, so the transfer path is a by-product of
+ * normal use rather than a separate discipline the model has to remember; the
+ * two peer_* tools read and create sessions and leave the ledger alone.
  *
  * @module dsh-report-ledger/report/tools
  */
@@ -340,7 +343,7 @@ export function registerReportTools(
 
   disposers.push(ctx.tools.register(defineTool({
     name: 'report_list',
-    description: 'List report digests from the ledger — no bodies, so this is the cheap way to survey a long-running collaboration. Filter by `session` to see every report that touches one agent (authored, addressed, copied, or contributed to), by `status`, or by `task` to pull up one collaboration across every session it touched. The task label is matched case-insensitively and partially, so "payments" finds "payments-rework". `worktree` matches a bound working tree by branch or path, which is the way to find out who is working in which checkout. Use it to find the report id you need before reading it, or to check what a teammate is still waiting on.',
+    description: 'List report digests from the ledger — no bodies, so this is the cheap way to survey a long-running collaboration. Filter by `session` to see every report that touches one agent (authored, addressed, copied, or contributed to), by `status`, or by `task` to pull up one collaboration across every session it touched. The task label is matched case-insensitively and partially, so "payments" finds "payments-rework". `worktree` matches a working tree the report is or was bound to, by branch or path — a binding outlives a release, so this includes former leases. Use it to find the report id you need before reading it, or to check what a teammate is still waiting on.',
     parameters: {
       session: { type: 'string', description: 'Only reports touching this session id.' },
       status: { type: 'string', enum: ['open', 'acked', 'closed'], description: 'Only reports in this state.' },
@@ -403,7 +406,7 @@ export function registerReportTools(
 
   disposers.push(ctx.tools.register(defineTool({
     name: 'report_close',
-    description: 'Conclude a report — record that the matter is finished so the ledger stops treating it as live work. Closing is the OWNER\'s act, not a reader\'s: only the agent that opened the report or one of its co-authors may close it, and a refusal names who to ask. This is different from acknowledging: report_ack says "I have taken this in" while the matter is still running. Closing is not a lock — if anyone later contributes to, sends, copies, or forwards a closed report it reopens automatically and records that, so a prematurely closed report can never silently swallow new work.',
+    description: 'Conclude a report — record that the matter is finished so the ledger stops treating it as live work. Closing is the OWNER\'s act, not a reader\'s: only the agent that opened the report or one of its co-authors may close it, and a refusal names who to ask. This is different from acknowledging: report_ack says "I have taken this in" while the matter is still running. Closing is not a lock — if anyone later contributes to, sends, copies, forwards, or amends a closed report it reopens automatically and records that, so a prematurely closed report can never silently swallow new work.',
     parameters: {
       report: { type: 'string', required: true, description: 'Report id to close.' },
       note: { type: 'string', description: 'Why it is finished, or what concluded it. Recorded on the hop.' },
@@ -430,7 +433,7 @@ export function registerReportTools(
       return [
         renderMutation(result.front, result.outcomes),
         renderWorktreeOutcome(result.worktree, worktree.enabled),
-        'closed — later activity on this report reopens it automatically',
+        'closed — a later contribution, send, copy, forward or amendment reopens it automatically; a receipt does not',
       ].filter((line): line is string => line !== undefined).join('\n')
     },
   })))
@@ -445,7 +448,23 @@ export function registerReportTools(
     output: stringOutput,
     execute: async (args, exec) => {
       const input = args as { report: string; note?: string }
-      const result = await service.release(input.report, actorOf(exec as ExecLike), input.note)
+      let result: Awaited<ReturnType<ReportService['release']>>
+      try {
+        result = await service.release(input.report, actorOf(exec as ExecLike), input.note)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        // With the feature off, no report here can hold a checkout, so "not
+        // bound" is not a user error to chase: name the deployment fact that
+        // explains it instead of leaving the caller guessing.
+        const aboutBinding = message.includes('not bound to a working tree') || message.includes('does not currently hold')
+        if (!worktree.enabled && aboutBinding) {
+          throw new Error(
+            `${message} — note: this deployment has not enabled git worktree support (the composition row sets `
+            + 'worktree.enabled), so no report here can hold a checkout and there is nothing to release',
+          )
+        }
+        throw error
+      }
       const binding = result.front.worktree
       return [
         renderMutation(result.front, result.outcomes),
@@ -485,7 +504,7 @@ export function registerReportTools(
 
   disposers.push(ctx.tools.register(defineTool({
     name: 'report_amend',
-    description: 'Correct a report you own — fix a wrong subject, retag the collaboration, or amend the body — instead of opening a replacement report and losing the original transfer path. Correcting is the OWNER\'s act: only the originator or a co-author may amend, and a refusal names who to ask. What can change is deliberately narrow. The digest fields (subject, task, artifacts) are current state and are replaced, with the hop recording the old and new values verbatim. The body is a record of what agents actually said, so by default your text is APPENDED as an amendment section rather than rewriting anyone\'s words; set replace_body: true to rewrite it outright, and the hop records that you did. Recipients, co-authorship, and thread links can never be edited here — they come from the transfer path itself, so the only way to change them is another send/cc/contribute. Amending a closed report reopens it. Amending changes nothing when the values you pass already match, and says so.',
+    description: 'Correct a report you own — fix a wrong subject, retag the collaboration, or amend the body — instead of opening a replacement report and losing the original transfer path. Correcting is the OWNER\'s act: only the originator or a co-author may amend, and a refusal names who to ask. What can change is deliberately narrow. The digest fields (subject, task, artifacts) are current state and are replaced, with the hop recording the old and new values verbatim. The body is a record of what agents actually said, so by default your text is APPENDED as an amendment section rather than rewriting anyone\'s words; set replace_body: true to rewrite it outright, and the hop records that you did. Recipients, co-authorship, and thread links can never be edited here — they come from the transfer path itself, so the only way to change them is another send/cc/contribute. Amending a closed report reopens it. Amending with values that already match is refused rather than reported as a successful no-op, so the record never gains an empty correction.',
     parameters: {
       report: { type: 'string', required: true, description: 'Report id to correct.' },
       subject: { type: 'string', description: 'Replacement subject. An empty value is refused, since a report must keep a title.' },
@@ -514,7 +533,7 @@ export function registerReportTools(
         ...(input.replace_body === undefined ? {} : { replaceBody: input.replace_body }),
         ...(input.note === undefined ? {} : { note: input.note }),
       })
-      return `${renderMutation(result.front, result.outcomes)}\nthe correction is recorded as a hop, with the old and new values`
+      return `${renderMutation(result.front, result.outcomes)}\nthe correction is recorded as a hop; changed digest fields carry their before and after values verbatim`
     },
   })))
 
@@ -563,7 +582,11 @@ export function registerReportTools(
     execute: async (args, exec) => {
       const input = args as { task: string; name?: string; worktree?: boolean }
       const actor = actorOf(exec as ExecLike)
-      const subject = subjectFrom(input.task, input.name)
+      // The name is normalized here as well as in PeerService because the
+      // subject is derived from it: a whitespace-only name would otherwise turn
+      // into a bare ": " prefix on the report title.
+      const name = input.name?.trim() || undefined
+      const subject = subjectFrom(input.task, name)
       // The checkout has to exist before the peer does, because the peer's
       // working directory is the checkout's path and a session is born with the
       // directory it will keep. That ordering is the whole reason report ids can
@@ -572,13 +595,25 @@ export function registerReportTools(
         ? await requireWorktree(worktree, service, { subject, actor })
         : undefined
       let started: Awaited<ReturnType<PeerService['start']>>
-      let result: Awaited<ReturnType<ReportService['author']>>
       try {
         started = await peers.start(actor, {
           task: input.task,
-          ...(input.name === undefined ? {} : { name: input.name }),
+          ...(name === undefined ? {} : { name }),
           ...(provisioned === undefined ? {} : { cwd: provisioned.prepared.binding.path }),
         })
+      } catch (error) {
+        // No peer exists, so nothing references the checkout that was made for
+        // it. This is the only path that rolls a provision back.
+        if (provisioned !== undefined) await service.rollbackProvision(provisioned)
+        throw error
+      }
+      // From here the peer is live and already charged against this session's
+      // lifetime peer budget, so a later failure is reported rather than
+      // compensated: rolling the checkout back would strand a working partner in
+      // a deleted directory, and swallowing the session id would leave the
+      // caller unable to address what it has already paid for.
+      let result: Awaited<ReturnType<ReportService['author']>>
+      try {
         result = await service.author({
           subject,
           body: [
@@ -604,15 +639,29 @@ export function registerReportTools(
             : { reportId: provisioned.report, worktree: provisioned.prepared.binding }),
         })
       } catch (error) {
-        // Neither the peer nor a report exists to explain the checkout, so it is
-        // rolled back rather than left for a later cleanup to puzzle over.
-        if (provisioned !== undefined) await service.rollbackProvision(provisioned)
-        throw error
+        const reason = error instanceof Error ? error.message : String(error)
+        throw new Error(
+          `report-ledger: peer ${started.sessionId} exists, but its assignment report could not be written (${reason}). `
+          + 'The assignment was NOT delivered. The peer is alive and counted against this session\'s lifetime peer '
+          + 'budget; assign it later by authoring a report with report_author and sending it with report_send '
+          + `(to=${started.sessionId}).`
+          + (provisioned === undefined
+            ? ''
+            : ` Its checkout at ${provisioned.prepared.binding.path} was kept rather than rolled back: a report can `
+              + 'adopt it later with report_lease.'),
+        )
       }
       // Observe the first turn before answering. The assignment has just been
       // delivered, so this is the only moment where "did it start?" is cheap to
       // answer — and the answer is the difference between a hand-off and a hope.
-      const receipt = describeReceipt(await peers.receipt(started.sessionId, DEFAULT_RECEIPT_MS), DEFAULT_RECEIPT_MS)
+      // The observation is a courtesy, not part of the hand-off: a host that
+      // cannot answer must not turn a completed hand-off into an error.
+      let receipt: string | undefined
+      try {
+        receipt = describeReceipt(await peers.receipt(started.sessionId, DEFAULT_RECEIPT_MS), DEFAULT_RECEIPT_MS)
+      } catch (error) {
+        receipt = `⚠ could not observe the peer's first turn: ${error instanceof Error ? error.message : String(error)}`
+      }
       return [
         `opened peer ${started.sessionId}${started.name === undefined ? '' : ` (name=${started.name})`}`,
         started.cwd === undefined ? '' : `cwd=${started.cwd}`,

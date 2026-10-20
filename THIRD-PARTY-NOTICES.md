@@ -1,14 +1,15 @@
 # Third-party notices
 
-This package ships a **built** host half (`lib/index.js`) that inlines its only
-third-party runtime dependency, as explained in `tsdown.config.ts`: a plugin
-installed into a DSH profile cannot rely on the profile's transitive module
-resolution, so a non-harness dependency must be bundled.
+This package ships a **built** host half (`lib/index.js`) and browser half
+(`lib/client.js`). The only third-party runtime dependency, `yaml`, stays an
+external `import` and is installed from the package's `dependencies` by the
+package manager; it is not bundled into the artifacts. Harness and platform
+packages are supplied by the DSH profile or web shell.
 
 ## yaml
 
 - Package: `yaml` (https://github.com/eemeli/yaml)
-- Version bundled: 2.9.1
+- Version required: ^2.9.1 (external dependency, not bundled)
 - License: ISC
 - Used for: reading and writing the ledger's front matter and transfer-path files.
 
@@ -29,6 +30,6 @@ THIS SOFTWARE.
 ```
 
 Everything else imported at runtime — `@deepseek-ai/cordis`,
-`@deepseek-ai/dsh-tools`, and the browser platform modules (`react`,
-`react/jsx-runtime`) — is supplied by the DSH host or the DSH web shell and is
-never bundled.
+`@deepseek-ai/dsh-tools`, `@deepseek-ai/dsh-workspace`, and the browser platform
+modules (`react`, `react/jsx-runtime`, `@deepseek-ai/dsh-client-ui-primitives`)
+— is supplied by the DSH host or the DSH web shell and is never bundled.

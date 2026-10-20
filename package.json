@@ -1,6 +1,6 @@
 {
   "name": "dsh-report-ledger",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Report-and-ledger plugin for DSH: front-matter 汇报 as the first-class agent-to-agent interaction primitive, with upward/downward delivery, co-authorship, CC, and a complete transfer-path audit trail; plus a conversation timeline tab.",
   "type": "module",
   "main": "lib/index.js",
@@ -62,8 +62,8 @@
   "scripts": {
     "build": "tsdown",
     "watch": "tsdown --watch",
-    "test": "node scripts/smoke.ts && node scripts/guidance-check.ts && node scripts/timeline-check.ts && node scripts/roster-check.ts && node scripts/workspace-check.ts && node scripts/client-filter-check.ts && node scripts/cardgraph-check.ts && node scripts/cardgraph-paint-check.ts && node scripts/worktree-check.ts && node scripts/lease-check.ts && node scripts/allocate-check.ts && node scripts/maintenance-check.ts",
-    "test:tools": "node scripts/worktree-tools-check.ts",
+    "test": "node scripts/smoke.ts && node scripts/guidance-check.ts && node scripts/timeline-check.ts && node scripts/client-filter-check.ts && node scripts/cardgraph-check.ts && node scripts/cardgraph-paint-check.ts && node scripts/worktree-check.ts && node scripts/lease-check.ts && node scripts/allocate-check.ts && node scripts/maintenance-check.ts",
+    "test:tools": "node scripts/worktree-tools-check.ts && node scripts/workspace-check.ts && node scripts/roster-check.ts",
     "typecheck": "tsc --noEmit",
     "check": "pnpm run typecheck && pnpm run test && pnpm run test:tools",
     "prepublishOnly": "pnpm run check && pnpm run build"

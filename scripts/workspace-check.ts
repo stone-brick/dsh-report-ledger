@@ -4,7 +4,8 @@
 // Emitted as nothing; it exists so `tsc` treats the file as its own module.
 export {}
 /**
- * Deterministic checks for the peer workspace registration the HOST performs.
+ * Deterministic checks for the HOST wiring: the peer workspace registration, the
+ * model route a peer is created with, and the plugin's `apply` seams.
  *
  * `roster-check.ts` pins the service side of the same feature — that a created
  * peer is offered to the hook, and that a failure is reported rather than thrown.
@@ -21,9 +22,12 @@ export {}
  * the peer's own id, and each degraded outcome must stay distinguishable from the
  * others.
  *
- * No harness is involved: the peer host is exercised through a minimal context
- * stub. That is the whole reason its parameter is a narrow structural interface
- * rather than the plugin Context.
+ * The same narrow-stub technique then covers two more host seams that otherwise
+ * only a live deployment would exercise: the route a peer is created with (a
+ * stub registry captures what `ctx.agents.create()` would receive), and `apply`
+ * itself (a fake context runs every effect immediately, so registration,
+ * disposal, the pump listener, the catch-up sweep and the corpus cache can be
+ * asserted instead of trusted). No harness is involved anywhere.
  *
  * Run: node scripts/workspace-check.ts
  */
@@ -32,16 +36,39 @@ import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { HostBundle, PeerHostContext } from '../src/index.ts'
+import { pendingTargets } from '../src/report/deliver.ts'
+import { appendHop, readHops, writeReport } from '../src/report/ledger.ts'
+import { REPORT_PATH, TIMELINE_PATH, WORKTREES_PATH } from '../src/report/route.ts'
 
 const scratch = await mkdtemp(join(tmpdir(), 'report-ledger-workspace-'))
 // The peer roster log lives under the ledger root, so the run must not touch a
 // real one even though nothing here starts a peer.
 process.env.DSH_REPORT_LEDGER_ROOT = join(scratch, 'ledger')
 
-const { buildPeerHost } = await import('../src/index.ts')
+const { apply, buildPeerHost } = await import('../src/index.ts')
 
 const checks: [string, boolean, string][] = []
 const check = (label: string, ok: boolean, detail = ''): void => { checks.push([label, ok, detail]) }
+
+/**
+ * Poll for a condition instead of sleeping a fixed time.
+ *
+ * The host defers the catch-up sweep and the delivery path does real filesystem
+ * I/O, so a fixed sleep would either be flaky on a busy machine or slow on a
+ * quiet one. What the checks pin is that the effect happens, not how long the
+ * filesystem needs on this machine.
+ * @param predicate - the condition to reach.
+ * @param timeoutMs - how long to keep trying.
+ * @returns whether the condition held before the deadline.
+ */
+const waitFor = async (predicate: () => boolean | Promise<boolean>, timeoutMs = 2000): Promise<boolean> => {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (await predicate()) return true
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+  return await predicate()
+}
 
 /** Stand in for the session-reading bundle the peer host is built with. */
 const host = (): HostBundle => ({
@@ -169,6 +196,298 @@ check('the failure is also written to the deployment log',
 const vanished = await live.attachToWorkspace?.({ sessionId: 'session-peer-6', cwd: join(scratch, 'never-created') })
 check('a vanished directory is reported as failed rather than thrown',
   vanished?.outcome === 'failed', JSON.stringify(vanished))
+
+// ---------------------------------------------------------------------------
+// 6. peer creation route: effort follows the live header, not a stale option
+// ---------------------------------------------------------------------------
+// `peerRoute` is private, but `createPeer` is the seam that publishes its answer
+// to `ctx.agents.create()`. A stub registry captures exactly what the harness
+// would have received, so the rule can be pinned without widening the export
+// surface. The rule matters because a peer created on a route it cannot use
+// fails its first request while the ledger still reports a delivered hand-off.
+interface CreationCall {
+  readonly agentOptions: Record<string, unknown>
+}
+
+const captureCreation = (
+  caller: { options: Record<string, unknown>; session: { requestHeader(): { config?: Record<string, unknown> } | undefined } },
+): { peerHost: ReturnType<typeof buildPeerHost>; calls: CreationCall[] } => {
+  const calls: CreationCall[] = []
+  const creationCtx = {
+    agents: {
+      get: () => caller,
+      list: () => [],
+      create: async (options: { agentOptions: Record<string, unknown> }) => {
+        calls.push({ agentOptions: options.agentOptions })
+        return { agent: { id: 'session-peer-created' } }
+      },
+    },
+    get: () => undefined,
+    logger: { warn: () => {} },
+  }
+  return { peerHost: buildPeerHost(creationCtx as unknown as PeerHostContext, host()), calls }
+}
+
+/** Resolve one creation options bundle from a starter carrying this header/options pair. */
+const resolveRoute = async (
+  options: Record<string, unknown>,
+  header: Record<string, unknown> | undefined,
+): Promise<Record<string, unknown> | undefined> => {
+  const caller = { options, session: { requestHeader: () => (header === undefined ? undefined : { config: header }) } }
+  const { peerHost, calls } = captureCreation(caller)
+  await peerHost.createPeer({ sessionId: 'session-peer-created', startedBy: 'session-starter' })
+  return calls[0]?.agentOptions
+}
+
+const staleEffort = await resolveRoute(
+  { provider: 'p', model: 'm', reasoningEffort: 'high', maxTokens: 4096 },
+  { provider: 'p', model: 'm' },
+)
+check('a live header without an effort does not inherit the stale creation-time effort',
+  staleEffort?.reasoningEffort === undefined, JSON.stringify(staleEffort))
+check('the creation-time maxTokens survives alongside the header route',
+  staleEffort?.maxTokens === 4096, JSON.stringify(staleEffort))
+check('the header names provider and model', staleEffort?.provider === 'p' && staleEffort?.model === 'm', JSON.stringify(staleEffort))
+
+const headerEffort = await resolveRoute(
+  { provider: 'p', model: 'm', reasoningEffort: 'high' },
+  { provider: 'p2', model: 'm2', reasoningEffort: 'medium' },
+)
+check('a live header owns the effort it does name',
+  headerEffort?.reasoningEffort === 'medium' && headerEffort?.provider === 'p2' && headerEffort?.model === 'm2',
+  JSON.stringify(headerEffort))
+
+const noHeader = await resolveRoute({ provider: 'p', model: 'm', reasoningEffort: 'low' }, undefined)
+check('a starter with no request header inherits its creation-time effort',
+  noHeader?.reasoningEffort === 'low', JSON.stringify(noHeader))
+check('provider and model still fall back to creation options',
+  noHeader?.provider === 'p' && noHeader?.model === 'm', JSON.stringify(noHeader))
+
+// ---------------------------------------------------------------------------
+// 7. apply(): route registration is failure-atomic
+// ---------------------------------------------------------------------------
+// The host wiring itself is what a deployment depends on and what nothing else
+// pins: three endpoints under a service-injection callback, the pump listener,
+// the prompt sections, and the catch-up sweep. The fake context below executes
+// every effect immediately (Cordis tracks it in the real host) so the assertions
+// can be about the wiring rather than about Cordis.
+type RouteHandler = (request: never, response: never) => Promise<void> | void
+
+interface WiringOptions {
+  readonly liveAgents?: readonly { id: string; steer(message: unknown): void; inject(message: unknown): void }[]
+  readonly listSessions?: () => Promise<readonly unknown[]>
+  readonly readTitleSnapshots?: (ids: readonly string[]) => Promise<readonly unknown[]>
+  readonly failRoute?: string
+}
+
+const wiring = (options: WiringOptions = {}) => {
+  const tools: string[] = []
+  const sections: string[] = []
+  const listeners = new Map<string, (payload: { agent: { id: unknown } }) => unknown>()
+  const routes = new Map<string, RouteHandler>()
+  const registered: string[] = []
+  const disposed: string[] = []
+  const warnings: string[] = []
+  const effects: (() => void)[] = []
+  const injections: ((scoped: unknown) => void)[] = []
+  const webServer = {
+    register(route: { kind: string; path: string; handler: RouteHandler }): () => void {
+      if (route.path === options.failRoute) throw new Error(`fixture: duplicate route ${route.path}`)
+      registered.push(route.path)
+      routes.set(route.path, route.handler)
+      return () => {
+        disposed.push(route.path)
+        routes.delete(route.path)
+      }
+    },
+  }
+  const sessionQuery = {
+    listSessions: options.listSessions ?? (async () => []),
+    readTitleSnapshots: options.readTitleSnapshots ?? (async () => []),
+  }
+  const effect = (fn: () => (() => void)): (() => void) => {
+    const undo = fn()
+    effects.push(undo)
+    return undo
+  }
+  const scoped = {
+    get: (name: string) => (name === 'webServer' ? webServer : undefined),
+    effect,
+  }
+  const liveAgents = options.liveAgents ?? []
+  const ctx = {
+    agents: {
+      get: (id: string) => liveAgents.find((agent) => agent.id === id),
+      list: () => liveAgents,
+      create: async () => { throw new Error('fixture: no agent is created here') },
+    },
+    get: (name: string) => (name === 'sessionQuery' ? sessionQuery : undefined),
+    logger: { warn: (message: string) => { warnings.push(message) } },
+    tools: { register: (definition: { name: string }) => { tools.push(definition.name); return () => {} } },
+    systemPrompt: { section: (section: { name: string }) => { sections.push(section.name); return () => {} } },
+    on: (name: string, listener: (payload: { agent: { id: unknown } }) => unknown) => {
+      listeners.set(name, listener)
+      return () => {}
+    },
+    effect,
+    inject: (_deps: string[], callback: (scoped: unknown) => void) => { injections.push(callback); return {} },
+  }
+  return {
+    ctx, tools, sections, listeners, routes, registered, disposed, warnings, effects,
+    mount: (): void => { for (const injection of injections) injection(scoped) },
+  }
+}
+
+const wired = wiring()
+apply(wired.ctx as never, {})
+wired.mount()
+check('apply registers the three read-only endpoints',
+  wired.registered.join() === [REPORT_PATH, TIMELINE_PATH, WORKTREES_PATH].join(), wired.registered.join())
+check('each registered endpoint carries its handler', wired.routes.size === 3, String(wired.routes.size))
+check('the model tools include the peer surface',
+  wired.tools.includes('report_author') && wired.tools.includes('peer_list') && wired.tools.includes('peer_start'),
+  wired.tools.join(','))
+check('the lease tool stays hidden while the worktree feature is off',
+  !wired.tools.includes('report_lease'), wired.tools.join(','))
+check('both prompt sections are registered by default',
+  wired.sections.join() === 'plugin:report-ledger,plugin:report-ledger:partnership', wired.sections.join())
+wired.effects[wired.effects.length - 1]?.()
+check('disposing the registration effect removes every route in reverse',
+  wired.disposed.join() === [WORKTREES_PATH, TIMELINE_PATH, REPORT_PATH].join() && wired.routes.size === 0,
+  wired.disposed.join())
+
+const failing = wiring({ failRoute: TIMELINE_PATH })
+apply(failing.ctx as never, {})
+let mountThrew = false
+try {
+  failing.mount()
+} catch {
+  mountThrew = true
+}
+check('a refused second registration fails the fiber instead of half-registering', mountThrew)
+check('the route that did register is unwound when the next one fails',
+  failing.registered.join() === REPORT_PATH && failing.disposed.join() === REPORT_PATH && failing.routes.size === 0,
+  `${failing.registered.join()} | ${failing.disposed.join()}`)
+
+const quiet = wiring()
+apply(quiet.ctx as never, { announceToAgent: false })
+quiet.mount()
+check('announceToAgent:false suppresses the prompt sections', quiet.sections.length === 0, quiet.sections.join())
+check('announceToAgent:false still registers the endpoints and the tools',
+  quiet.routes.size === 3 && quiet.tools.includes('report_read'), `${quiet.routes.size} ${quiet.tools.join(',')}`)
+
+// ---------------------------------------------------------------------------
+// 8. the catch-up sweep delivers what `agent/created` can never report
+// ---------------------------------------------------------------------------
+// The event fires while a session is created or resumed. A hand-off queued before
+// the plugin loaded has no such event left to wait for, so one deferred sweep in
+// `apply` must deliver it — otherwise the one failure this ledger exists to
+// prevent (a silent hand-off to a resident agent) survives a plugin reload.
+const queuedFront = {
+  report: 'R-0001',
+  subject: 'queued before the plugin mounted',
+  status: 'open' as const,
+  from: 'session-sender',
+  to: ['session-live-1'],
+  cc: [],
+  authors: [],
+  created: Date.now(),
+  updated: Date.now(),
+  children: [],
+  artifacts: [],
+  hops: 1,
+}
+await writeReport({ front: queuedFront, body: 'the queued body' })
+await appendHop('R-0001', { at: Date.now(), actor: 'session-sender', action: 'sent', to: ['session-live-1'] })
+
+const catchUpInbox: string[] = []
+const resident = {
+  id: 'session-live-1',
+  steer: (message: unknown) => {
+    const digest = message as { content?: readonly { text?: string }[] }
+    catchUpInbox.push(digest.content?.[0]?.text ?? '')
+  },
+  inject: () => {},
+}
+const catchUp = wiring({ liveAgents: [resident] })
+apply(catchUp.ctx as never, {})
+// The sweep is deferred by design (plugin load must not wait on ledger I/O), so
+// the assertion polls instead of sleeping a fixed time: what is pinned is that it
+// happens, not how many milliseconds the filesystem needs on this machine.
+const deliveredBySweep = await waitFor(async () => (await readHops('R-0001')).some((hop) => hop.action === 'delivered'))
+check('apply sweeps the sessions that were already resident',
+  deliveredBySweep && catchUpInbox.length === 1 && catchUpInbox[0].includes('R-0001'),
+  `${catchUpInbox.length} delivered=${deliveredBySweep}`)
+const hopsAfterSweep = await readHops('R-0001')
+check('the sweep records the arrival instead of leaving the hand-off pending',
+  hopsAfterSweep.some((hop) => hop.action === 'delivered') && !pendingTargets(hopsAfterSweep).includes('session-live-1'),
+  pendingTargets(hopsAfterSweep).join())
+
+// ---------------------------------------------------------------------------
+// 9. the corpus listing is shared by concurrent readers and dropped on creation
+// ---------------------------------------------------------------------------
+// Every timeline request used to re-enumerate the whole session corpus, and the
+// tab polls it. One in-flight listing serves every concurrent reader, a short
+// window serves the next poll, and a newly resident session invalidates the cache
+// so it can never be missing from its own timeline.
+const listing = { calls: 0 }
+const shared = wiring({
+  listSessions: async () => {
+    listing.calls += 1
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    return [{ header: { id: 'session-root', createdAt: Date.now() }, live: true }]
+  },
+})
+apply(shared.ctx as never, {})
+shared.mount()
+const timelineRoute = shared.routes.get(TIMELINE_PATH)
+if (timelineRoute === undefined) throw new Error('fixture: the timeline route was not registered')
+
+const browserRequest = (): never => ({
+  socket: { remoteAddress: '127.0.0.1' },
+  headers: { host: '127.0.0.1:3080' },
+  method: 'GET',
+  url: '/api/report-ledger/timeline?root=session-root',
+} as never)
+const browserResponse = (): { captured: { status: number; headers: Record<string, unknown>; body: string }; response: never } => {
+  const captured = { status: 0, headers: {} as Record<string, unknown>, body: '' }
+  return {
+    captured,
+    response: {
+      writeHead(status: number, headers?: Record<string, unknown>) {
+        captured.status = status
+        Object.assign(captured.headers, headers ?? {})
+      },
+      end(chunk?: unknown) { if (typeof chunk === 'string') captured.body = chunk },
+    } as never,
+  }
+}
+
+const firstRead = browserResponse()
+const secondRead = browserResponse()
+await Promise.all([
+  timelineRoute(browserRequest(), firstRead.response),
+  timelineRoute(browserRequest(), secondRead.response),
+])
+check('two concurrent timeline reads both answer 200',
+  firstRead.captured.status === 200 && secondRead.captured.status === 200,
+  `${firstRead.captured.status}/${secondRead.captured.status}`)
+check('two concurrent timeline reads share one corpus listing', listing.calls === 1, String(listing.calls))
+check('the shared listing is what the payload was built from',
+  firstRead.captured.body.includes('session-root') && secondRead.captured.body.includes('session-root'))
+
+const thirdRead = browserResponse()
+await timelineRoute(browserRequest(), thirdRead.response)
+check('a follow-up poll inside the reuse window costs no second listing', listing.calls === 1, String(listing.calls))
+
+const pump = shared.listeners.get('agent/created')
+check('apply registers the agent/created pump', typeof pump === 'function')
+const pumpResult = pump?.({ agent: { id: 'session-live-9' } })
+check('the pump listener answers synchronously with undefined', pumpResult === undefined, String(pumpResult))
+
+const fourthRead = browserResponse()
+await timelineRoute(browserRequest(), fourthRead.response)
+check('a newly resident session drops the cached corpus listing', listing.calls === 2, String(listing.calls))
 
 let failures = 0
 for (const [label, ok, detail] of checks) {

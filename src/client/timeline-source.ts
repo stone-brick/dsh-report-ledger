@@ -102,10 +102,20 @@ export function useTimeline(sessionId: string): TimelineRead {
 
 /** What one report's detail read returns. */
 export interface ReportDetailRead {
-  /** The detail once it has arrived; `undefined` while loading or after a failure. */
+  /** The detail for the requested report; `undefined` until its first read lands. */
   readonly detail: ReportDetail | undefined
-  /** The failure code of the last read, or `undefined` while reads are succeeding. */
+  /** The failure code of the last read, cleared by the next success. */
   readonly error: string | undefined
+}
+
+/** One detail read, stamped with the report it was read for. */
+interface DetailState {
+  /** The report this read belongs to. */
+  readonly report: string
+  /** The detail once it has arrived; kept across a re-read of the same report. */
+  readonly detail?: ReportDetail
+  /** The failure code of the last read for this report, cleared by a success. */
+  readonly error?: string
 }
 
 /**
@@ -115,28 +125,43 @@ export interface ReportDetailRead {
  * want different ones — the conversation tab re-reads it when the reader hits
  * refresh, while a docked panel passes its own timeline tick so a report being
  * written under the reader's eyes keeps up.
+ *
+ * A re-read of the SAME report therefore keeps the previous detail on screen
+ * until the new one arrives: clearing it would turn every tick into a flash of
+ * "reading the transfer path" over a body the reader is in the middle of. A read
+ * for a DIFFERENT report is a different question, so the state is keyed by report
+ * id and anything read for another report is never returned — that is what stops
+ * one click from rendering the previous report's body under the new one, even for
+ * a frame.
+ *
+ * Errors follow the same rule: a failed re-read keeps the detail and reports the
+ * failure beside it, and only a successful read clears it.
  * @param report - the report to read; `undefined` clears the read.
  * @param nonce - bump to re-read the same report.
- * @returns the detail, its error, and nothing else.
+ * @returns the detail for `report` only, its error, and nothing else.
  */
 export function useReportDetail(report: string | undefined, nonce: number): ReportDetailRead {
-  const [detail, setDetail] = useState<ReportDetail | undefined>(undefined)
-  const [error, setError] = useState<string | undefined>(undefined)
+  const [state, setState] = useState<DetailState | undefined>(undefined)
 
   useEffect(() => {
-    if (report === undefined) {
-      setDetail(undefined)
-      setError(undefined)
-      return undefined
-    }
+    if (report === undefined) return undefined
     let cancelled = false
-    setDetail(undefined)
-    setError(undefined)
     getJson<ReportDetail>(`${REPORT_URL}?id=${encodeURIComponent(report)}`)
-      .then((value) => { if (!cancelled) setDetail(value) })
-      .catch((cause: unknown) => { if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause)) })
+      .then((value) => { if (!cancelled) setState({ report, detail: value }) })
+      .catch((cause: unknown) => {
+        if (cancelled) return
+        const message = cause instanceof Error ? cause.message : String(cause)
+        // A failed re-read of the report already on screen keeps its detail and
+        // merely adds the failure; a failed FIRST read has nothing to keep.
+        setState((previous) => previous !== undefined && previous.report === report && previous.detail !== undefined
+          ? { report, detail: previous.detail, error: message }
+          : { report, error: message })
+      })
     return () => { cancelled = true }
   }, [report, nonce])
 
-  return { detail, error }
+  if (report === undefined || state === undefined || state.report !== report) {
+    return { detail: undefined, error: undefined }
+  }
+  return { detail: state.detail, error: state.error }
 }

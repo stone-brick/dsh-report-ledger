@@ -59,4 +59,7 @@ jobs:
       # 出现在固定 Commit 里）。这一步保证提交的产物与源码一致：改了 src 忘了
       # build、或构建不可重现，都会在这里变红。
       - name: Committed lib/ matches a fresh build
-        run: git diff --exit-code -- lib
+        # status --porcelain also sees a NEW untracked file under lib/, which
+        # `git diff` cannot; a build that starts emitting an extra artifact must
+        # not slip through just because nothing tracked was modified.
+        run: test -z "$(git status --porcelain -- lib)"

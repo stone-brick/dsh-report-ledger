@@ -2,10 +2,10 @@
  * The read-only HTTP surface the browser half of this plugin consumes.
  *
  * The host and client halves of a third-party plugin share no bundled code, so
- * the transport is a same-origin, direct-loopback JSON pair registered on the
- * harness web server — the pattern the deployed third-party plugins already use
- * rather than a generated remote, which would need build-time codegen this
- * package deliberately avoids.
+ * the transport is a same-origin, direct-loopback JSON surface of three
+ * read-only endpoints registered on the harness web server — the pattern the
+ * deployed third-party plugins already use rather than a generated remote, which
+ * would need build-time codegen this package deliberately avoids.
  *
  * The guard is intentionally narrow and copied in spirit from that precedent:
  *
@@ -18,7 +18,7 @@
  *  - browser same-origin markers must agree, so a cross-site page cannot read
  *    the response.
  *
- * Both routes are GET-only and read-only. There is no write surface, no token,
+ * All three routes are GET-only and read-only. There is no write surface, no token,
  * and nothing here mutates the ledger — every mutation stays behind the model
  * tools, which are the only path that records a hop. A deployment that reaches
  * the GUI through a reverse proxy would need the shared-token variant of this
@@ -90,6 +90,16 @@ export interface RouteDeps {
    * @returns the view.
    */
   worktrees(): Promise<WorktreeReport>
+  /**
+   * Where a contained handler failure is reported.
+   *
+   * A 500 tells the browser only that the read could not be served: the detail
+   * (which routinely carries an absolute ledger path and an OS-level reason)
+   * belongs in the deployment log, not in a response. Optional because a test
+   * that only pokes the guard has nothing to log to.
+   * @param message - the diagnostic line, including the underlying error text.
+   */
+  log?(message: string): void
 }
 
 /**
@@ -155,14 +165,25 @@ export function isTrustedRequest(request: IncomingMessage): boolean {
   return isSameOriginRequest(request, parsed.url)
 }
 
-/** Write one JSON response with the headers this surface always wants. */
-function writeJson(response: ServerResponse, status: number, body: unknown): void {
+/**
+ * Write one JSON response with the headers this surface always wants.
+ *
+ * Every JSON answer, including a refusal or a method rejection, goes through
+ * this one function: a response that skipped it would be the only one on the
+ * surface not marked uncacheable and not marked as opaque JSON.
+ * @param response - the response to fill.
+ * @param status - HTTP status.
+ * @param body - the JSON envelope.
+ * @param extra - route-specific headers (e.g. `allow` on a 405).
+ */
+function writeJson(response: ServerResponse, status: number, body: unknown, extra: Record<string, string> = {}): void {
   const payload = JSON.stringify(body)
   response.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
     'cache-control': 'no-store',
     'referrer-policy': 'no-referrer',
     'x-content-type-options': 'nosniff',
+    ...extra,
   })
   response.end(payload)
 }
@@ -176,10 +197,12 @@ function refuse(response: ServerResponse, status: number, code: string): void {
  * Wrap one read-only handler with the shared guard, method check, and error
  * containment: a failing data source must surface as a JSON error, never as an
  * unhandled rejection inside the web server.
+ * @param log - where a contained failure's detail goes instead of the response.
  * @param work - the handler body, receiving the request URL.
  * @returns a route handler.
  */
 function guarded(
+  log: RouteDeps['log'],
   work: (url: URL, response: ServerResponse) => Promise<void>,
 ): (request: IncomingMessage, response: ServerResponse) => Promise<void> {
   return async (request, response) => {
@@ -189,14 +212,16 @@ function guarded(
         return
       }
       if (request.method !== 'GET' && request.method !== 'HEAD') {
-        response.writeHead(405, { allow: 'GET, HEAD' })
-        response.end()
+        writeJson(response, 405, { ok: false, code: 'method-not-allowed' }, { allow: 'GET, HEAD' })
         return
       }
       const url = new URL(request.url ?? '/', 'http://localhost')
       await work(url, response)
     } catch (error) {
-      refuse(response, 500, `internal-error: ${error instanceof Error ? error.message : String(error)}`)
+      // The response says nothing an attacker (or a screenshot) could use: the
+      // error text — paths, ids, OS reasons — goes to the injected log only.
+      log?.(`report-ledger: read request failed: ${error instanceof Error ? error.message : String(error)}`)
+      refuse(response, 500, 'internal-error')
     }
   }
 }
@@ -207,7 +232,7 @@ function guarded(
  * @returns the route handler.
  */
 export function createTimelineHandler(deps: RouteDeps): (request: IncomingMessage, response: ServerResponse) => Promise<void> {
-  return guarded(async (url, response) => {
+  return guarded(deps.log, async (url, response) => {
     const root = url.searchParams.get('root') ?? ''
     if (root === '' || root.length > MAX_ID_LENGTH || !SESSION_ID.test(root)) {
       refuse(response, 400, 'invalid-root')
@@ -227,7 +252,7 @@ export function createTimelineHandler(deps: RouteDeps): (request: IncomingMessag
  * @returns the route handler.
  */
 export function createWorktreesHandler(deps: RouteDeps): (request: IncomingMessage, response: ServerResponse) => Promise<void> {
-  return guarded(async (_url, response) => {
+  return guarded(deps.log, async (_url, response) => {
     writeJson(response, 200, { ok: true, value: await deps.worktrees() })
   })
 }
@@ -238,7 +263,7 @@ export function createWorktreesHandler(deps: RouteDeps): (request: IncomingMessa
  * @returns the route handler.
  */
 export function createReportHandler(deps: RouteDeps): (request: IncomingMessage, response: ServerResponse) => Promise<void> {
-  return guarded(async (url, response) => {
+  return guarded(deps.log, async (url, response) => {
     const id = url.searchParams.get('id') ?? ''
     if (!REPORT_ID.test(id)) {
       refuse(response, 400, 'invalid-report-id')

@@ -219,6 +219,26 @@ export function supportsRelativePaths(version: string): boolean {
 }
 
 /**
+ * Why the `relativePaths` option cannot be honoured on this host, if it cannot.
+ *
+ * Exists because the gate has to be *asked*: the flag only exists from git
+ * 2.48, and passing it to an older git fails every single allocation with
+ * `unknown option 'relative-paths'` — a refusal that is correct but arrives
+ * after the work has started, and says nothing about the one-line fix. Asking
+ * first turns that into a sentence naming the version and the remedy.
+ * @param version - a `git --version` line, or `undefined` when git could not be
+ * asked at all.
+ * @returns `undefined` when the option is supported, otherwise the reason.
+ */
+export function relativePathsRefusal(version: string | undefined): string | undefined {
+  if (version === undefined) {
+    return 'the relativePaths option needs git 2.48 or newer, and git could not be asked for its version'
+  }
+  if (supportsRelativePaths(version)) return undefined
+  return `the relativePaths option needs git 2.48 or newer, and this host reports "${version.trim()}"`
+}
+
+/**
  * Locate the repository a directory belongs to.
  *
  * Answers `undefined` rather than throwing when the directory is not in a
@@ -366,6 +386,57 @@ export async function headOf(worktreePath: string): Promise<string | undefined> 
   if (!result.ok) return undefined
   const sha = result.stdout.trim()
   return /^[0-9a-f]{40,64}$/.test(sha) ? sha : undefined
+}
+
+/**
+ * What a ledger-recorded path actually is, on disk, right now.
+ *
+ * `missing` and `not-a-worktree` are deliberately different answers: the first
+ * means the directory is gone, the second means *something* is there but it is
+ * not a working tree of a repository. Collapsing them is what makes a bound
+ * directory that stopped being a checkout read as dirty (`git status` fails
+ * there) instead of as stale, which is both a wrong diagnosis and a permanent
+ * occupant of the retained budget.
+ */
+export type CheckoutPresence = 'worktree' | 'missing' | 'not-a-worktree'
+
+/** The reality behind one binding. */
+export interface CheckoutReality {
+  /** What is at the recorded path. */
+  readonly presence: CheckoutPresence
+  /** The branch git reports there; absent for a detached or unusable tree. */
+  readonly branch?: string
+  /** The repository it resolved to, when it resolved at all. */
+  readonly repo?: RepoLocation
+}
+
+/**
+ * Ask git what is at a recorded path.
+ *
+ * The single place that answers "is this still a checkout", so reclamation and
+ * the maintenance view cannot disagree about it. A failure to *ask* is answered
+ * as `worktree`: calling a checkout stale on a broken subprocess would hand the
+ * caller a licence to delete something no one managed to look at.
+ * @param worktreePath - the recorded path.
+ * @returns the reality, classified.
+ */
+export async function inspectCheckout(worktreePath: string): Promise<CheckoutReality> {
+  if (!existsSync(worktreePath)) return { presence: 'missing' }
+  const repo = await resolveRepo(worktreePath)
+  if (repo === undefined) return { presence: 'not-a-worktree' }
+  let entries: readonly WorktreeEntry[]
+  try {
+    entries = await listWorktrees(repo)
+  } catch {
+    return { presence: 'worktree', repo }
+  }
+  const entry = entries.find((candidate) => samePath(candidate.path, worktreePath))
+  if (entry === undefined || entry.prunable) return { presence: 'not-a-worktree', repo }
+  return {
+    presence: 'worktree',
+    ...(entry.branch === undefined ? {} : { branch: entry.branch }),
+    repo,
+  }
 }
 
 /**

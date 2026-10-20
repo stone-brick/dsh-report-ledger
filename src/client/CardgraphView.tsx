@@ -24,20 +24,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent, ReactElement } from 'react'
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ReportFrontMatter, TimelinePayload } from '../shared/wire.ts'
-import { buildCardgraph, CARDGRAPH_LODS, hitTest, lodFor } from './cardgraph-model.ts'
-import type { CardgraphLayout, CardgraphLod, CardgraphViewport, Rect } from './cardgraph-model.ts'
+import { buildCardgraph, fitTransform, hitTest, lodFor, MAX_ZOOM, MIN_ZOOM, ZOOM_STEP } from './cardgraph-model.ts'
+import type { CardgraphViewport, Rect } from './cardgraph-model.ts'
 import {
   FALLBACK_THEME, WIRE_TOKENS, createCanvasPainter, createThemeReader,
 } from './cardgraph-painter.ts'
-import type { CardgraphPainter, ThemeReader } from './cardgraph-painter.ts'
+import type { CardgraphPainter, PaintScene, ThemeReader } from './cardgraph-painter.ts'
 import { EDGE_LABEL, STATUS_LABEL } from './locales.ts'
 import type { Translate } from './ReportsView.tsx'
 
-/** How far the reader may zoom out and in. */
-const MIN_ZOOM = 0.25
-const MAX_ZOOM = 2.5
-/** One step of the `+`/`−` controls. */
-const ZOOM_STEP = 1.25
 /**
  * Wheel-zoom exponent per pixel of delta, so that one 100px notch — a mouse
  * wheel's usual magnitude — is exactly the {@link ZOOM_STEP} the buttons take.
@@ -45,17 +40,6 @@ const ZOOM_STEP = 1.25
  * why the zoom is exponential in the delta rather than one step per event.
  */
 const WHEEL_ZOOM_RATE = Math.log(ZOOM_STEP) / 100
-/**
- * How far the fit may magnify past the drawing's own size.
- *
- * Filling the width on a tree with one card in it would otherwise ask for several
- * times the design's size — one card stretched across the whole box, larger than
- * any reading needs and carrying no more in it, because a tier is drawn at a fixed
- * size and zooming past 100% only magnifies. One control step is the ceiling: the
- * fit may lean in, not stretch. (The `+` control still reaches every zoom a reader
- * asks for by hand.)
- */
-const MAX_FIT_ZOOM = ZOOM_STEP
 /** How close to the box's edge a wheel-pan stops, in screen pixels. */
 const EDGE_MARGIN = 12
 /** Drawing units to keep beyond the viewport, so a pan does not reveal a blank band. */
@@ -74,6 +58,21 @@ interface PickTarget {
   readonly frame?: number
   readonly bounds: Rect
 }
+
+/** What the pointer is on, or nothing. Kept apart from the base layer's scene on purpose. */
+interface HoverTarget {
+  readonly report?: string
+  readonly frame?: number
+}
+
+/**
+ * Whether the pointer is on the same thing.
+ *
+ * A pointermove over one card is not a new hover: without this the state object is
+ * replaced on every move, which re-renders the drawing and repaints the overlay for
+ * no change at all.
+ */
+const sameHover = (a: HoverTarget, b: HoverTarget): boolean => a.report === b.report && a.frame === b.frame
 
 /** Props for the card canvas. */
 export interface CardgraphViewProps {
@@ -151,13 +150,26 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
   const painter = useRef<CardgraphPainter | null>(null)
   const pathPainter = useRef<CardgraphPainter | null>(null)
   const reader = useRef<ThemeReader | null>(null)
-  const drag = useRef<{ x: number; y: number; offsetX: number; offsetY: number; moved: boolean } | null>(null)
+  const drag = useRef<{
+    x: number
+    y: number
+    offsetX: number
+    offsetY: number
+    moved: boolean
+    pointerId: number
+  } | null>(null)
 
   const [size, setSize] = useState({ width: 0, height: VIEW_HEIGHT })
   const [zoom, setZoom] = useState(1)
   const [offset, setOffset] = useState({ x: 0, y: 0 })
-  const [hover, setHover] = useState<{ report?: string; frame?: number }>({})
+  const [hover, setHover] = useState<HoverTarget>({})
   const [ready, setReady] = useState(false)
+  /** Bumped when the palette changed, so the theme is read again. */
+  const [themeTick, setThemeTick] = useState(0)
+  /** Bumped when font metrics may have arrived, so the measured text is dropped. */
+  const [fontTick, setFontTick] = useState(0)
+  /** Bumped when the device pixel ratio may have changed. */
+  const [dprTick, setDprTick] = useState(0)
   const fitted = useRef(false)
   /**
    * Whether the transform on screen is still the fit's own.
@@ -188,7 +200,8 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
   }, [t])
 
   // ---------------------------------------------------------------------------
-  // Mounting: painters, theme reader, and the observed size
+  // Mounting: painters, theme reader, the observed size, and the two things that
+  // invalidate the drawing without changing it (palette, font metrics)
   // ---------------------------------------------------------------------------
   useEffect(() => {
     const base = baseRef.current
@@ -196,9 +209,28 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
     if (base === null || path === null) return
     painter.current = createCanvasPainter(base)
     pathPainter.current = createCanvasPainter(path)
-    reader.current = createThemeReader(globalThis.document.documentElement, globalThis.window)
+    // The palette is declared on `body`, not on `:root` — see `createThemeReader`,
+    // which is why both elements are offered, `body` first. Reading the document
+    // element alone returns the empty string for every token and collapses the whole
+    // drawing onto the fallback theme, which is a white canvas in a dark shell.
+    const doc = globalThis.document
+    reader.current = createThemeReader([doc.body, doc.documentElement], globalThis.window)
+    // The drawing has to follow the palette it was painted with. The shell switches
+    // it by toggling this attribute on `body`, and nothing else in the drawing would
+    // repaint when it does.
+    const palette = new MutationObserver(() => { setThemeTick((tick) => tick + 1) })
+    palette.observe(doc.body, { attributes: true, attributeFilter: ['data-ds-dark-theme'] })
+    // Measured text is only as good as the font it was measured against: a family
+    // that arrives after the first paint would keep the widths the first paint
+    // measured until something else emptied the cache.
+    void doc.fonts.ready.then(() => {
+      painter.current?.reset()
+      pathPainter.current?.reset()
+      setFontTick((tick) => tick + 1)
+    })
     setReady(true)
     return () => {
+      palette.disconnect()
       painter.current = null
       pathPainter.current = null
       reader.current = null
@@ -218,45 +250,81 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
     return () => { observer.disconnect() }
   }, [])
 
+  // A window moved between monitors changes the device pixel ratio without changing
+  // the box, so the backing store has to be resized for the same reason a resize is.
+  useEffect(() => {
+    const win = globalThis.window
+    const bump = (): void => { setDprTick((tick) => tick + 1) }
+    win.addEventListener('resize', bump)
+    return () => { win.removeEventListener('resize', bump) }
+  }, [])
+
   const viewport = useMemo<CardgraphViewport>(
     () => ({ offsetX: offset.x, offsetY: offset.y, scale: zoom, width: size.width, height: size.height }),
     [offset, zoom, size],
   )
-  const focus = useMemo(
-    () => ({
-      ...(hover.report === undefined ? {} : { report: hover.report }),
-      ...(hover.frame === undefined ? {} : { frame: hover.frame }),
-      ...(openReport === undefined ? {} : { selected: openReport }),
-    }),
-    [hover, openReport],
+  /**
+   * The theme the drawing is painted in.
+   *
+   * Read through the reader (which caches until the canary token moves) and keyed by
+   * `ready` so the first real read happens once the reader exists, and by
+   * `themeTick` so a palette switch repaints without waiting for the next poll.
+   */
+  const theme = useMemo(
+    () => (ready ? reader.current?.read() ?? FALLBACK_THEME : FALLBACK_THEME),
+    [ready, themeTick],
   )
-  const scene = useMemo(() => ({
+  /**
+   * The base layer's scene.
+   *
+   * Carries the open report — the selected card is accented there — but deliberately
+   * **not** the hover: the bottom layer is repainted only when the drawing itself
+   * changes, and a pointer moving over the canvas is not a change to the drawing.
+   * The hover travels in {@link overlayScene}, which is what the second canvas is for.
+   */
+  const baseScene = useMemo<PaintScene>(() => ({
     layout,
-    theme: reader.current?.read() ?? FALLBACK_THEME,
+    theme,
     viewport,
-    focus,
     labels,
     overscan: OVERSCAN,
-  }), [layout, viewport, focus, labels])
+    focus: openReport === undefined ? {} : { selected: openReport },
+  }), [layout, theme, viewport, labels, openReport])
+  /** The overlay's scene: the base scene plus what the pointer and the panel point at. */
+  const overlayScene = useMemo<PaintScene>(() => ({
+    ...baseScene,
+    focus: {
+      ...(openReport === undefined ? {} : { selected: openReport }),
+      ...(hover.report === undefined ? {} : { report: hover.report }),
+      ...(hover.frame === undefined ? {} : { frame: hover.frame }),
+    },
+  }), [baseScene, openReport, hover])
 
   // ---------------------------------------------------------------------------
   // Painting
   // ---------------------------------------------------------------------------
+  // Sizing the backing store is its own effect: it reallocates the canvas, so it
+  // belongs to a box change (or a device pixel ratio change), never to a repaint.
+  // It is declared before the two paint effects so that, within one commit, the
+  // canvas is the right size before anything is drawn into it.
+  useEffect(() => {
+    if (!ready) return
+    const ratio = globalThis.devicePixelRatio || 1
+    painter.current?.resize(size.width, size.height, ratio)
+    pathPainter.current?.resize(size.width, size.height, ratio)
+  }, [ready, size, dprTick])
+
   useEffect(() => {
     const target = painter.current
     if (!ready || target === null) return
-    target.resize(size.width, size.height, globalThis.devicePixelRatio || 1)
-    // The base layer is drawn with nothing focused: focus lives on the overlay, so
-    // a hover never repaints the shapes underneath it.
-    target.paint({ ...scene, focus: openReport === undefined ? {} : { selected: openReport } })
-  }, [ready, scene, size, openReport])
+    target.paint(baseScene)
+  }, [ready, baseScene, fontTick])
 
   useEffect(() => {
     const target = pathPainter.current
     if (!ready || target === null) return
-    target.resize(size.width, size.height, globalThis.devicePixelRatio || 1)
-    target.paintPath(scene)
-  }, [ready, scene, size])
+    target.paintPath(overlayScene)
+  }, [ready, overlayScene, fontTick])
 
   // ---------------------------------------------------------------------------
   // Picking
@@ -280,57 +348,25 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
   // Fitting, zooming and panning
   // ---------------------------------------------------------------------------
   /**
-   * The drawing at any tier, for the fit's own probing.
-   *
-   * `layout` above is the tier the current zoom draws. A fit has to look at the
-   * other tiers *before* it can know which one it will land in, and building all
-   * three on every payload change — every poll — would be paid for nothing.
-   */
-  const layoutFor = useCallback(
-    (tier: CardgraphLod): CardgraphLayout => buildCardgraph(payload, reports, { lod: tier }),
-    [payload, reports],
-  )
-
-  /**
    * Fill the width, in the richest tier that can afford to.
    *
-   * Width is the target because time runs **down** here: a frame is a column, so
-   * the horizontal axis is what has to fit on screen and the vertical axis is
-   * what the reader pans along. Magnification stops at {@link MAX_FIT_ZOOM}, so a
-   * tree too narrow to fill the box is left at its own size instead of stretched.
-   *
-   * The scale and the tier are mutually dependent — the tier is derived from the
-   * zoom (`lodFor`) and the zoom is computed from a layout — so a single pass
-   * that reads the *current* `layout` can leave the view drawing one tier while
-   * its offset was centred for another: the drawing then floats off-centre, small,
-   * in a box it does not fill, and the next click can undo the last one. Probing
-   * the tiers makes the result a function of the box alone: idempotent, and
-   * independent of whichever tier the reader arrived in.
+   * The geometry itself lives in the model ({@link fitTransform}): the scale and
+   * the tier are mutually dependent, so the probing belongs where it is pure,
+   * byte-deterministic, and reachable by the assertions. What stays here is the
+   * one thing that needs the DOM — which width to fit into — and the state write.
    */
   const fit = useCallback(() => {
     const box = boxRef.current
     if (box === null) return
-    const width = box.clientWidth
-    const chosen = CARDGRAPH_LODS
-      .map((tier) => ({ tier, drawing: layoutFor(tier) }))
-      .filter(({ drawing }) => drawing.width > 0)
-      .map(({ tier, drawing }) => ({
-        tier,
-        drawing,
-        scale: clamp((width - 24) / drawing.width, MIN_ZOOM, MAX_FIT_ZOOM),
-      }))
-      .find(({ tier, scale }) => lodFor(scale) === tier)
-    if (chosen === undefined) return
+    const next = fitTransform(payload, reports, box.clientWidth)
+    if (next === undefined) return
     // The transform is the fit's own again, so it follows the box again.
     fittedTransform.current = true
-    setZoom(chosen.scale)
-    setOffset({
-      x: Math.max(8, (width - chosen.drawing.width * chosen.scale) / 2),
-      // Anchored to the top rather than centred: a frame's cards run oldest first,
-      // so a drawing taller than its box is read from the top down.
-      y: 12,
-    })
-  }, [layoutFor])
+    setZoom(next.scale)
+    // Anchored to the top rather than centred vertically: a frame's cards run
+    // oldest first, so a drawing taller than its box is read from the top down.
+    setOffset({ x: next.offsetX, y: next.offsetY })
+  }, [payload, reports])
 
   /**
    * The `+`/`−` controls.
@@ -441,18 +477,36 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
     return () => { box.removeEventListener('wheel', onWheel) }
   }, [])
 
-  /** Drag to pan, click to open. Distinguishing them by distance travelled. */
+  /**
+   * Drag to pan, click to open. Distinguishing them by distance travelled.
+   *
+   * The pointer is captured on press, so a drag keeps following it outside the box
+   * instead of being abandoned at the edge (a mouse has no implicit capture; touch
+   * does). Only the primary pointer is followed, so a second finger cannot reset the
+   * drag's origin halfway through a pan.
+   */
   const onPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
-    if (event.button !== 0) return
-    drag.current = { x: event.clientX, y: event.clientY, offsetX: offset.x, offsetY: offset.y, moved: false }
+    if (event.button !== 0 || !event.isPrimary) return
+    event.currentTarget.setPointerCapture(event.pointerId)
+    drag.current = {
+      x: event.clientX,
+      y: event.clientY,
+      offsetX: offset.x,
+      offsetY: offset.y,
+      moved: false,
+      pointerId: event.pointerId,
+    }
   }, [offset])
 
   const onPointerMove = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!event.isPrimary) return
     const pressing = drag.current
     if (pressing !== null) {
       const dx = event.clientX - pressing.x
       const dy = event.clientY - pressing.y
-      if (Math.abs(dx) + Math.abs(dy) > DRAG_SLOP) pressing.moved = true
+      // Squared Euclidean, so the slop means the distance the pointer travelled
+      // rather than the sum of the axes (which let a 3px diagonal count as a drag).
+      if (dx * dx + dy * dy > DRAG_SLOP * DRAG_SLOP) pressing.moved = true
       if (pressing.moved) {
         // A drag is the reader placing the drawing, not the box choosing it.
         fittedTransform.current = false
@@ -461,22 +515,43 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
       }
     }
     const hit = pick(event.clientX, event.clientY)
-    setHover(hit?.kind === 'card' && hit.report !== undefined
+    const next: HoverTarget = hit?.kind === 'card' && hit.report !== undefined
       ? { report: hit.report }
-      : hit?.kind === 'frame' && hit.frame !== undefined ? { frame: hit.frame } : {})
+      : hit?.kind === 'frame' && hit.frame !== undefined ? { frame: hit.frame } : {}
+    // A move within the same card is not a new hover: returning the current state
+    // lets React skip the render (and the overlay repaint that would follow).
+    setHover((current) => (sameHover(current, next) ? current : next))
   }, [pick])
 
   const onPointerUp = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!event.isPrimary) return
     const pressing = drag.current
     drag.current = null
     if (pressing === null || pressing.moved) return
+    // Every visible card is covered by a real button, and the button's own click is
+    // the activation. Opening from this bubbling pointerup as well would reach the
+    // toggling `onOpen` twice for one gesture — the double toggle ReportsView guards
+    // against with `stopPropagation`. The pointer path stays for a card whose
+    // button is not under the pointer (a stale box, a card clipped at the edge).
+    const target = event.target
+    if (target instanceof Element && target.closest('button') !== null) return
     const hit = pick(event.clientX, event.clientY)
     if (hit?.kind === 'card' && hit.report !== undefined) onOpen(hit.report)
   }, [pick, onOpen])
 
-  const onPointerLeave = useCallback(() => {
+  const onPointerLeave = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const pressing = drag.current
+    // A captured drag is still the reader's gesture even when the pointer has left
+    // the box: the release is delivered here anyway, so the drag is not abandoned.
+    if (pressing !== null && event.currentTarget.hasPointerCapture(pressing.pointerId)) return
     drag.current = null
-    setHover({})
+    setHover((current) => (sameHover(current, {}) ? current : {}))
+  }, [])
+
+  /** A cancelled pointer will never deliver a release, so the drag ends here. */
+  const onPointerCancel = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!event.isPrimary) return
+    drag.current = null
   }, [])
 
   // ---------------------------------------------------------------------------
@@ -507,6 +582,7 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
+        onPointerCancel={onPointerCancel}
         onPointerLeave={onPointerLeave}
         title={t('cardgraph.gestureHint')}
         style={{
