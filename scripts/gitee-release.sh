@@ -18,6 +18,11 @@ api="https://gitee.com/api/v5/repos/${owner}/${repo}"
 version="${tag#v}"
 asset_name="$(basename "$tgz")"
 
+# Gitee occasionally resets a connection from a CI egress; all reads/creates are
+# idempotent, so retrying them is safe. The upload is retried separately only
+# after re-checking the asset list, because a blind retry can duplicate an asset.
+CURL=(curl -sS --fail-with-body --retry 4 --retry-delay 5 --retry-all-errors --connect-timeout 20 --max-time 120)
+
 [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
   echo "not a release tag: $tag" >&2
   exit 1
@@ -37,7 +42,7 @@ json_has_asset() {
   node -e 'let s="";process.stdin.on("data", d => s += d).on("end", () => { const j = JSON.parse(s); const name = process.argv[1]; process.stdout.write((j.assets || []).some((a) => a.name === name) ? "yes" : "no") })' "$1"
 }
 
-release="$(curl -sS --fail-with-body "${api}/releases/tags/${tag}?access_token=${GITEE_TOKEN}")"
+release="$("${CURL[@]}" "${api}/releases/tags/${tag}?access_token=${GITEE_TOKEN}")"
 if [[ "$release" == "null" || -z "$release" ]]; then
   body="$(cat <<EOF
 DSH 插件：把「汇报」做成代理之间的一等交互原语——可追溯的传递路径账本、回执/结案/修正，以及一个会话时间线与卡片画布标签页。
@@ -73,7 +78,7 @@ dsh plugin --profile web add dsh-report-ledger
 EOF
 )"
   target="$(git rev-parse "${tag}^{}")"
-  created="$(curl -sS --fail-with-body -X POST "${api}/releases" \
+  created="$("${CURL[@]}" -X POST "${api}/releases" \
     --data-urlencode "access_token=${GITEE_TOKEN}" \
     --data-urlencode "tag_name=${tag}" \
     --data-urlencode "name=${tag}" \
@@ -95,11 +100,12 @@ else
   echo "reusing Gitee release ${tag} (id ${id})"
 fi
 
-release="$(curl -sS --fail-with-body "${api}/releases/${id}?access_token=${GITEE_TOKEN}")"
+release="$("${CURL[@]}" "${api}/releases/${id}?access_token=${GITEE_TOKEN}")"
 if [[ "$(printf '%s' "$release" | json_has_asset "$asset_name")" == "yes" ]]; then
   echo "asset ${asset_name} is already attached"
 else
-  curl -sS --fail-with-body -X POST "${api}/releases/${id}/attach_files?access_token=${GITEE_TOKEN}" \
+  curl -sS --fail-with-body --connect-timeout 20 --max-time 180 \
+    -X POST "${api}/releases/${id}/attach_files?access_token=${GITEE_TOKEN}" \
     -F "file=@${tgz}"
   echo "attached ${asset_name} to ${tag}"
 fi

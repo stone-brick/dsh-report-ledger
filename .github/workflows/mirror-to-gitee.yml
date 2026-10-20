@@ -110,6 +110,7 @@ jobs:
           echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
 
       - name: Build release tarball from the tag
+        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
         run: |
           tag="${{ steps.release.outputs.tag }}"
           version="${{ steps.release.outputs.version }}"
@@ -120,6 +121,7 @@ jobs:
           test -f "$RUNNER_TEMP/dsh-report-ledger-${version}.tgz"
 
       - name: Create Gitee release and attach tarball
+        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
         env:
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
         run: |
