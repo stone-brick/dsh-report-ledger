@@ -76,6 +76,10 @@ check('protocol tells the agent an absent recipient is not a refusal',
   PROTOCOL.includes('收件方不在线不是错误'))
 check('protocol says untracked word-of-mouth never enters the path',
   PROTOCOL.includes('绕过工具的口信不会进入路径'))
+check('protocol announces six behavior conventions', PROTOCOL.includes('六条行为约定'))
+check('protocol says to reconcile after an interruption', PROTOCOL.includes('先对账再继续'))
+check('protocol says not to redo completed work', PROTOCOL.includes('不要从头重做'))
+check('protocol says to verify a retried action already landed', PROTOCOL.includes('是否已经落地'))
 check('the shared contract points at peer_list instead of guessing',
   rootText.includes('peer_list'))
 check('the shared contract frames peer_start as a partner, not a subordinate',

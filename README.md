@@ -31,8 +31,8 @@ dsh plugin --profile web remove dsh-report-ledger
 
 ```sh
 # 1) 下载发行版附件（预构建产物，不需要构建工具链）
-#    https://gitee.com/stone_zhan/dsh-report-ledger/releases/download/v0.2.1/dsh-report-ledger-0.2.1.tgz
-dsh plugin --profile web add ./dsh-report-ledger-0.2.1.tgz
+#    https://gitee.com/stone_zhan/dsh-report-ledger/releases/download/v0.2.2/dsh-report-ledger-0.2.2.tgz
+dsh plugin --profile web add ./dsh-report-ledger-0.2.2.tgz
 
 # 2) 或直接从 Gitee 安装（安装时自动构建，约 15 秒）
 dsh plugin --profile web add git+https://gitee.com/stone_zhan/dsh-report-ledger.git
@@ -298,7 +298,7 @@ worktree:
 | 协议 | `plugin:report-ledger` / 200 | 静态字符串 | 对所有 agent **逐字节相同**，因此是各 scope 里稳定的提示词前缀（KV cache 友好） |
 | 伙伴契约 | `plugin:report-ledger:partnership` / 201 | 按 assembly 求值的函数 | 契约要对两种读者说不同的话 |
 
-**协议段**说明账本是什么、各工具做什么（十四个；工作区功能关闭时不暴露 `report_lease`），以及会改变行为的约定：收件方不在线不是错误（投递会被持有）；路径由账本自动记录，但每一步都必须经工具完成；工作区若启用，独立的是哪些、共享的是哪些。协议段为了保持前缀逐字节相同而**不按部署改写**，工作区的"有/没有"这一部署差异写在下面的伙伴契约段里。
+**协议段**说明账本是什么、各工具做什么（十四个；工作区功能关闭时不暴露 `report_lease`），以及会改变行为的约定：收件方不在线不是错误（投递会被持有）；路径由账本自动记录，但每一步都必须经工具完成；工作区若启用，独立的是哪些、共享的是哪些；**会话或网络中断后先对账再继续**——用 `report_list` / `peer_list` 找到最后落下的跳、谁已交付、谁还在线，以汇报正文/任务标签/传递路径为检查点，不从头重做，重试前先确认动作是否已经落地。协议段为了保持前缀逐字节相同而**不按部署改写**，工作区的"有/没有"这一部署差异写在下面的伙伴契约段里。
 
 **伙伴契约段**分两种读者：
 
@@ -680,7 +680,7 @@ DSH 的委派层拒绝非相邻通信，源码原话是"其他代理、祖先、
 
 ```sh
 pnpm build        # 产出 lib/index.js（host 半）与 lib/client.js（client 半）
-pnpm test         # 十套确定性检查共 883 项断言：账本内核与生命周期 135 + 提示词角色分流 58
+pnpm test         # 十套确定性检查共 887 项断言：账本内核与生命周期 135 + 提示词角色分流 62
                   # + 时间线装配与路由守卫 77
                   # + 时间线模型（筛选/线程/空状态/身份/正文/围栏）102
                   # + 卡片画布模型（分档尺寸/帧装箱/收件口/沟槽/剔除/视口/拾取/填满宽度）109
@@ -835,7 +835,7 @@ release 创建/上传失败时，先 `gh workflow run mirror-to-gitee.yml --ref 
 
 ```sh
 curl -X POST "https://gitee.com/api/v5/repos/stone_zhan/dsh-report-ledger/releases/<release_id>/attach_files?access_token=<token>" \
-     -F "file=@dsh-report-ledger-0.2.1.tgz"
+     -F "file=@dsh-report-ledger-0.2.2.tgz"
 ```
 
 ## 已知限制
