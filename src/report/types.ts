@@ -40,7 +40,9 @@ export type ReportStatus = (typeof REPORT_STATUSES)[number]
  * `reclaimed` records that the ledger cleared a checkout away — whether to stay
  * within its retained budget or because the owner asked for it at closing time;
  * `amended` records a correction to the digest or the body; `closed` concludes
- * the matter, and `reopened` records that fresh activity brought it back to life.
+ * the matter, and `reopened` records that fresh activity brought it back to life;
+ * `transferred` moves one unpaid hand-off from the session that owed it to
+ * another, without ever claiming it was delivered.
  *
  * Declared as a value and derived into a type on purpose. The parser validates
  * each record against this list and **drops** one it does not recognize, so a
@@ -66,6 +68,7 @@ export const HOP_ACTIONS = [
   'amended',
   'closed',
   'reopened',
+  'transferred',
 ] as const
 
 /** What happened in one hop. */
@@ -81,7 +84,13 @@ export interface RouteHop {
   readonly actorName?: string
   /** What happened. */
   readonly action: HopAction
-  /** Session id the report travelled from, when the hop is a transfer. */
+  /**
+   * Session id the report travelled from, when the hop is a transfer.
+   *
+   * For a `transferred` hop it is the session whose obligation ENDS: the one that
+   * was owed the hand-off and handed it on. For `sent`/`forwarded`-style hops it is
+   * the sender the report travelled from.
+   */
   readonly from?: string
   /** Session ids the hop addressed (empty for a self-directed hop such as `authored`). */
   readonly to: readonly string[]

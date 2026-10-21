@@ -1,10 +1,13 @@
 /**
  * The model-facing tools of the report ledger.
  *
- * Thirteen tools are registered by default and fourteen when the worktree
+ * Fifteen tools are registered by default and sixteen when the worktree
  * feature is on: author, co-author, address, copy, forward, read, list,
  * acknowledge, amend, close and release, plus discovery (peer_list) and creation
- * (peer_start) — and report_lease, which exists only with the feature. The
+ * (peer_start) — and report_lease, which exists only with the feature.
+ * `report_transfer` and `report_handover` are the retirement half: a hand-off that
+ * would otherwise stay owed forever, and the act of moving a departing session's
+ * assets to a successor. The
  * report_* tools each record a hop, so the transfer path is a by-product of
  * normal use rather than a separate discipline the model has to remember; the
  * two peer_* tools read and create sessions and leave the ledger alone.
@@ -13,6 +16,9 @@
  */
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { assetsOf, mentions, type SessionAssets } from './assets.ts'
+import { listReports, readHops } from './ledger.ts'
+import type { ReportFrontMatter, RouteHop } from './types.ts'
 import type { WorktreeRuntime } from './allocate.ts'
 import type { PeerService } from './peer.ts'
 import { DEFAULT_RECEIPT_MS, type PeerReceipt, type WorkspaceRegistration } from './peer.ts'
@@ -90,6 +96,41 @@ function renderWorktreeOutcome(outcome: WorktreeOutcome | undefined, canRemove: 
       : 'working tree kept'
   }
   return `working tree NOT removed — git refused: ${outcome.detail ?? 'unknown reason'}`
+}
+
+/**
+ * Read every report that could concern one session, with its route.
+ *
+ * The digest decides which reports can matter ({@link mentions}); the hop stream
+ * decides what of it is still owed or held. Reading hops for the whole ledger
+ * would make a handover proportional to the ledger's history rather than to the
+ * assets being handed over.
+ * @param session - the session whose assets are wanted.
+ * @returns its owned open reports, the checkouts among them, and what it is owed.
+ */
+async function assetsFor(session: string): Promise<SessionAssets> {
+  const pieces: { front: ReportFrontMatter; hops: readonly RouteHop[] }[] = []
+  for (const front of await listReports()) {
+    if (!mentions(front, session)) continue
+    pieces.push({ front, hops: await readHops(front.report) })
+  }
+  return assetsOf(pieces, session)
+}
+
+/** The message of a thrown value, for a report line. */
+function reasonOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * One line per asset a handover left untouched, so the caller is never told a
+ * partial success was complete.
+ * @param problems - collected failure lines.
+ * @returns the rendering, or undefined when there were none.
+ */
+function renderProblems(problems: readonly string[]): string | undefined {
+  if (problems.length === 0) return undefined
+  return `problems (${problems.length}):\n${problems.map((line) => `  ${line}`).join('\n')}`
 }
 
 /** The slice of a tool execution these tools read. */
@@ -501,6 +542,187 @@ export function registerReportTools(
       },
     })))
   }
+
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'report_transfer',
+    description: 'Move one hand-off the ledger is still holding from the session that owes it to another session. Use it when a recipient will never come back and the obligation must not sit unpaid forever: the delivery is still owed afterwards, just by someone else, and the transfer is recorded as a hop so the path shows both the session that handed it on and the one that took it. It is NOT an arrival — nobody has received anything yet — and it does not invent an obligation that the path does not already hold. Authority: the report\'s owners, or the session that is currently owed the hand-off (nobody else can pre-empt a delivery that already arrived).',
+    parameters: {
+      report: { type: 'string', required: true, description: 'Report id whose outstanding hand-off should move.' },
+      from: { type: 'string', required: true, description: 'The session that currently owes the hand-off — the one listed as still owed.' },
+      to: { type: 'string', required: true, description: 'The session that takes the obligation over.' },
+      note: { type: 'string', description: 'Short note recorded on the hop, e.g. why it is being moved.' },
+    },
+    output: stringOutput,
+    execute: async (args, exec) => {
+      const input = args as { report: string; from: string; to: string; note?: string }
+      const result = await service.transfer(input.report, actorOf(exec as ExecLike), input.from, input.to, input.note)
+      return [
+        renderMutation(result.front, result.outcomes),
+        `moved ${input.report}'s hand-off: ${input.from} no longer owes it, ${input.to} does — nobody has received it yet`,
+      ].join('\n')
+    },
+  })))
+
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'report_handover',
+    description: 'Hand a session\'s ledger assets to a successor, as one recorded act, when that session is retiring or has already gone. It first enumerates what the session holds — open reports it owns, checkouts its ownership is keeping alive, and hand-offs it was addressed with but never received — then moves what it can and reports exactly what it left. Two modes, chosen by who calls it: when SOURCE is the caller, the departing session performs the handover (it may close the reports it lists in `close`, transfer every unpaid hand-off, and release its checkout claims; the successor then claims or continues). When SOURCE is another session, the caller is the successor taking over: it becomes a co-author of each of that session\'s open reports — co-authorship is the only way authority is acquired here, and it is always a recorded hop — and then moves the unpaid hand-offs it can. Either way it records one `task: handover` report listing what was found and what was done, so a retirement is a fact in the ledger rather than an absence. Checkouts are never deleted: a released claim leaves the directory on disk exactly as it was.',
+    parameters: {
+      successor: { type: 'string', required: true, description: 'Session id that takes the assets over.' },
+      source: { type: 'string', description: 'Session being retired; defaults to the caller. Pass it to take over a session that is already gone.' },
+      close: { type: 'array', items: { type: 'string' }, description: 'Report ids the departing session concludes as finished (retire mode only). Anything not listed stays open for the successor.' },
+      checkouts: { type: 'string', enum: ['release', 'keep'], description: 'What a retiring session does with the checkouts it still holds. release (the default) frees the branch so the successor can claim it; keep leaves the claim in place. The directory is never removed either way.' },
+    },
+    output: stringOutput,
+    execute: async (args, exec) => {
+      const input = args as { successor: string; source?: string; close?: string[]; checkouts?: 'release' | 'keep' }
+      const actor = actorOf(exec as ExecLike)
+      const successor = input.successor.trim()
+      if (successor === '') throw new Error('report-ledger: report_handover needs a successor session id')
+      const source = input.source?.trim() ?? actor
+      if (source === '') throw new Error('report-ledger: report_handover needs a source session id')
+      if (successor === source) {
+        throw new Error('report-ledger: a handover needs two sessions — the one handing over and the one taking over')
+      }
+      const retiring = source === actor
+      const assets = await assetsFor(source)
+      const done: string[] = []
+      const problems: string[] = []
+      const closedNow = new Set<string>()
+
+      if (retiring) {
+        for (const id of input.close ?? []) {
+          try {
+            await service.close(id, actor, `closed during a handover to ${successor}`)
+            closedNow.add(id)
+            done.push(`closed ${id}`)
+          } catch (error) {
+            problems.push(`could not close ${id}: ${reasonOf(error)}`)
+          }
+        }
+        for (const owed of assets.owed) {
+          if (owed.status === 'closed') {
+            problems.push(
+              `${owed.report} is closed but still owes a delivery to ${source}; moving it would reopen the report — `
+              + 'decide that by hand with report_transfer if it is really unfinished',
+            )
+            continue
+          }
+          try {
+            await service.transfer(owed.report, actor, source, successor, `handover: ${source} -> ${successor}`)
+            done.push(`moved ${owed.report}'s unpaid hand-off to ${successor}`)
+          } catch (error) {
+            problems.push(`could not move ${owed.report}'s hand-off: ${reasonOf(error)}`)
+          }
+        }
+        if ((input.checkouts ?? 'release') === 'release') {
+          for (const id of assets.checkouts) {
+            try {
+              await service.release(id, actor, 'claim released during a handover')
+              done.push(`released ${id}'s claim (the checkout stays on disk for ${successor} to claim)`)
+            } catch (error) {
+              problems.push(`could not release ${id}'s claim: ${reasonOf(error)}`)
+            }
+          }
+        }
+      } else {
+        // Taking over a session that can no longer act. Authority is acquired the
+        // only way this ledger allows — by contributing, which is a recorded hop —
+        // so the takeover is visible in every report it touches.
+        for (const id of assets.owned) {
+          try {
+            await service.contribute(
+              id,
+              actor,
+              `### handover\n\n${source} is being retired. ${actor} takes this report over.`,
+              `handover: ${source} -> ${actor}`,
+            )
+            done.push(`became a co-author of ${id}`)
+          } catch (error) {
+            problems.push(`could not take over ${id}: ${reasonOf(error)}`)
+          }
+        }
+        for (const owed of assets.owed) {
+          if (owed.status === 'closed') continue
+          try {
+            await service.transfer(owed.report, actor, source, actor, `handover: ${source} -> ${actor}`)
+            done.push(`moved ${owed.report}'s unpaid hand-off to ${actor}`)
+          } catch (error) {
+            // Deliberately not routed around: a hand-off on a report this session
+            // does not own is the owners' to move, and saying so is more useful
+            // than acquiring co-authorship just to redirect a digest.
+            problems.push(`could not move ${owed.report}'s hand-off: ${reasonOf(error)}`)
+          }
+        }
+      }
+
+      // Recomputed rather than inferred: the mutations above are the truth, and a
+      // "still open" list assembled from the pre-state would contradict them.
+      const after = await assetsFor(source)
+      const left: string[] = []
+      for (const id of after.owned) {
+        if (closedNow.has(id)) continue
+        left.push(retiring
+          ? `${id} stays open; ${successor} must contribute to it before it can close or amend it`
+          : `${id} is co-owned by ${actor} now; close it when the work is finished`)
+      }
+      if (after.checkouts.length > 0) {
+        left.push(`still holding a claim: ${after.checkouts.join(', ')} — ${
+          retiring
+            ? 'left in place on purpose (checkouts:"keep")'
+            : 'release it with report_release, or report_lease it to keep working in that checkout'
+        }`)
+      }
+      if (after.owed.length > 0) {
+        left.push(`still owed to ${source}: ${after.owed.map((owed) => owed.report).join(', ')}`)
+      }
+
+      const subject = `handover ${source} -> ${successor}`
+      const body = [
+        '## handover',
+        '',
+        `- from: ${source}`,
+        `- to: ${successor}`,
+        `- mode: ${retiring ? 'retire — the departing session performed the handover' : 'takeover — the successor performed it'}`,
+        `- run by: ${actor}`,
+        '',
+        '### assets found',
+        `- open reports it owned: ${assets.owned.length === 0 ? '(none)' : assets.owned.join(', ')}`,
+        `- checkouts it was holding: ${assets.checkouts.length === 0 ? '(none)' : assets.checkouts.join(', ')}`,
+        `- hand-offs it never received: ${assets.owed.length === 0 ? '(none)' : assets.owed.map((owed) => `${owed.report} (${owed.status})`).join(', ')}`,
+        '',
+        '### performed',
+        ...(done.length === 0 ? ['- nothing needed moving'] : done.map((line) => `- ${line}`)),
+        '',
+        '### left for the successor',
+        ...(left.length === 0 ? ['- nothing'] : left.map((line) => `- ${line}`)),
+        ...(problems.length === 0 ? [] : ['', '### problems', ...problems.map((line) => `- ${line}`)]),
+      ].join('\n')
+
+      let recorded: string | undefined
+      try {
+        const authored = await service.author({
+          subject,
+          body,
+          actor,
+          ...(retiring ? { to: [successor] } : {}),
+          task: 'handover',
+          artifacts: [...new Set([...assets.owned, ...assets.owed.map((owed) => owed.report), ...assets.checkouts])],
+        })
+        recorded = authored.front.report
+      } catch (error) {
+        problems.push(`the handover itself could not be recorded: ${reasonOf(error)}`)
+      }
+
+      return [
+        `handover ${source} -> ${successor} (${retiring ? 'retire' : 'takeover'})`,
+        `assets: ${assets.owned.length} open report(s), ${assets.checkouts.length} checkout claim(s), ${assets.owed.length} unpaid hand-off(s)`,
+        done.length === 0 ? 'moved: nothing' : `moved (${done.length}):\n${done.map((line) => `  ${line}`).join('\n')}`,
+        left.length === 0 ? 'left: nothing' : `left (${left.length}):\n${left.map((line) => `  ${line}`).join('\n')}`,
+        renderProblems(problems),
+        recorded === undefined ? 'NOT recorded: no handover report was written' : `recorded: ${recorded} (task "handover")`,
+      ].filter((line): line is string => line !== undefined).join('\n')
+    },
+  })))
 
   disposers.push(ctx.tools.register(defineTool({
     name: 'report_amend',

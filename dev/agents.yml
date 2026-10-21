@@ -1,0 +1,32 @@
+# Developer-mode roster — read only when the composition row sets `devMode: true`.
+#
+# Each entry becomes a preset in the picker, plus a prompt section that only that
+# preset receives. `promptFile` is resolved against this file's directory.
+#
+# Editing this file rebuilds nothing: it is data, not code. Call `dev_agents_reload`
+# (a tool that exists only in developer mode) to apply the difference to the
+# picker. A row that cannot be used is skipped and reported — the rest still
+# applies, so one typo never disables the whole roster.
+#
+# Retirement: add `retired: true` to an entry instead of deleting it. A retired
+# entry is no longer selectable (no new session can start on it), but its live
+# sessions keep receiving their prompt plus a wind-down instruction telling them
+# to hand their reports, checkouts and unpaid hand-offs over with
+# `report_handover`. Deleting the row instead is not a retirement: the live
+# session's prompt would go empty without it ever learning why.
+#
+# This file is not in the published package (`package.json` `files` excludes it),
+# so a deployment that installs the tarball can never see these agents.
+
+agents:
+  - id: report-ledger:dev/probe
+    name: 开发探查者
+    description: 真实使用账本，把摩擦写成可复现的证据
+    order: 10
+    promptFile: prompts/probe.md
+
+  - id: report-ledger:dev/verifier
+    name: 开发复测者
+    description: 只复测候选改动与基线的差异，不提方案
+    order: 20
+    promptFile: prompts/verifier.md

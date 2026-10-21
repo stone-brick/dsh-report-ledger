@@ -55,6 +55,7 @@ export const zh = {
   'hop.amended': '修正',
   'hop.closed': '结案',
   'hop.reopened': '重开',
+  'hop.transferred': '转交',
   'filter.all': '全部',
   'filter.open': '进行中',
   'filter.acked': '已回执',
@@ -137,6 +138,7 @@ export const en: Record<keyof typeof zh, string> = {
   'hop.amended': 'amended',
   'hop.closed': 'closed',
   'hop.reopened': 'reopened',
+  'hop.transferred': 'transferred',
   'filter.all': 'All',
   'filter.open': 'Open',
   'filter.acked': 'Acked',
@@ -251,4 +253,5 @@ export const HOP_LABEL: Record<HopAction, ReportLedgerKey> = {
   amended: 'hop.amended',
   closed: 'hop.closed',
   reopened: 'hop.reopened',
+  transferred: 'hop.transferred',
 }

@@ -275,6 +275,13 @@ function projectRoute(hops: readonly RouteHop[]): Pick<ReportFrontMatter, 'to' |
     if (hop.action === 'cc' || hop.action === 'copied') {
       for (const target of hop.to) if (!cc.includes(target)) cc.push(target)
     }
+    // A transfer addresses the report to the session that took the obligation
+    // over. The session that handed it on keeps its place in `to`: it WAS
+    // addressed, and who has held this report is not something a later hop may
+    // erase from the digest.
+    if (hop.action === 'transferred') {
+      for (const target of hop.to) if (!to.includes(target)) to.push(target)
+    }
   }
   const tail = hops.length === 0 ? undefined : hops[hops.length - 1]
   return {
@@ -608,6 +615,69 @@ export class ReportService {
         ...(note === undefined ? {} : { note }),
       })
       const outcomes = await this.#deliver(front, targets, 'wakeup', actor)
+      return { front: (await this.#load(report)).front, outcomes }
+    })
+  }
+
+  /**
+   * Move one unpaid hand-off from the session that owes it to another.
+   *
+   * This is the one gap a hand-off cannot close by itself. A delivery to a session
+   * that will never come back stays owed forever — pending is derived from the
+   * audit trail, and nothing in it can be unsaid. A transfer is how the ledger
+   * records the truthful alternative: the obligation still exists, it is owed by
+   * someone else now. It is deliberately NOT recorded as an arrival, so no reader
+   * can mistake it for "delivered".
+   *
+   * Authority is narrower than sending, and for a reason. An owner may move an
+   * outstanding hand-off (it is the report's dispatch to direct), and the session
+   * that is currently owed it may hand its own obligation on (it is the party that
+   * cannot discharge it). Neither may pre-empt a delivery that already arrived.
+   * @param report - report identifier.
+   * @param actor - acting session id.
+   * @param from - the session that currently owes the hand-off.
+   * @param to - the session that takes it over.
+   * @param note - optional hop note.
+   * @returns the refreshed digest and delivery outcomes.
+   */
+  async transfer(
+    report: string,
+    actor: string,
+    from: string,
+    to: string,
+    note?: string,
+  ): Promise<MutationResult> {
+    if (from.trim() === '' || to.trim() === '') throw new Error('report-ledger: a transfer needs both sessions')
+    if (from === to) throw new Error('report-ledger: a transfer to the same session would not move anything')
+    return this.#withLock(report, async () => {
+      const current = await this.#load(report)
+      const hops = await readHops(report)
+      const owed = pendingTargets(hops)
+      if (!owed.includes(from)) {
+        throw new Error(
+          `report-ledger: ${report} owes nothing to ${from}; a transfer moves an outstanding hand-off, `
+          + `and the sessions still owed it are: ${owed.length === 0 ? '(none)' : owed.join(', ')}`,
+        )
+      }
+      if (!ReportService.owns(current.front, actor) && actor !== from) {
+        throw new Error(
+          `report-ledger: ${actor} may not transfer ${report}'s hand-off from ${from} — moving it is either the `
+          + `owner's act or the act of the session that owes it`,
+        )
+      }
+      // The obligation keeps the wake policy it was created with: a quiet copy
+      // stays quiet, an addressed hand-off keeps waking.
+      const mode = pendingMode(hops, from)
+      await this.#reopenIfClosed(report, actor)
+      const front = await this.#record(report, {
+        at: Date.now(),
+        actor,
+        action: 'transferred',
+        from,
+        to: [to],
+        ...(note === undefined ? {} : { note }),
+      })
+      const outcomes = await this.#deliver(front, [to], mode, actor)
       return { front: (await this.#load(report)).front, outcomes }
     })
   }

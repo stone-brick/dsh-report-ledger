@@ -51,6 +51,8 @@ import { pendingTargets } from './report/deliver.ts'
 import { PARTNERSHIP_SECTION_ORDER, PROTOCOL, SECTION_ORDER, partnershipText } from './report/guidance.ts'
 import { listReports, readHops, readReport, reportPath } from './report/ledger.ts'
 import { resolveWorktree, type WorktreeConfig, type WorktreeRuntime } from './report/allocate.ts'
+import { installDevMode } from './report/dev/index.ts'
+import { devModeEnabled } from './report/dev/roster.ts'
 import { buildWorktreeReport } from './report/maintenance.ts'
 import { DEFAULT_MAX_PEERS, PeerService, type PeerHost, type PeerReceipt, type WorkspaceRegistration } from './report/peer.ts'
 import { REPORT_PATH, TIMELINE_PATH, WORKTREES_PATH, createReportHandler, createTimelineHandler, createWorktreesHandler, type ReportDetail } from './report/route.ts'
@@ -65,6 +67,19 @@ export interface Config {
    * Set false to keep prompts untouched.
    */
   announceToAgent?: boolean
+  /**
+   * Developer mode: publish the agents listed in the checkout's
+   * `dev/agents.yml` into the preset picker, and give only those agents an extra
+   * prompt section explaining what they are measuring.
+   *
+   * Off by default, and the field is strict: only the literal boolean `true`
+   * enables it. With it off nothing is registered at all — no preset, no section,
+   * no tool — so a published deployment's prompt stays byte-identical to what
+   * shipped. Turn it on in the profile that runs the plugin from a source
+   * checkout, never in a deployment that installed the package.
+   * @default false
+   */
+  devMode?: boolean
   /**
    * Cap on independent peer sessions one session may start. Peer creation is the
    * one capability here that adds live agents rather than records, so it is
@@ -845,6 +860,17 @@ export function apply(ctx: Context, config?: Config): void {
       })
     }
   })
+
+  // Developer mode, when the composition row asks for it.
+  //
+  // Placed before the `announceToAgent` early return on purpose: the switch is
+  // independent of whether the ledger announces itself. Everything it installs is
+  // gated inside on a preset roster being composed, and with the switch off no
+  // registration happens at all — which is what keeps a published deployment's
+  // prompt byte-identical.
+  if (devModeEnabled(config)) {
+    ctx.effect(() => installDevMode(ctx), 'report-ledger: developer mode')
+  }
 
   if ((config?.announceToAgent ?? true) === false) return
 

@@ -173,6 +173,14 @@ export function pendingTargets(hops: readonly RouteHop[]): string[] {
     if (hop.action === 'sent' || hop.action === 'cc' || hop.action === 'forwarded' || hop.action === 'copied') {
       for (const target of hop.to) owed.add(target)
     }
+    // A transfer discharges the obligation of the session that handed it on and
+    // creates one for the session that took it. It is deliberately NOT recorded as
+    // an arrival: nobody has received anything, so a delivery is still owed — just
+    // by someone else.
+    if (hop.action === 'transferred') {
+      if (hop.from !== undefined) owed.delete(hop.from)
+      for (const target of hop.to) owed.add(target)
+    }
     if (hop.action === 'delivered') {
       for (const target of hop.to) owed.delete(target)
     }
@@ -198,6 +206,13 @@ export function pendingTargets(hops: readonly RouteHop[]): string[] {
 export function pendingMode(hops: readonly RouteHop[], target: string): DeliveryMode {
   let addressed = false
   for (const hop of hops) {
+    // The transfer carries the wake policy with the obligation: the session that
+    // owes it now is owed exactly what the previous one was.
+    if (hop.action === 'transferred') {
+      if (hop.from === target) addressed = false
+      if (hop.to.includes(target)) addressed = true
+      continue
+    }
     if (!hop.to.includes(target)) continue
     if (hop.action === 'delivered') addressed = false
     else if (hop.action === 'sent' || hop.action === 'forwarded') addressed = true
