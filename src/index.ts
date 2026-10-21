@@ -838,10 +838,15 @@ export function apply(ctx: Context, config?: Config): void {
   // ledger queued before this row mounted has no wake-up waiting for it: the
   // recipient is already resident, is never announced again, and the pending set
   // would sit there until its next resume. One deferred sweep closes the gap. It
-  // is deferred to a microtask so plugin load never waits on ledger I/O, and each
-  // session is flushed independently — one failing report must not starve the
-  // rest. The sweep is idempotent: pending is derived from the transfer path, so
-  // a session with nothing queued costs one pass over the digests.
+  // is deferred to a microtask so plugin load never waits on ledger I/O.
+  //
+  // The sweep is ONE ledger pass for every live session rather than one pass per
+  // session. The reports are the same for all of them; only the set of waiting
+  // sessions differs. A per-session sweep on a long-lived deployment therefore
+  // cost `sessions × reports` document reads before producing a single delivery,
+  // which is the shape that made a large ledger feel stuck. Failures are logged,
+  // never thrown, and the pass is idempotent: pending is derived from the transfer
+  // path, so a session with nothing queued costs nothing beyond the digest scan.
   queueMicrotask(() => {
     let live: readonly { readonly id: unknown }[]
     try {
@@ -852,13 +857,15 @@ export function apply(ctx: Context, config?: Config): void {
       ctx.logger?.warn?.(`report-ledger: catch-up sweep could not list live sessions: ${String(error)}`)
       return
     }
+    const sessions: string[] = []
     for (const agent of live) {
       const sessionId = String(agent.id ?? '')
-      if (sessionId === '') continue
-      void service.flushForAgent(sessionId).catch((error: unknown) => {
-        ctx.logger?.warn?.(`report-ledger: catch-up delivery to ${sessionId} failed: ${String(error)}`)
-      })
+      if (sessionId !== '') sessions.push(sessionId)
     }
+    if (sessions.length === 0) return
+    void service.flushSessions(sessions).catch((error: unknown) => {
+      ctx.logger?.warn?.(`report-ledger: catch-up delivery failed: ${String(error)}`)
+    })
   })
 
   // Developer mode, when the composition row asks for it.

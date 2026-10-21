@@ -18,13 +18,12 @@
  * @module dsh-report-ledger/report/service
  */
 
-import { appendFile } from 'node:fs/promises'
 import { basename } from 'node:path'
 import { planAllocation, reclaimRefusal, type ReclaimedLease, type StaleBinding, type WorktreeSettings } from './allocate.ts'
 import type { AgentLike } from './deliver.ts'
 import { deliver, pendingMode, pendingTargets, type DeliveryOutcome } from './deliver.ts'
 import { evaluateLease, leaseState } from './lease.ts'
-import { allocateId, appendHop, bodyStartLine, discardUnwrittenId, isValidReportId, listReports, readHops, readReport, reportExists, reportPath, writeReport } from './ledger.ts'
+import { allocateId, appendHop, appendReportBody, bodyStartLine, discardUnwrittenId, isValidReportId, listReports, readHops, readReport, reportExists, reportPath, writeReport } from './ledger.ts'
 import {
   addWorktree, classifyGitRefusal, compareKey, headOf, inspectCheckout, isWorktreeClean, removeWorktree, resolveRepo,
 } from './worktree.ts'
@@ -582,7 +581,7 @@ export class ReportService {
       await this.#reopenIfClosed(report, actor)
       // Append to the body rather than rewriting it: contributions from several
       // agents must not overwrite one another.
-      await appendFile(reportPath(report), `${header}${text}\n`, 'utf8')
+      await appendReportBody(report, `${header}${text}\n`)
       const front = await this.#record(report, {
         at: Date.now(),
         actor,
@@ -1422,7 +1421,7 @@ export class ReportService {
         } else {
           const name = await this.#host.describe(actor)
           const header = `\n\n---\n\n### amendment by ${name ?? actor} at ${new Date().toISOString()}\n\n`
-          await appendFile(reportPath(report), `${header}${patch.body.trim()}\n`, 'utf8')
+          await appendReportBody(report, `${header}${patch.body.trim()}\n`)
         }
       }
 
@@ -1455,27 +1454,66 @@ export class ReportService {
    * @returns the deliveries that succeeded.
    */
   async flushForAgent(sessionId: string): Promise<readonly DeliveryOutcome[]> {
+    return await this.flushSessions([sessionId])
+  }
+
+  /**
+   * Deliver every held hand-off owed to any of these sessions, in one ledger pass.
+   *
+   * The pass is shared on purpose. A delivery sweep used to be per session: the
+   * pump ran for each resident session at load and for each session created
+   * afterwards, and every run walked the whole ledger reading each document and
+   * each transfer path. That is `sessions × reports` file reads — on a twenty
+   * session, two hundred report ledger, eight thousand opens for work that is
+   * entirely about a handful of owed hand-offs. Reading the ledger once and
+   * answering for every waiting session costs one walk no matter how many of them
+   * there are.
+   *
+   * Correctness is unchanged, and deliberately so:
+   *
+   *  - pending is still derived from the hop stream and nothing else, so a
+   *    hand-edited or half-written document cannot invent or lose an obligation;
+   *  - each report is still delivered under its own writer lock, and the hop
+   *    stream is re-read inside that lock, so a hand-off answered between the scan
+   *    and the delivery is not delivered twice;
+   *  - each report still fails in isolation, because `agent/created` fires once
+   *    and one malformed record must not abandon every later hand-off.
+   * @param sessions - the sessions that just became resident.
+   * @returns the deliveries that succeeded.
+   * @throws an `AggregateError` when any report failed, naming how many.
+   */
+  async flushSessions(sessions: readonly string[]): Promise<readonly DeliveryOutcome[]> {
+    const wanted = new Set(sessions.filter((session) => session !== ''))
     const outcomes: DeliveryOutcome[] = []
+    if (wanted.size === 0) return outcomes
     const errors: unknown[] = []
     for (const digest of await listReports()) {
       const report = digest.report
-      // Each report is flushed under its own writer lock and in isolation:
-      //  - the lock closes the only third writer besides the tools. Without it,
-      //    `#sync` (read the document, then atomically rewrite it) can interleave
-      //    with `contribute`'s append and overwrite the appended section with the
-      //    stale body it read — a silent loss that the `contributed` hop would
-      //    still claim had happened.
-      //  - isolation matters because `agent/created` fires once: one malformed
-      //    report must not abandon every later hand-off owed to this session.
+      // The lock closes the only third writer besides the tools. Without it,
+      // `#sync` (read the document, then atomically rewrite it) can interleave
+      // with `contribute`'s append and overwrite the appended section with the
+      // stale body it read — a silent loss that the `contributed` hop would
+      // still claim had happened.
       try {
+        // Checked before taking the lock: a report with nobody to deliver to is
+        // by far the common case, and a mutex per report per sweep would serialize
+        // the pump against every concurrent mutation for no reason.
+        const waiting = pendingTargets(await readHops(report)).filter((target) => wanted.has(target))
+        if (waiting.length === 0) continue
         await this.#withLock(report, async () => {
           const current = await readReport(report)
           if (current === undefined) return
           const hops = await readHops(report)
-          if (!pendingTargets(hops).includes(sessionId)) return
-          // The latest unanswered hand-off decides whether to wake: a report
-          // copied to this session earlier must not downgrade a later re-send.
-          outcomes.push(...await this.#deliver(current.front, [sessionId], pendingMode(hops, sessionId), 'report-ledger'))
+          const still = pendingTargets(hops).filter((target) => wanted.has(target))
+          if (still.length === 0) return
+          // A wake policy is decided per window, so the targets of one report can
+          // want different modes: an unanswered addressed hand-off wakes, a copy
+          // that is owed on its own stays quiet. Delivering both as one mode would
+          // either lose a wake or disturb a session for a carbon copy.
+          const wake = still.filter((target) => pendingMode(hops, target) === 'wakeup')
+          const quiet = still.filter((target) => pendingMode(hops, target) === 'quiet')
+          if (wake.length > 0) outcomes.push(...await this.#deliver(current.front, wake, 'wakeup', 'report-ledger'))
+          if (quiet.length > 0) outcomes.push(...await this.#deliver(current.front, quiet, 'quiet', 'report-ledger'))
         })
       } catch (error) {
         errors.push(error)
@@ -1484,7 +1522,7 @@ export class ReportService {
     if (errors.length > 0) {
       throw new AggregateError(
         errors,
-        `report-ledger: deferred delivery to ${sessionId} failed for ${errors.length} report(s)`,
+        `report-ledger: deferred delivery for ${wanted.size} session(s) failed for ${errors.length} report(s)`,
       )
     }
     return outcomes

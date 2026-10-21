@@ -31,31 +31,77 @@ export interface ParsedDocument {
 }
 
 /**
+ * Normalize a document's BOM and line endings before any line-oriented parse.
+ *
+ * A Windows editor saves CRLF by default, and the YAML parser refuses a document
+ * whose last front-matter line is terminated by a lone `\r` — which is exactly
+ * what the block looks like once it has been joined back together. Getting this
+ * wrong made a hand-edited report invisible rather than merely misformatted.
+ * @param raw - the file text.
+ * @returns the same text with a leading BOM removed and every CRLF/CR read as a newline.
+ */
+function normalizeDocument(raw: string): string {
+  return (raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw).replace(/\r\n?/g, '\n')
+}
+
+/**
+ * Offset just past a document's closing fence line.
+ *
+ * The opening fence must be the very first line, so an indented `---` inside a
+ * body can never be mistaken for metadata.
+ *
+ * `atEnd` says whether `text` is the whole document or only a prefix of it, and
+ * it decides exactly one case: a fence on the final line with no terminating
+ * newline. In a whole document that is a complete (if unusual) block a hand edit
+ * may well produce. In a prefix it is indistinguishable from a cut in the middle
+ * of a longer line, so a prefix reader must call it unterminated rather than
+ * truncate a document at a guess — the caller then falls back to a full read.
+ * @param text - a normalized document or prefix of one.
+ * @param atEnd - whether `text` is known to be the whole document.
+ * @returns the offset, or `undefined` when no complete block is present.
+ */
+function frontMatterEnd(text: string, atEnd: boolean): number | undefined {
+  if (!text.startsWith(`${FENCE}\n`)) return undefined
+  let from = FENCE.length + 1
+  for (;;) {
+    const next = text.indexOf('\n', from)
+    if (next < 0) return atEnd && text.slice(from) === FENCE ? text.length : undefined
+    if (text.slice(from, next) === FENCE) return next + 1
+    from = next + 1
+  }
+}
+
+/**
+ * Whether a document — or a bounded prefix of one — carries a front-matter block.
+ *
+ * This is what lets the listing read a digest without reading the body: the
+ * caller reads a head of the file, asks this question, and parses only when the
+ * answer is yes. A prefix whose block is not yet complete is not damage, it is a
+ * budget that was too small, and the caller's fallback is a full read.
+ * @param raw - the whole document, or a prefix containing at least its front matter.
+ * @param complete - whether `raw` is the whole document rather than a prefix.
+ * @returns true when a complete front-matter block is present.
+ */
+export function hasFrontMatter(raw: string, complete: boolean): boolean {
+  return frontMatterEnd(normalizeDocument(raw), complete) !== undefined
+}
+
+/**
  * Split a document into its YAML front matter and body.
  *
- * The opening fence must be the very first line. A BOM and CRLF line endings are
- * tolerated: both are normalized away before parsing, because a Windows editor
- * saves CRLF by default and the YAML parser refuses a document whose last line
- * is terminated by a lone `\r` — which is exactly what a CRLF file's final
- * front-matter line looks like once the block has been joined. Getting this
- * wrong made a hand-edited report invisible rather than merely misformatted.
- * Importing the fence from an indented position is not accepted, so a body that
- * happens to start with a horizontal rule is never mistaken for metadata.
+ * A BOM and CRLF line endings are tolerated (see {@link normalizeDocument}).
  * @param raw - the file text.
  * @returns the parsed mapping, the body, and the body's first line, or `undefined` when there is no front matter.
  */
 export function splitFrontMatter(raw: string): { data: Record<string, unknown>; body: string; bodyLine: number } | undefined {
-  const text = (raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw).replace(/\r\n?/g, '\n')
-  const lines = text.split('\n')
-  if (lines[0] !== FENCE) return undefined
-  let close = -1
-  for (let index = 1; index < lines.length; index++) {
-    if (lines[index] === FENCE) {
-      close = index
-      break
-    }
-  }
-  if (close < 0) return undefined
+  const text = normalizeDocument(raw)
+  const end = frontMatterEnd(text, true)
+  if (end === undefined) return undefined
+  // Drop the empty tail a terminating newline leaves behind, so the closing fence
+  // is the last entry whether or not the document ends with a newline.
+  const lines = text.slice(0, end).split('\n')
+  if (lines[lines.length - 1] === '') lines.pop()
+  const close = lines.length - 1
   const yamlText = lines.slice(1, close).join('\n')
   let parsed: unknown
   try {
@@ -70,7 +116,11 @@ export function splitFrontMatter(raw: string): { data: Record<string, unknown>; 
     return undefined
   }
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
-  const bodyLines = lines.slice(close + 1)
+  // Everything past the closing fence. `rest === ''` is a document that ends at
+  // the fence itself; splitting it would manufacture a single empty line and count
+  // it as a blank lead, which would report a body one line below where it starts.
+  const rest = text.slice(end)
+  const bodyLines = rest === '' ? [] : rest.split('\n')
   // 1-based line of the first non-blank body line, so an oversized body can be
   // resumed by line. The blank separator that `serializeReport` writes is not
   // part of the body a reader sees, hence the skip.
