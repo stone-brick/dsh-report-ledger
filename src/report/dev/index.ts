@@ -1,35 +1,27 @@
 /**
  * Developer mode — the switch-gated half that exists only while this plugin is
- * being developed.
+ * being developed, and that the harness never sees.
  *
- * A published deployment must be byte-identical to what shipped, so everything
- * here is behind one boolean and nothing is registered when it is off: no prompt
- * section, no tool, no preset. That is what makes "hidden" cheap and honest — not
- * a filter over a visible list, but an absent registration.
+ * An earlier version published these agents as harness presets. That was wrong in
+ * a way worth recording: a preset is a deployment-level fact. It appears in the
+ * preset picker next to the shipped modes, it is selectable by anyone on the
+ * machine, and it outlives the checkout that declared it — a development artifact
+ * leaking into the product's own settings. So the agents below are **the plugin's
+ * own state**:
  *
- * When it is on, the composition does two things that cannot be expressed as
- * configuration:
+ *  - they are sessions the plugin starts itself (`dev_agent_start`), through the
+ *    same peer machinery `peer_start` uses;
+ *  - which roster entry a session belongs to lives in the plugin's own file
+ *    (`$DSH_HOME/report-ledger/dev-agents.json`), not in a preset, not in a
+ *    session header;
+ *  - the prompt section routes by that binding, so a developer agent is identified
+ *    by the plugin alone.
  *
- *  1. **It publishes agents into the preset roster.** Those agents appear in the
- *     picker beside the shipped presets, which is the point: a human developing
- *     this plugin needs to be able to start one. They are registered through the
- *     same `agentPresets.register` the `@deepseek-ai/dsh-agent-preset` row itself
- *     calls, so a runtime registration is exactly as real as a YAML declaration.
- *  2. **It routes one prompt section to them and nobody else.** The section is a
- *     per-assembly provider: it reads the assembling agent's preset id and returns
- *     that roster entry's text, or `''` for every other agent. An empty section is
- *     dropped during rendering, so a normal agent's prompt does not change by a
- *     single byte.
- *
- * The roster is data in the checkout (`dev/agents.yml`), not configuration, so a
- * branch or working tree carries its own set of developer agents — which is the
- * reason this exists at all: the candidate implementation and the roster that
- * measures it travel together.
- *
- * `dev_agents_reload` reads the roster again and diffs it against what is mounted.
- * It is the only path from an edited file to a live picker: editing YAML does not
- * trigger HMR, which watches `lib/`, and pretending otherwise would leave the
- * prompt and the picker disagreeing.
+ * Nothing here is registered when `devMode` is off — no section, no tools, no
+ * file reads — so a published deployment's prompt stays byte-identical. And since
+ * the roster lives in the checkout and is excluded from the package, a deployment
+ * that installs the tarball cannot have developer agents at all, whatever its
+ * config says: **cloning the repository is the gate**.
  *
  * @module dsh-report-ledger/report/dev
  */
@@ -43,7 +35,9 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 // section provider can read the assembling session at all. Erased at build time.
 import type {} from '@deepseek-ai/dsh-agent'
 import type { AssembleContext } from '@deepseek-ai/dsh-system-prompt'
-import { listReports, readReport } from '../ledger.ts'
+import { ledgerRoot, listReports, readReport } from '../ledger.ts'
+import type { PeerService } from '../peer.ts'
+import type { ReportService } from '../service.ts'
 import {
   MAX_ARCHIVE_BYTES,
   MAX_INDEX_LINES,
@@ -57,9 +51,10 @@ import {
 } from './archive.ts'
 import {
   DEV_SECTION_ORDER,
+  parseBindings,
   parseRoster,
   promptFor,
-  signatureOf,
+  serializeBindings,
   type DevAgent,
   type RosterProblem,
 } from './roster.ts'
@@ -74,39 +69,14 @@ const ROSTER_FILE = join('dev', 'agents.yml')
 const ARCHIVE_DIR = join('dev', 'archive')
 
 /**
- * Structural face of the agent-preset registry this half needs.
+ * The plugin's own record of which sessions are developer agents.
  *
- * Deliberately local: the package that owns the registry is not a dependency of a
- * third-party plugin, and only these two methods are used. `register` is the same
- * call a YAML preset row makes; `composedPreset` is how an assembly learns which
- * preset it is running.
+ * Deliberately not a session-header field: the header's `meta` is a closed shape
+ * the harness owns, and a development artifact must not need the harness to grow a
+ * field for it. This file is plugin state, lives beside the ledger, and is the
+ * only thing that decides who gets which role prompt.
  */
-interface PresetRegistryLike {
-  register(definition: {
-    readonly id: string
-    readonly name: string
-    readonly description: string
-    readonly order: number
-    readonly plugins: readonly unknown[]
-  }): Promise<() => void | Promise<void>>
-  composedPreset(agentCtx: Context): string | undefined
-  /** Every declared preset, including ones whose composition failed to mount. */
-  list?(): Promise<readonly { readonly id: string; readonly broken?: string }[]>
-}
-
-/** What one roster sync did, for the reload tool and the log. */
-interface SyncReport {
-  readonly path: string
-  readonly added: readonly string[]
-  readonly removed: readonly string[]
-  readonly problems: readonly RosterProblem[]
-}
-
-/** A mounted preset and the signature it was mounted from. */
-interface MountedPreset {
-  readonly dispose: () => void | Promise<void>
-  readonly signature: string
-}
+const BINDINGS_FILE = 'dev-agents.json'
 
 /** The one canonical output shape every report tool uses. */
 const stringOutput = {
@@ -141,132 +111,73 @@ function packageRoot(): string {
   return directory
 }
 
-/** How long a duplicate-id registration waits for the previous owner to let go. */
-const RELEASE_WAIT_MS = 40
-
-/** Attempts before a duplicate id is reported instead of waited for. */
-const RELEASE_ATTEMPTS = 10
-
-/** Wait one beat without keeping the process alive for it. */
-function waitBriefly(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(resolve, milliseconds)
-    timer.unref?.()
-  })
-}
-
-/** Empty a preset mount without letting its failure escape the caller. */
-async function disposeQuietly(dispose: () => void | Promise<void>): Promise<void> {
-  try {
-    await dispose()
-  } catch {
-    // Disposal is bookkeeping at shutdown time; a failure here has nowhere better
-    // to go than the caller's log, and the caller has already moved on.
-  }
-}
-
-/** Render one problem as a single log/grep-friendly line. */
+/** Render one problem as one log/grep-friendly line. */
 function renderProblem(problem: RosterProblem): string {
   const where = problem.row === 0 ? 'document' : `row ${problem.row}`
   const id = problem.id === undefined ? '' : ` (${problem.id})`
   return `${where}${id}: ${problem.reason}`
 }
 
-/** Render one sync as the reload tool's answer. */
-function renderSync(report: SyncReport, enabled: readonly DevAgent[], broken: readonly RosterProblem[]): string {
-  const active = enabled.filter((agent) => !agent.retired)
-  const retired = enabled.filter((agent) => agent.retired)
-  const problems = [...report.problems, ...broken]
-  const lines = [`developer roster: ${report.path}`]
-  lines.push(active.length === 0
-    ? 'enabled: none'
-    : `enabled: ${active.length} — ${active.map((agent) => agent.id).join(', ')}`)
-  if (retired.length > 0) {
-    lines.push(`retired: ${retired.length} — ${retired.map((agent) => agent.id).join(', ')} (still routed: their live sessions get the wind-down)`)
-  }
-  if (report.added.length > 0) lines.push(`added: ${report.added.join(', ')}`)
-  if (report.removed.length > 0) lines.push(`removed: ${report.removed.join(', ')}`)
-  lines.push(problems.length === 0
-    ? 'problems: none'
-    : `problems: ${problems.length}\n${problems.map((problem) => `  ${renderProblem(problem)}`).join('\n')}`)
-  return lines.join('\n')
+/** What one roster read produced, for the tool output and the log. */
+interface DevState {
+  readonly agents: readonly DevAgent[]
+  readonly problems: readonly RosterProblem[]
+  readonly archive: string
 }
 
 /**
- * Rows this roster registered that the registry reports as unusable.
- *
- * A definition enters the roster before its composition is activated, and a
- * failed mount leaves it there marked `broken`, filtered out of the picker. Without
- * this, "registered" and "selectable" would look identical to the agent that just
- * edited the file — the failure would be silent exactly where it matters.
- *
- * Deliberately never called during activation: the registry's diagnostic awaits
- * the Host Loader tree settling, which would wait on the activation it was called
- * from.
- * @param registry - the preset registry.
- * @param agents - the entries this roster just mounted.
- * @returns one problem per unusable definition of ours.
- */
-async function brokenOf(registry: PresetRegistryLike, agents: readonly DevAgent[]): Promise<RosterProblem[]> {
-  if (registry.list === undefined) return []
-  try {
-    const rows = await registry.list()
-    const ours = new Set(agents.map((agent) => agent.id))
-    const broken: RosterProblem[] = []
-    for (const row of rows) {
-      if (!ours.has(row.id)) continue
-      if (typeof row.broken !== 'string' || row.broken === '') continue
-      broken.push({ row: 0, id: row.id, reason: row.broken })
-    }
-    return broken
-  } catch (error) {
-    return [{ row: 0, reason: `could not read the preset roster back: ${message(error)}` }]
-  }
-}
-
-/**
- * Install developer mode on a host context that has a preset roster.
+ * Install developer mode.
  *
  * Nothing is registered unless `config.devMode` is the literal boolean `true` —
- * see {@link devModeEnabled} — and nothing at all is installed on a deployment
- * that composes no agent-preset roster, since there would be no picker for the
- * agents to appear in and no way to select them.
- * @param ctx - the plugin context (`systemPrompt`, `tools`, and the optional
- *   `agentPresets` service).
- * @returns a disposer that removes every registration, including the presets.
+ * the caller checks that through {@link devModeEnabled} — and nothing is published
+ * to the harness at all: the section is a plugin-internal contribution, the tool
+ * starts sessions this plugin owns, and the roster and bindings are files only
+ * this plugin reads.
+ * @param ctx - the plugin context (`systemPrompt` and `tools`).
+ * @param peers - the peer service, which is how a developer session is created.
+ * @param service - the report service, used to hand the new session its task.
+ * @returns a disposer that removes every registration.
  */
-export function installDevMode(ctx: Context): () => void {
-  const registry = ctx.get('agentPresets') as unknown as PresetRegistryLike | undefined
-  if (registry === undefined) {
-    ctx.logger?.warn?.(
-      'report-ledger: devMode is on, but this deployment composes no agent-preset roster — '
-      + 'no developer agent can be enabled',
-    )
-    return () => {}
-  }
-
+export function installDevMode(ctx: Context, peers: PeerService, service: ReportService): () => void {
   const root = packageRoot()
   const rosterPath = join(root, ROSTER_FILE)
+  const bindingsPath = join(ledgerRoot(), BINDINGS_FILE)
 
-  const state: { agents: readonly DevAgent[]; archive: string } = { agents: [], archive: '' }
-  const mounted = new Map<string, MountedPreset>()
-  /** Serializes syncs so two reload calls cannot double-register one entry. */
-  let chain: Promise<unknown> = Promise.resolve()
-
-  /**
-   * Read the archive index from disk.
-   *
-   * Tolerated rather than thrown: a missing index is "nothing archived yet", and a
-   * hand-broken one must cost an empty history line, not a failed activation.
-   * @param directory - the archive directory.
-   * @returns the parsed topics, empty on any failure.
-   */
-  const readIndexFile = (directory: string): { topics: readonly ArchiveTopic[] } => {
+  const readBindings = (): Map<string, string> => {
     try {
-      return parseIndex(readFileSync(join(directory, 'index.yml'), 'utf8'))
+      return parseBindings(readFileSync(bindingsPath, 'utf8'))
     } catch {
-      return { topics: [] }
+      return new Map()
     }
+  }
+
+  const state: { current: DevState; bindings: Map<string, string> } = {
+    current: { agents: [], problems: [], archive: '' },
+    bindings: readBindings(),
+  }
+
+  const readRoster = (): DevState => {
+    let text: string
+    try {
+      text = readFileSync(rosterPath, 'utf8')
+    } catch {
+      return {
+        agents: [],
+        problems: [{ row: 0, reason: `no roster at ${rosterPath} — developer mode only works from a source checkout` }],
+        archive: readArchiveBlock(),
+      }
+    }
+    // `promptFile` is written relative to the roster itself (`prompts/probe.md`),
+    // not to the checkout root: the roster is the document the editor is looking at.
+    const rosterDirectory = dirname(rosterPath)
+    const parsed = parseRoster(text, (relativePath) => {
+      try {
+        return readFileSync(resolve(rosterDirectory, relativePath), 'utf8')
+      } catch {
+        return undefined
+      }
+    })
+    return { agents: parsed.agents, problems: parsed.problems, archive: readArchiveBlock() }
   }
 
   /**
@@ -278,95 +189,47 @@ export function installDevMode(ctx: Context): () => void {
    * a failed assembly.
    * @returns the block, or `''` when nothing is archived.
    */
-  const readArchiveBlock = (): string => renderIndexBlock(readIndexFile(join(root, ARCHIVE_DIR)).topics)
-
-  // Read once at activation: the archive changes only when dev_archive writes it,
-  // and that path updates the cached block itself.
-  state.archive = readArchiveBlock()
-
-  const readRoster = (): { agents: readonly DevAgent[]; problems: readonly RosterProblem[] } => {
-    let text: string
+  function readArchiveBlock(): string {
     try {
-      text = readFileSync(rosterPath, 'utf8')
+      const text = readFileSync(join(root, ARCHIVE_DIR, 'index.yml'), 'utf8')
+      return renderIndexBlock(parseIndex(text).topics)
     } catch {
-      return { agents: [], problems: [{ row: 0, reason: `no roster at ${rosterPath}` }] }
+      return ''
     }
-    // `promptFile` is written relative to the roster itself (`prompts/probe.md`),
-    // not to the checkout root: the roster is the document the editor is looking at.
-    const rosterDirectory = dirname(rosterPath)
-    return parseRoster(text, (relativePath) => {
-      try {
-        return readFileSync(resolve(rosterDirectory, relativePath), 'utf8')
-      } catch {
-        return undefined
-      }
-    })
   }
 
-  const syncOnce = async (): Promise<SyncReport> => {
-    const parsed = readRoster()
-    // A retired entry stays in the roster — its live sessions keep their prompt and
-    // gain the wind-down — but it is never published: no new session may start on
-    // it, which is what "no longer enabled" means here.
-    const desired = new Map(parsed.agents.filter((agent) => !agent.retired).map((agent) => [agent.id, agent]))
-
-    const removed: string[] = []
-    for (const [id, entry] of [...mounted]) {
-      const next = desired.get(id)
-      if (next !== undefined && signatureOf(next) === entry.signature) continue
-      mounted.delete(id)
-      if (next === undefined) removed.push(id)
-      await disposeQuietly(entry.dispose)
-    }
-
-    const added: string[] = []
-    const failures: RosterProblem[] = []
-    for (const agent of parsed.agents) {
-      // A retired entry is deliberately not published — the same reason `desired`
-      // excludes it above. Without this guard the row is disposed as "no longer
-      // wanted" and immediately registered again, which is how a retired agent
-      // stays selectable while the output claims it was removed.
-      if (agent.retired) continue
-      if (mounted.has(agent.id)) continue
-      const definition = {
-        id: agent.id,
-        name: agent.name,
-        description: agent.description,
-        order: agent.order,
-        plugins: [],
-      }
-      for (let attempt = 1; ; attempt += 1) {
-        try {
-          const dispose = await registry.register(definition)
-          mounted.set(agent.id, { dispose, signature: signatureOf(agent) })
-          added.push(agent.id)
-          break
-        } catch (error) {
-          // The id is still held by the instance this reload just replaced: HMR
-          // disposes the previous plugin instance and applies the new one, and the
-          // old definition's own release is asynchronous. Waiting a beat is the
-          // difference between "the roster silently went empty on every save" and
-          // a reload that is merely a few milliseconds late.
-          if (/Duplicate agent preset/.test(message(error)) && attempt < RELEASE_ATTEMPTS) {
-            await waitBriefly(RELEASE_WAIT_MS)
-            continue
-          }
-          // One unusable definition must not take the rest of the roster with it.
-          failures.push({ row: 0, id: agent.id, reason: message(error) })
-          break
-        }
-      }
-    }
-
-    state.agents = parsed.agents
-    return { path: rosterPath, added, removed, problems: [...parsed.problems, ...failures] }
+  const reload = (): DevState => {
+    state.current = readRoster()
+    return state.current
   }
 
-  const sync = (): Promise<SyncReport> => {
-    const run = (): Promise<SyncReport> => syncOnce()
-    const next = chain.then(run, run)
-    chain = next.catch(() => undefined)
-    return next
+  state.current = readRoster()
+
+  const renderState = (dev: DevState): string => {
+    const active = dev.agents.filter((agent) => !agent.retired)
+    const retired = dev.agents.filter((agent) => agent.retired)
+    const bound = [...state.bindings.entries()]
+    const byEntry = new Map<string, number>()
+    for (const [, entryId] of bound) byEntry.set(entryId, (byEntry.get(entryId) ?? 0) + 1)
+    const orphaned = bound.filter(([, entryId]) => !dev.agents.some((agent) => agent.id === entryId))
+    const lines = [`developer roster: ${rosterPath}`]
+    lines.push(active.length === 0
+      ? 'enabled: none'
+      : `enabled: ${active.length} — ${active.map((agent) => agent.id).join(', ')}`)
+    if (retired.length > 0) {
+      lines.push(`retired: ${retired.length} — ${retired.map((agent) => agent.id).join(', ')} (their bound sessions get the wind-down)`)
+    }
+    lines.push(dev.archive === '' ? 'archive: none' : `archive: ${dev.archive.split('\n').length} prompt line(s)`)
+    lines.push(bound.length === 0
+      ? 'bound sessions: none'
+      : `bound sessions: ${bound.length}${[...byEntry.entries()].map(([entryId, count]) => `${count}×${entryId}`).join(' ')}`)
+    if (orphaned.length > 0) {
+      lines.push(`bound to an entry that is gone: ${orphaned.map(([session]) => session).join(', ')} — they lose the role prompt`)
+    }
+    lines.push(dev.problems.length === 0
+      ? 'problems: none'
+      : `problems: ${dev.problems.length}\n${dev.problems.map((problem) => `  ${renderProblem(problem)}`).join('\n')}`)
+    return lines.join('\n')
   }
 
   const disposers: (() => void)[] = []
@@ -383,11 +246,11 @@ export function installDevMode(ctx: Context): () => void {
       try {
         const agent = context.agent
         if (agent === undefined) return ''
-        const base = promptFor(state.agents, registry.composedPreset(agent.ctx))
-        // Only a developer agent gets the history block: an assembly that matched no
-        // roster entry must stay byte-identical to a deployment without dev mode.
+        const base = promptFor(state.current.agents, state.bindings.get(String(agent.id)))
+        // Only a bound session gets the role: an assembly this plugin did not start
+        // must stay byte-identical to a deployment without developer mode.
         if (base === '') return ''
-        return state.archive === '' ? base : `${base}\n\n${state.archive}`
+        return state.current.archive === '' ? base : `${base}\n\n${state.current.archive}`
       } catch {
         return ''
       }
@@ -397,16 +260,78 @@ export function installDevMode(ctx: Context): () => void {
   disposers.push(ctx.tools.register(defineTool({
     name: 'dev_agents_reload',
     description:
-      'Developer mode only: read the developer-agent roster (dev/agents.yml in the plugin checkout) again and '
-      + 'apply the difference to the preset picker — presets that disappeared are removed, new ones are '
-      + 'registered, renamed ones are re-registered. Use it after editing the roster, because editing YAML does '
-      + 'not trigger the build watcher. Returns what was added, removed, enabled now, and every row that could '
-      + 'not be used. A bad row is skipped and reported; the rest of the roster still applies.',
+      'Developer mode only: re-read the developer roster (dev/agents.yml) and the history archive '
+      + '(dev/archive/index.yml) from the checkout. Nothing is published to the harness — these agents are '
+      + 'this plugin\'s own sessions — so this only refreshes what the plugin knows: which entries are enabled, '
+      + 'which are retired, how many sessions are bound to each, and every roster row that could not be used. '
+      + 'Editing YAML does not trigger the build watcher, so call this after an edit. A bad row is skipped and '
+      + 'reported; the rest of the roster still applies.',
     parameters: {},
     output: stringOutput,
-    execute: async (): Promise<string> => {
-      const report = await sync()
-      return renderSync(report, state.agents, await brokenOf(registry, state.agents))
+    execute: async (): Promise<string> => renderState(reload()),
+  })))
+
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'dev_agent_start',
+    description:
+      'Developer mode only: start one agent from the developer roster (dev/agents.yml in this checkout) as a '
+      + 'peer session, bound to this plugin. The role prompt and the archived conclusions are injected by the '
+      + 'plugin itself, keyed by the binding it records — no harness preset is created, so nothing appears in '
+      + 'the preset picker and the harness never learns the agent exists. The session is a normal peer: it '
+      + 'outlives this turn, it receives its task as a report, and it counts against the peer budget. Retired '
+      + 'entries cannot be started; they only wind down sessions already bound to them.',
+    parameters: {
+      entry: { type: 'string', required: true, description: 'Roster entry id to start, e.g. report-ledger:dev/probe.' },
+      task: { type: 'string', required: true, description: 'What this developer agent should do first. It becomes the opening report body.' },
+      name: { type: 'string', description: 'Optional display name; defaults to the roster entry name.' },
+    },
+    output: stringOutput,
+    execute: async (args, exec) => {
+      const input = args as { entry: string; task: string; name?: string }
+      const agent = (exec as { agent?: { id?: string } }).agent
+      const actor = typeof agent?.id === 'string' && agent.id !== '' ? agent.id : ''
+      if (actor === '') throw new Error('report-ledger: dev_agent_start needs an owning agent session')
+      const entry = state.current.agents.find((candidate) => candidate.id === input.entry.trim())
+      if (entry === undefined) {
+        const available = state.current.agents.filter((candidate) => !candidate.retired).map((candidate) => candidate.id)
+        throw new Error(
+          `report-ledger: no developer agent ${JSON.stringify(input.entry)} in dev/agents.yml; `
+          + `startable: ${available.length === 0 ? '(none)' : available.join(', ')}`,
+        )
+      }
+      if (entry.retired) {
+        throw new Error(
+          `report-ledger: ${entry.id} is retired — it cannot be started; it only winds down the sessions still `
+          + 'bound to it',
+        )
+      }
+      const delegated = await peers.start(actor, {
+        task: input.task,
+        name: input.name?.trim() === undefined || input.name.trim() === '' ? entry.name : input.name.trim(),
+      })
+      // Bind BEFORE the task is delivered: the first assembly is the first turn, and
+      // a role that arrives one turn late is a role the agent never had.
+      state.bindings.set(delegated.sessionId, entry.id)
+      writeFileSync(bindingsPath, serializeBindings(state.bindings), 'utf8')
+      const authored = await service.author({
+        subject: `dev: ${entry.name}`,
+        body: [
+          `你是 ${entry.id}（${entry.name}），一个只在插件开发期存在的代理。`,
+          '你的职责与历史结论由插件自己的提示词段注入，不来自任何 harness 预设——因此它不出现在预设选择器里。',
+          '',
+          '## 任务',
+          input.task,
+        ].join('\n'),
+        actor,
+        to: [delegated.sessionId],
+        task: `dev-${entry.id}`,
+      })
+      return [
+        `started ${entry.id} -> ${delegated.sessionId}`,
+        `task report: ${authored.front.report} (task "dev-${entry.id}")`,
+        `binding: ${delegated.sessionId} -> ${entry.id} (recorded in ${bindingsPath})`,
+        'nothing was added to the harness: no preset, no picker entry',
+      ].join('\n')
     },
   })))
 
@@ -482,44 +407,44 @@ export function installDevMode(ctx: Context): () => void {
 
       // Rebuild the whole index from what is on disk plus this entry: the files are
       // the source of truth, and the index is the generated view of them.
-      const indexText = readIndexFile(directory)
       const topics = new Map<string, ArchiveTopic>()
-      for (const known of indexText.topics) topics.set(known.topic, known)
+      for (const known of readIndexFile(directory)) topics.set(known.topic, known)
       topics.set(entry.topic, entry)
       const ordered = [...topics.values()].sort((left, right) => left.topic.localeCompare(right.topic))
       writeFileSync(join(directory, 'index.yml'), renderIndex(ordered, Date.now()), 'utf8')
-      state.archive = renderIndexBlock(ordered)
+      state.current = { ...state.current, archive: renderIndexBlock(ordered) }
 
+      const block = renderIndexBlock(ordered)
       const bytes = Buffer.byteLength(fileText, 'utf8')
       return [
         `archived ${entry.reports.join(', ')} -> dev/archive/${entry.file}`,
         `topic: ${entry.topic} · summary: ${entry.summary}`,
         `file: ${bytes} bytes (budget ${MAX_ARCHIVE_BYTES})${bytes >= MAX_ARCHIVE_BYTES ? ' — TRUNCATED, see the marker at the end' : ''}`,
         `index: dev/archive/index.yml (${ordered.length} topic(s))`,
-        `prompt block: ${renderIndexBlock(ordered) === '' ? 0 : renderIndexBlock(ordered).split('\n').length} line(s) (budget ${MAX_INDEX_LINES} list lines)`,
-        'the development prompt now carries it; no reload needed',
+        `prompt block: ${block === '' ? 0 : block.split('\n').length} line(s) (budget ${MAX_INDEX_LINES} list lines)`,
+        'bound development sessions see it on their next turn; no reload needed',
       ].join('\n')
     },
   })))
 
-  // Initial load. Deferred rather than awaited: plugin activation must not wait on
-  // a filesystem read or a preset mount, and a roster problem is a log line, not a
-  // reason to refuse to load.
-  void sync().then(
-    (report) => {
-      for (const problem of report.problems) {
-        ctx.logger?.warn?.(`report-ledger: developer roster ${renderProblem(problem)}`)
-      }
-    },
-    (error: unknown) => {
-      ctx.logger?.warn?.(`report-ledger: developer roster could not be loaded: ${message(error)}`)
-    },
-  )
+  // Initial read. Deferred rather than awaited: activation must not wait on the
+  // filesystem, and a roster problem is a log line, not a reason to refuse to load.
+  queueMicrotask(() => {
+    for (const problem of state.current.problems) {
+      ctx.logger?.warn?.(`report-ledger: developer roster ${renderProblem(problem)}`)
+    }
+  })
 
   return () => {
     for (const dispose of disposers.reverse()) dispose()
-    for (const entry of mounted.values()) void disposeQuietly(entry.dispose)
-    mounted.clear()
-    state.agents = []
+  }
+
+  /** Read the archive index from disk, tolerating a missing or broken file. */
+  function readIndexFile(directory: string): readonly ArchiveTopic[] {
+    try {
+      return parseIndex(readFileSync(join(directory, 'index.yml'), 'utf8')).topics
+    } catch {
+      return []
+    }
   }
 }

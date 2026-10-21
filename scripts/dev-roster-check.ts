@@ -28,8 +28,10 @@ import { fileURLToPath } from 'node:url'
 const {
   DEV_SECTION_ORDER,
   devModeEnabled,
+  parseBindings,
   parseRoster,
   promptFor,
+  serializeBindings,
   signatureOf,
 } = await import('../src/report/dev/roster.ts')
 const { PARTNERSHIP_SECTION_ORDER, SECTION_ORDER } = await import('../src/report/guidance.ts')
@@ -165,6 +167,17 @@ check('a non-boolean retired flag is reported',
 check('a retired entry keeps its own instructions', promptFor(retiredEntry.agents, 'a').includes('role text'))
 check('a retired entry is told to wind down', promptFor(retiredEntry.agents, 'a').includes('退役'))
 check('an active entry carries no wind-down', !promptFor(healthy.agents, 'report-ledger:dev/probe').includes('退役'))
+
+// ---- the plugin's own session bindings ----------------------------------
+const bindings = parseBindings('{\n  "session-a": "report-ledger:dev/probe",\n  "session-b": "report-ledger:dev/verifier"\n}')
+check('bindings parse into a session → entry map', bindings.get('session-a') === 'report-ledger:dev/probe')
+check('a corrupt bindings file parses empty', parseBindings('{nope').size === 0)
+check('a non-object bindings file parses empty', parseBindings('[1,2]').size === 0)
+check('a non-string binding is dropped', parseBindings('{"session-a": 3}').size === 0)
+check('an empty binding is dropped', parseBindings('{"session-a": ""}').size === 0)
+const written = serializeBindings(new Map([['session-b', 'b'], ['session-a', 'a']]))
+check('serialization is sorted', written.indexOf('session-a') < written.indexOf('session-b'), written)
+check('serialization round-trips', parseBindings(written).get('session-b') === 'b')
 
 // ---- the committed roster loads -----------------------------------------
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')

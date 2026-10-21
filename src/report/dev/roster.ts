@@ -120,6 +120,51 @@ export function promptFor(agents: readonly DevAgent[], presetId: string | undefi
 }
 
 /**
+ * Parse the plugin's own record of which sessions are developer agents.
+ *
+ * The file is the whole mechanism: a developer agent is a session this plugin
+ * started, and the only thing that makes it one is an entry here. Keeping it out
+ * of the session header is deliberate — that shape belongs to the harness, and a
+ * development artifact must not require the harness to grow a field.
+ *
+ * Tolerant on purpose: a corrupt file costs the role prompt, never an activation.
+ * @param text - the bindings file contents.
+ * @returns session id → roster entry id.
+ */
+export function parseBindings(text: string): Map<string, string> {
+  const bindings = new Map<string, string>()
+  let document: unknown
+  try {
+    document = JSON.parse(text)
+  } catch {
+    return bindings
+  }
+  if (document === null || typeof document !== 'object' || Array.isArray(document)) return bindings
+  for (const [session, entry] of Object.entries(document as Record<string, unknown>)) {
+    if (session === '' || typeof entry !== 'string' || entry === '') continue
+    bindings.set(session, entry)
+  }
+  return bindings
+}
+
+/**
+ * Serialize the binding map.
+ *
+ * Session ids are sorted so re-writing the file after one start produces a diff of
+ * one line rather than a reshuffle — this file is committed nowhere, but it is read
+ * by humans debugging a role that failed to appear.
+ * @param bindings - session id → roster entry id.
+ * @returns the file text.
+ */
+export function serializeBindings(bindings: ReadonlyMap<string, string>): string {
+  const document: Record<string, string> = {}
+  for (const [session, entry] of [...bindings.entries()].sort(([left], [right]) => left.localeCompare(right))) {
+    document[session] = entry
+  }
+  return `${JSON.stringify(document, null, 2)}\n`
+}
+
+/**
  * What a retired entry's agent is told instead of new work.
  *
  * It replaces the silent version of retirement: removing an entry from the roster

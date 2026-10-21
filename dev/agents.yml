@@ -1,22 +1,25 @@
 # Developer-mode roster — read only when the composition row sets `devMode: true`.
 #
-# Each entry becomes a preset in the picker, plus a prompt section that only that
-# preset receives. `promptFile` is resolved against this file's directory.
+# These agents are this plugin's OWN sessions, not harness presets: `dev_agent_start`
+# creates a peer session and records the binding in
+# `$DSH_HOME/report-ledger/dev-agents.json`, and the plugin injects the role prompt
+# by that binding. Nothing appears in the DSH preset picker, and the harness never
+# learns these agents exist.
 #
-# Editing this file rebuilds nothing: it is data, not code. Call `dev_agents_reload`
-# (a tool that exists only in developer mode) to apply the difference to the
-# picker. A row that cannot be used is skipped and reported — the rest still
-# applies, so one typo never disables the whole roster.
+# `promptFile` is resolved against this file's directory. Editing this file rebuilds
+# nothing: it is data, not code. Call `dev_agents_reload` (a tool that exists only in
+# developer mode) to re-read it. A row that cannot be used is skipped and reported —
+# the rest still applies, so one typo never disables the whole roster.
 #
 # Retirement: add `retired: true` to an entry instead of deleting it. A retired
-# entry is no longer selectable (no new session can start on it), but its live
-# sessions keep receiving their prompt plus a wind-down instruction telling them
-# to hand their reports, checkouts and unpaid hand-offs over with
-# `report_handover`. Deleting the row instead is not a retirement: the live
-# session's prompt would go empty without it ever learning why.
+# entry cannot be started any more, but sessions already bound to it keep their
+# prompt plus a wind-down instruction telling them to hand their reports, checkouts
+# and unpaid hand-offs over with `report_handover`. Deleting the row instead is not
+# a retirement: those sessions would silently lose their instructions.
 #
-# This file is not in the published package (`package.json` `files` excludes it),
-# so a deployment that installs the tarball can never see these agents.
+# This file is not in the published package (`package.json` `files` excludes it), so
+# an installed deployment has no developer agents at all, whatever its config says:
+# cloning the repository is the gate.
 
 agents:
   - id: report-ledger:dev/probe

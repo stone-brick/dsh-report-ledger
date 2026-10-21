@@ -68,15 +68,15 @@ export interface Config {
    */
   announceToAgent?: boolean
   /**
-   * Developer mode: publish the agents listed in the checkout's
-   * `dev/agents.yml` into the preset picker, and give only those agents an extra
-   * prompt section explaining what they are measuring.
+   * Developer mode: start agents from the checkout's `dev/agents.yml` as this
+   * plugin's own sessions, and give only those sessions an extra prompt section.
    *
    * Off by default, and the field is strict: only the literal boolean `true`
-   * enables it. With it off nothing is registered at all — no preset, no section,
-   * no tool — so a published deployment's prompt stays byte-identical to what
-   * shipped. Turn it on in the profile that runs the plugin from a source
-   * checkout, never in a deployment that installed the package.
+   * enables it. Nothing is published to the harness — no preset, no picker entry —
+   * and with it off nothing is registered at all, so a published deployment's
+   * prompt stays byte-identical. The roster lives in the checkout and is excluded
+   * from the package, so cloning the repository is what makes developer agents
+   * available in the first place.
    * @default false
    */
   devMode?: boolean
@@ -864,12 +864,12 @@ export function apply(ctx: Context, config?: Config): void {
   // Developer mode, when the composition row asks for it.
   //
   // Placed before the `announceToAgent` early return on purpose: the switch is
-  // independent of whether the ledger announces itself. Everything it installs is
-  // gated inside on a preset roster being composed, and with the switch off no
-  // registration happens at all — which is what keeps a published deployment's
-  // prompt byte-identical.
+  // independent of whether the ledger announces itself. Nothing is published to the
+  // harness — the roster, the bindings and the section are this plugin's own state
+  // — and with the switch off no registration happens at all, which is what keeps a
+  // published deployment's prompt byte-identical.
   if (devModeEnabled(config)) {
-    ctx.effect(() => installDevMode(ctx), 'report-ledger: developer mode')
+    ctx.effect(() => installDevMode(ctx, peers, service), 'report-ledger: developer mode')
   }
 
   if ((config?.announceToAgent ?? true) === false) return
