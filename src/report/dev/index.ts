@@ -34,7 +34,7 @@
  * @module dsh-report-ledger/report/dev
  */
 
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
@@ -43,6 +43,18 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 // section provider can read the assembling session at all. Erased at build time.
 import type {} from '@deepseek-ai/dsh-agent'
 import type { AssembleContext } from '@deepseek-ai/dsh-system-prompt'
+import { listReports, readReport } from '../ledger.ts'
+import {
+  MAX_ARCHIVE_BYTES,
+  MAX_INDEX_LINES,
+  parseIndex,
+  renderArchive,
+  renderIndex,
+  renderIndexBlock,
+  topicSlug,
+  type ArchiveSource,
+  type ArchiveTopic,
+} from './archive.ts'
 import {
   DEV_SECTION_ORDER,
   parseRoster,
@@ -57,6 +69,9 @@ const DEV_SECTION = 'plugin:report-ledger:dev'
 
 /** Where the roster lives inside the checkout. */
 const ROSTER_FILE = join('dev', 'agents.yml')
+
+/** Where the archive index lives, relative to the checkout root. */
+const ARCHIVE_DIR = join('dev', 'archive')
 
 /**
  * Structural face of the agent-preset registry this half needs.
@@ -233,10 +248,41 @@ export function installDevMode(ctx: Context): () => void {
   const root = packageRoot()
   const rosterPath = join(root, ROSTER_FILE)
 
-  const state: { agents: readonly DevAgent[] } = { agents: [] }
+  const state: { agents: readonly DevAgent[]; archive: string } = { agents: [], archive: '' }
   const mounted = new Map<string, MountedPreset>()
   /** Serializes syncs so two reload calls cannot double-register one entry. */
   let chain: Promise<unknown> = Promise.resolve()
+
+  /**
+   * Read the archive index from disk.
+   *
+   * Tolerated rather than thrown: a missing index is "nothing archived yet", and a
+   * hand-broken one must cost an empty history line, not a failed activation.
+   * @param directory - the archive directory.
+   * @returns the parsed topics, empty on any failure.
+   */
+  const readIndexFile = (directory: string): { topics: readonly ArchiveTopic[] } => {
+    try {
+      return parseIndex(readFileSync(join(directory, 'index.yml'), 'utf8'))
+    } catch {
+      return { topics: [] }
+    }
+  }
+
+  /**
+   * Render the injected history block from `dev/archive/index.yml`.
+   *
+   * Read here rather than fetched from the ledger: a fork has the repository and no
+   * ledger, and the block a development agent sees must be exactly what the
+   * committed index says. A missing or unreadable index is an empty history, never
+   * a failed assembly.
+   * @returns the block, or `''` when nothing is archived.
+   */
+  const readArchiveBlock = (): string => renderIndexBlock(readIndexFile(join(root, ARCHIVE_DIR)).topics)
+
+  // Read once at activation: the archive changes only when dev_archive writes it,
+  // and that path updates the cached block itself.
+  state.archive = readArchiveBlock()
 
   const readRoster = (): { agents: readonly DevAgent[]; problems: readonly RosterProblem[] } => {
     let text: string
@@ -337,7 +383,11 @@ export function installDevMode(ctx: Context): () => void {
       try {
         const agent = context.agent
         if (agent === undefined) return ''
-        return promptFor(state.agents, registry.composedPreset(agent.ctx))
+        const base = promptFor(state.agents, registry.composedPreset(agent.ctx))
+        // Only a developer agent gets the history block: an assembly that matched no
+        // roster entry must stay byte-identical to a deployment without dev mode.
+        if (base === '') return ''
+        return state.archive === '' ? base : `${base}\n\n${state.archive}`
       } catch {
         return ''
       }
@@ -357,6 +407,98 @@ export function installDevMode(ctx: Context): () => void {
     execute: async (): Promise<string> => {
       const report = await sync()
       return renderSync(report, state.agents, await brokenOf(registry, state.agents))
+    },
+  })))
+
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'dev_archive',
+    description:
+      'Developer mode only, and it WRITES INTO THE CHECKOUT: distill reports from the ledger into '
+      + 'dev/archive/<topic>.md and rebuild dev/archive/index.yml, so the conclusions survive a fork that does '
+      + 'not inherit this machine\'s ledger. It keeps the conclusion-shaped sections (结论/决定/建议/风险/发现/未决/…), '
+      + 'lists every heading so the omissions are visible, and caps the file at a size budget; it never copies '
+      + 'whole bodies. Select reports with `task` (partial, case-insensitive) or an explicit `reports` list — '
+      + 'never "everything", because the ledger is machine-global and holds unrelated work. Re-running a topic '
+      + 'replaces its file and its index entry; the index is generated, so do not hand-edit it. Returns the file, '
+      + 'its byte size against the budget, and how many index lines the development prompt now carries.',
+    parameters: {
+      task: { type: 'string', description: 'Archive every report carrying this task label (partial match, case-insensitive).' },
+      reports: { type: 'array', items: { type: 'string' }, description: 'Explicit report ids to archive instead of a task filter.' },
+      topic: { type: 'string', description: 'Topic slug for the file name; defaults to the task label, slugged (a label that slugs to nothing becomes "archive").' },
+      summary: { type: 'string', description: 'One line that lets a reader decide whether to open the file. Defaults to a derived line.' },
+    },
+    output: stringOutput,
+    execute: async (args): Promise<string> => {
+      const input = args as { task?: string; reports?: string[]; topic?: string; summary?: string }
+      const task = input.task?.trim() ?? ''
+      const explicit = (input.reports ?? []).map((report) => report.trim()).filter((report) => report !== '')
+      if (explicit.length === 0 && task === '') {
+        throw new Error(
+          'report-ledger: dev_archive needs `task` or `reports` — it will not archive the whole ledger, '
+          + 'which is machine-global and holds unrelated work',
+        )
+      }
+
+      const selected = explicit.length > 0
+        ? explicit
+        : (await listReports())
+          .filter((front) => typeof front.task === 'string' && front.task.toLowerCase().includes(task.toLowerCase()))
+          .map((front) => front.report)
+      if (selected.length === 0) {
+        throw new Error(`report-ledger: no report matched ${explicit.length > 0 ? 'that report list' : `task ${JSON.stringify(task)}`}`)
+      }
+
+      const sources: ArchiveSource[] = []
+      const missing: string[] = []
+      for (const id of selected) {
+        const found = await readReport(id)
+        if (found === undefined) {
+          missing.push(id)
+          continue
+        }
+        sources.push({ front: found.front, body: found.body })
+      }
+      if (missing.length > 0) {
+        throw new Error(`report-ledger: no such report(s) in the ledger: ${missing.join(', ')}`)
+      }
+
+      const label = input.topic?.trim() ?? (task === '' ? sources[0].front.task ?? '' : task)
+      const topic = topicSlug(label)
+      const updated = Math.max(...sources.map((source) => source.front.updated))
+      const summary = input.summary?.trim()
+        ?? `${sources[0].front.subject.slice(0, 60)}${sources.length > 1 ? ` 等 ${sources.length} 份` : ''}`
+      const entry: ArchiveTopic = {
+        topic,
+        file: `${topic}.md`,
+        summary,
+        reports: sources.map((source) => source.front.report),
+        updated,
+      }
+
+      const directory = join(root, ARCHIVE_DIR)
+      mkdirSync(directory, { recursive: true })
+      const fileText = renderArchive(entry, sources)
+      writeFileSync(join(directory, entry.file), fileText, 'utf8')
+
+      // Rebuild the whole index from what is on disk plus this entry: the files are
+      // the source of truth, and the index is the generated view of them.
+      const indexText = readIndexFile(directory)
+      const topics = new Map<string, ArchiveTopic>()
+      for (const known of indexText.topics) topics.set(known.topic, known)
+      topics.set(entry.topic, entry)
+      const ordered = [...topics.values()].sort((left, right) => left.topic.localeCompare(right.topic))
+      writeFileSync(join(directory, 'index.yml'), renderIndex(ordered, Date.now()), 'utf8')
+      state.archive = renderIndexBlock(ordered)
+
+      const bytes = Buffer.byteLength(fileText, 'utf8')
+      return [
+        `archived ${entry.reports.join(', ')} -> dev/archive/${entry.file}`,
+        `topic: ${entry.topic} · summary: ${entry.summary}`,
+        `file: ${bytes} bytes (budget ${MAX_ARCHIVE_BYTES})${bytes >= MAX_ARCHIVE_BYTES ? ' — TRUNCATED, see the marker at the end' : ''}`,
+        `index: dev/archive/index.yml (${ordered.length} topic(s))`,
+        `prompt block: ${renderIndexBlock(ordered) === '' ? 0 : renderIndexBlock(ordered).split('\n').length} line(s) (budget ${MAX_INDEX_LINES} list lines)`,
+        'the development prompt now carries it; no reload needed',
+      ].join('\n')
     },
   })))
 
