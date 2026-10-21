@@ -31,8 +31,8 @@ dsh plugin --profile web remove dsh-report-ledger
 
 ```sh
 # 1) 下载发行版附件（预构建产物，不需要构建工具链）
-#    https://gitee.com/stone_zhan/dsh-report-ledger/releases/download/v0.2.2/dsh-report-ledger-0.2.2.tgz
-dsh plugin --profile web add ./dsh-report-ledger-0.2.2.tgz
+#    https://gitee.com/stone_zhan/dsh-report-ledger/releases/download/v0.2.3/dsh-report-ledger-0.2.3.tgz
+dsh plugin --profile web add ./dsh-report-ledger-0.2.3.tgz
 
 # 2) 或直接从 Gitee 安装（安装时自动构建，约 15 秒）
 dsh plugin --profile web add git+https://gitee.com/stone_zhan/dsh-report-ledger.git
@@ -44,7 +44,7 @@ GitHub 每次推送后由 `.github/workflows/mirror-to-gitee.yml` 自动镜像 `
 
 ### 装完你会得到什么
 
-- **宿主半**（任何 profile）：十一个 `report_*` 工具 + `peer_list` / `peer_start`（开启工作区后是十二个；`report_lease` 默认不存在）、
+- **宿主半**（任何 profile）：十三个 `report_*` 工具 + `peer_list` / `peer_start`（开启工作区后是十四个；`report_lease` 默认不存在）、
   两段 `systemPrompt` 段，以及 web profile 下的三个只读 HTTP 端点；
   工作区功能默认关闭，因此 `report_lease` 与各工具的 `worktree` 参数默认**不出现**；
 - **浏览器半**（仅 web profile）：会话头部多一个「汇报」标签页 —— 时间线、状态芯片、
@@ -884,7 +884,7 @@ Node ≥ 20（见 `engines`）。
 提交的产物与源码是否一致，避免"改了 `src` 忘了 `build`"。
 
 ```sh
-pnpm check          # 完整门禁：类型检查 + 十套可移植检查 + 工具面那一套
+pnpm check          # 完整门禁：类型检查 + 十四套可移植检查（1034 项）+ 工具面三套（162 项）
 pnpm build && pnpm pack   # lib/ 随源码提交，pack 前显式重建一次
 npm publish         # ⚠ 本机 registry 若是镜像站，必须显式 --registry=https://registry.npmjs.org
 ```
@@ -898,7 +898,7 @@ npm publish         # ⚠ 本机 registry 若是镜像站，必须显式 --regis
 | `dsh.bundle.patch` 指向该 patch | `./cordis.patch.yml` |
 | `version` 已递增 | npm 不允许覆盖已发布版本 |
 
-发布后**在干净环境里验证**（0.1.0 的 tarball 已按此验证过；0.2.0 已发布，但仓库里没有留下同等的安装记录）：
+发布后**在干净环境里验证**（0.1.0 的 tarball 已按此验证过；0.2.0 之后的版本都由 `publish.yml` 发布，但隔离安装记录仍未补齐）：
 
 ```sh
 dsh plugin --profile demo add dsh-report-ledger   # 空 DSH_HOME 里
@@ -957,7 +957,7 @@ release 创建/上传失败时，先 `gh workflow run mirror-to-gitee.yml --ref 
 
 ```sh
 curl -X POST "https://gitee.com/api/v5/repos/stone_zhan/dsh-report-ledger/releases/<release_id>/attach_files?access_token=<token>" \
-     -F "file=@dsh-report-ledger-0.2.2.tgz"
+     -F "file=@dsh-report-ledger-0.2.3.tgz"
 ```
 
 ## 已知限制
