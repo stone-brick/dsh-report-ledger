@@ -55,6 +55,8 @@ const WHEEL_ZOOM_RATE = Math.log(ZOOM_STEP) / 100
 
 /** How long the hovered path takes to draw itself out, in milliseconds. */
 const HOVER_REVEAL_MS = 200
+/** One loop of the travelling comet on a hovered path, in milliseconds. */
+const HOVER_FLOW_MS = 1400
 /** How close to the box's edge a wheel-pan stops, in screen pixels. */
 const EDGE_MARGIN = 12
 /** Drawing units to keep beyond the viewport, so a pan does not reveal a blank band. */
@@ -226,33 +228,38 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
   const bridged = useSyncExternalStore(selection.subscribe, selection.get)
   const pointed = hover.report ?? bridged.hover
   /**
-   * How far the hovered path has revealed itself.
+   * The hovered path's animation clock.
    *
-   * A hover used to be a jump cut: scrim on, wires on. Now the scrim fades and the
-   * wires draw outward from the hovered card over {@link HOVER_REVEAL_MS}, which is
-   * what makes "these wires are one report's" read as a gesture. The animation is
-   * skipped for readers who asked for reduced motion, and it only runs while a
-   * hover exists — the settled state is a plain full-strength path.
+   * `phase` is the entrance: the scrim fades and the wires draw outward once, over
+   * {@link HOVER_REVEAL_MS}. `flow` is the **ongoing** part: while the pointer stays
+   * on the card, a comet keeps running out along every wire, looping every
+   * {@link HOVER_FLOW_MS}, so the relation stays visibly alive instead of flashing
+   * once. Both are plain numbers handed to the painter, which keeps the drawing
+   * deterministic: static assertions draw phase 1 with no flow.
    */
-  const [hoverPhase, setHoverPhase] = useState(1)
+  const [hoverClock, setHoverClock] = useState<{ phase: number; flow?: number }>({ phase: 1 })
   const reducedMotion = useMemo(
     () => globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true,
     [],
   )
   useEffect(() => {
     if (pointed === undefined || reducedMotion) {
-      setHoverPhase(1)
+      setHoverClock({ phase: 1 })
       return
     }
     let frame = 0
     const started = performance.now()
-    setHoverPhase(0)
+    setHoverClock({ phase: 0, flow: 0 })
     const step = (now: number): void => {
-      const progress = Math.min(1, (now - started) / HOVER_REVEAL_MS)
-      // Ease out: the reveal front slows as it arrives, so the last stretch reads as
-      // "the line has reached the recipient" instead of stopping abruptly.
-      setHoverPhase(1 - (1 - progress) ** 2)
-      if (progress < 1) frame = requestAnimationFrame(step)
+      const elapsed = now - started
+      const entrance = Math.min(1, elapsed / HOVER_REVEAL_MS)
+      setHoverClock({
+        // Ease out: the reveal front slows as it arrives, so the last stretch reads
+        // as "the line has reached the recipient" instead of stopping abruptly.
+        phase: 1 - (1 - entrance) ** 2,
+        flow: (elapsed % HOVER_FLOW_MS) / HOVER_FLOW_MS,
+      })
+      frame = requestAnimationFrame(step)
     }
     frame = requestAnimationFrame(step)
     return () => cancelAnimationFrame(frame)
@@ -454,8 +461,9 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
       ...(pointed === undefined ? {} : { report: pointed }),
       ...(hover.frame === undefined ? {} : { frame: hover.frame }),
     },
-    hoverPhase,
-  }), [baseScene, openReport, pointed, hover.frame, hoverPhase])
+    hoverPhase: hoverClock.phase,
+    ...(hoverClock.flow === undefined ? {} : { hoverFlow: hoverClock.flow }),
+  }), [baseScene, openReport, pointed, hover.frame, hoverClock])
 
   // ---------------------------------------------------------------------------
   // Painting

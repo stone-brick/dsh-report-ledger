@@ -624,6 +624,22 @@ check('a hover in progress carries a traveller dot at its front', (() => {
   return recorder.fills.some((fill) => fill.points === 2 && fill.style === themed.hover
     && Math.abs(fill.box.width - 2.1) < 0.01)
 })())
+/** The comet's head: a 2.5px hover-coloured dot (the marker is 2.1). */
+const cometHead = (recorder: Recorder): { x: number; y: number } | undefined => {
+  const fill = recorder.fills.find((candidate) => candidate.points === 2
+    && candidate.style === themed.hover && Math.abs(candidate.box.width - 2.5) < 0.01)
+  return fill === undefined ? undefined : { x: fill.box.x, y: fill.box.y }
+}
+check('a hovered path keeps a comet running after its reveal', (() => {
+  const recorder = overlay({ focus: { report: 'R-0001' }, hoverPhase: 1, hoverFlow: 0.5 })
+  return cometHead(recorder) !== undefined
+})())
+check('the comet moves along the path as the flow advances', (() => {
+  const early = cometHead(overlay({ focus: { report: 'R-0001' }, hoverPhase: 1, hoverFlow: 0.2 }))
+  const late = cometHead(overlay({ focus: { report: 'R-0001' }, hoverPhase: 1, hoverFlow: 0.8 }))
+  if (early === undefined || late === undefined) return false
+  return Math.abs(early.x - late.x) + Math.abs(early.y - late.y) > 8
+})())
 check('the focused card is redrawn in the pointer colour, with an uncoloured id', (() => {
   const recorder = overlay({ focus: { report: 'R-0001' } })
   return recorder.texts.some((text) => text.text === 'R-0001' && text.style === themed.text)

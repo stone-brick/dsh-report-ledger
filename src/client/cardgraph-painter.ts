@@ -396,6 +396,16 @@ export interface PaintScene {
    * which is what every static assertion and every fog-of-war path draws.
    */
   readonly hoverPhase?: number
+  /**
+   * Where a travelling light sits on the hovered path, 0 to 1, repeating.
+   *
+   * The reveal is the entrance; this is the **ongoing** animation. While the
+   * pointer stays on a card, a short bright comet runs from the card out along
+   * each of its wires and loops, so the relation stays visibly live instead of
+   * being a one-shot flash. Omitted means "settled": no comet, which is what the
+   * static assertions and the reduced-motion path draw.
+   */
+  readonly hoverFlow?: number
 }
 
 /** A surface that can draw a scene. Canvas today; an SVG implementation is a swap. */
@@ -722,6 +732,48 @@ export function createCanvasPainter(canvas: HTMLCanvasElement): CardgraphPainter
   }
 
   /**
+   * The travelling light on a hovered wire.
+   *
+   * A short tail (a quarter of the wire, capped) plus a glowing head in the pointer
+   * colour. `flow` is where the head sits along the wire — 0 at the source, 1 at the
+   * target — so one loop reads as "this report flows to its recipients", and a new
+   * loop starts from the card again.
+   * @param edge - the focused wire.
+   * @param scene - the resolved palette.
+   * @param flow - 0..1 along the wire.
+   */
+  const drawComet = (edge: CardgraphEdge, scene: PaintScene, flow: number): void => {
+    const { theme } = scene
+    const points = wirePoints(edge)
+    const total = wireLength(points)
+    if (total < 12) return
+    const head = total * Math.min(1, Math.max(0, flow))
+    const tail = Math.max(0, head - Math.min(total * 0.25, 90))
+    if (head - tail < 1) return
+    const from = cutPolyline(points, tail).cut
+    const to = cutPolyline(points, head).cut
+    if (from === undefined || to === undefined) return
+    const style = wireStyle(edge.kind, theme)
+    ctx.globalAlpha = 0.9
+    ctx.strokeStyle = theme.hover
+    ctx.lineWidth = style.width + 0.8
+    ctx.setLineDash([])
+    ctx.beginPath()
+    ctx.moveTo(from.x, from.y)
+    ctx.lineTo(to.x, to.y)
+    ctx.stroke()
+    ctx.globalAlpha = 1
+    ctx.fillStyle = theme.canvas
+    ctx.beginPath()
+    ctx.arc(to.x, to.y, MARKER_HALO + 0.6, 0, Math.PI * 2)
+    ctx.fill()
+    ctx.fillStyle = theme.hover
+    ctx.beginPath()
+    ctx.arc(to.x, to.y, MARKER_DOT + 0.4, 0, Math.PI * 2)
+    ctx.fill()
+  }
+
+  /**
    * Draw one wire.
    * @param edge - the wire.
    * @param scene - theme and layout.
@@ -1041,6 +1093,16 @@ export function createCanvasPainter(canvas: HTMLCanvasElement): CardgraphPainter
       }
       for (const edge of edges) {
         if (intersects(edge.bounds, world)) drawWire(edge, scene, 1, theme.hover, reveal)
+      }
+      // The ongoing part: once the path is fully revealed, a comet keeps running
+      // out along each wire for as long as the pointer stays on the card. It is a
+      // separate pass so the reveal can finish first and the loop can restart
+      // without replaying the scrim fade.
+      const flow = scene.hoverFlow
+      if (flow !== undefined && reveal >= 1) {
+        for (const edge of edges) {
+          if (intersects(edge.bounds, world)) drawComet(edge, scene, flow)
+        }
       }
       for (const card of layout.cards) {
         if (card.report === report) drawCard(card, scene, 'hover')
