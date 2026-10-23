@@ -449,8 +449,14 @@ function statusColour(status: string, theme: PaintTheme): string {
  * pattern, and its weight.
  *
  * Exported because the wires are canvas and the legend is DOM — the only way the
- * two cannot drift is for the legend to read this table instead of restating it in
- * CSS. The colour is a **token name**, not a value, so it resolves through the
+ * two cannot drift is for the legend to read this table instead of restating it
+ * in CSS. The four kinds keep **different hues and different dashes**: a delivery
+ * is the business blue, a copy the quiet caption grey dashed, a co-author the
+ * success green dotted, and a thread the primary ink — the spine of the drawing,
+ * read as structure rather than as an action. Hue is the second cue, never the
+ * only one: the dash pattern alone still separates all four in grayscale.
+ *
+ * The colour is a **token name**, not a value, so it resolves through the
  * theme like everything else.
  */
 export const WIRE_TOKENS: Readonly<Record<CardgraphEdgeKind, {
@@ -458,10 +464,10 @@ export const WIRE_TOKENS: Readonly<Record<CardgraphEdgeKind, {
   readonly dash: readonly number[]
   readonly width: number
 }>> = {
-  to: { colour: '--dsw-alias-label-secondary', dash: [], width: 1.4 },
+  to: { colour: '--dsw-alias-state-business-primary', dash: [], width: 1.4 },
   cc: { colour: '--dsw-alias-label-caption', dash: [2, 3], width: 1 },
-  author: { colour: '--dsw-alias-label-caption', dash: [1, 3], width: 1 },
-  thread: { colour: '--dsw-alias-state-business-primary', dash: [], width: 1.4 },
+  author: { colour: '--dsw-alias-state-success-primary', dash: [1, 3], width: 1 },
+  thread: { colour: '--dsw-alias-label-primary', dash: [], width: 1.2 },
 }
 
 /** Reverse lookup: which theme field a token fills. */
@@ -659,6 +665,44 @@ export function createCanvasPainter(canvas: HTMLCanvasElement): CardgraphPainter
   }
 
   /**
+   * Draw the card's status mark and report how much width it took.
+   *
+   * A **shape per state** — filled dot = open, check = acknowledged, block =
+   * closed — so "what state is this" does not depend on telling amber from green
+   * from grey. The mark carries the state colour as well, but as a second cue.
+   * @param theme - the resolved palette.
+   * @param status - the card's status state.
+   * @param x - left edge to draw at.
+   * @param textTop - top of the footer's text band (the card draws text with a top baseline).
+   * @returns the width the mark occupies, gap included.
+   */
+  const drawStatusMark = (theme: PaintTheme, status: string, x: number, textTop: number): number => {
+    const size = 7
+    const top = textTop + Math.max(0, (theme.fonts.meta.lineHeight - size) / 2)
+    ctx.globalAlpha = 1
+    ctx.setLineDash([])
+    if (status === 'acked') {
+      ctx.beginPath()
+      ctx.strokeStyle = theme.success
+      ctx.lineWidth = 1.4
+      ctx.moveTo(x, top + size * 0.45)
+      ctx.lineTo(x + size * 0.38, top + size * 0.9)
+      ctx.lineTo(x + size, top + size * 0.05)
+      ctx.stroke()
+    } else if (status === 'open') {
+      ctx.beginPath()
+      ctx.fillStyle = theme.warning
+      ctx.arc(x + size / 2, top + size / 2, size / 2, 0, Math.PI * 2)
+      ctx.fill()
+    } else {
+      ctx.beginPath()
+      ctx.fillStyle = theme.tertiary
+      ctx.fillRect(x, top, size, size)
+    }
+    return size + 5
+  }
+
+  /**
    * Draw one card.
    * @param card - the card.
    * @param scene - theme and labels.
@@ -719,15 +763,20 @@ export function createCanvasPainter(canvas: HTMLCanvasElement): CardgraphPainter
       ctx.fillText(text, textLeft, box.y + 28 + index * theme.fonts.body.lineHeight)
     })
 
-    // Footer: the status, and the task chip when there is room for both.
+    // Footer: the status mark, the status, and the task chip when there is room
+    // for both. The mark is a SHAPE on purpose — a filled dot for open, a check
+    // for acknowledged, a block for closed — so the state survives being read
+    // without its colour (a screenshot in grayscale, a colour-blind reader).
     ctx.font = fontString(theme.fonts.meta)
     const baseline = box.y + box.height - theme.fonts.meta.lineHeight - 6
+    const markWidth = drawStatusMark(theme, card.status, textLeft, baseline)
+    ctx.font = fontString(theme.fonts.meta)
     ctx.fillStyle = statusColour(card.status, theme)
     const status = scene.labels.status[card.status] ?? card.status
-    ctx.fillText(status, textLeft, baseline)
+    ctx.fillText(status, textLeft + markWidth, baseline)
     if (card.task !== undefined) {
       const statusWidth = measure(status)
-      const chipLeft = textLeft + statusWidth + 8
+      const chipLeft = textLeft + markWidth + statusWidth + 8
       const chipText = foldText(card.task, box.x + box.width - CARD_PADDING - chipLeft - 10, measure, 1)[0] ?? ''
       if (chipText !== '') {
         ctx.fillStyle = theme.frameBar

@@ -309,7 +309,9 @@ const paint = (scene: Record<string, unknown> = {}): { recorder: Recorder; paint
 
 /** A stroke that is a wire rather than a frame or card border, told apart by colour. */
 const wireStrokes = (recorder: Recorder): Shape[] =>
-  recorder.strokes.filter((stroke) => [themed.secondary, themed.caption, themed.business, themed.hover].includes(stroke.style))
+  recorder.strokes.filter((stroke) => [
+    themed.secondary, themed.caption, themed.business, themed.hover, themed.success, themed.text,
+  ].includes(stroke.style))
 
 const whole = paint()
 check('the background is painted in the theme\'s canvas colour', whole.recorder.rects[0]?.style === themed.canvas)
@@ -410,6 +412,38 @@ check('a card in another state draws that state\'s words',
   whole.recorder.texts.some((drawn) => drawn.text === '已回执'))
 check('the status stripe is as wide as the stripe and in the status tone',
   whole.recorder.rects.some((rect) => rect.style === themed.warning && rect.box.width === 3))
+check('each state also has a shape, not only a colour', (() => {
+  const inside = (box: Box, card: Box): boolean => box.x >= card.x && box.x <= card.x + card.width
+    && box.y >= card.y && box.y <= card.y + card.height
+  const one = (status: string): { layout: ReturnType<typeof buildCardgraph>; recorder: Recorder } => {
+    const layout = buildCardgraph(payload, [report(`R-1${status}`, { status })])
+    return { layout, recorder: paint({ layout }).recorder }
+  }
+  const open = one('open')
+  const openBox = open.layout.cards[0]?.bounds as Box
+  const dot = open.recorder.fills.some((fill) => fill.style === themed.warning
+    && fill.points === 2 && inside(fill.box, openBox))
+  const acked = one('acked')
+  const ackedBox = acked.layout.cards[0]?.bounds as Box
+  const checkMark = acked.recorder.strokes.some((stroke) => stroke.style === themed.success
+    && stroke.lineWidth === 1.4 && inside(stroke.box, ackedBox))
+  const closed = one('closed')
+  const closedBox = closed.layout.cards[0]?.bounds as Box
+  const block = closed.recorder.rects.some((rect) => rect.style === themed.tertiary
+    && rect.box.width <= 8 && rect.box.height <= 8 && inside(rect.box, closedBox))
+  return dot && checkMark && block
+})())
+check('a compact card draws no status mark either', (() => {
+  const layout = buildCardgraph(payload, plotted, { lod: 'compact' })
+  const recorder = paint({ layout }).recorder
+  const boxes = layout.cards.map((card) => card.bounds)
+  const marked = [...recorder.fills, ...recorder.rects].some((mark) =>
+    [themed.warning, themed.success, themed.tertiary].includes(mark.style)
+    && mark.box.width > 0 && mark.box.width <= 8 && mark.box.height <= 8
+    && boxes.some((box) => mark.box.x >= box.x && mark.box.x <= box.x + box.width
+      && mark.box.y >= box.y && mark.box.y <= box.y + box.height))
+  return !marked
+})())
 check('an empty frame says so', (() => {
   const oneCard = buildCardgraph(payload, [report('R-0009')])
   return paint({ layout: oneCard }).recorder.texts.some((text) => text.text === labels.empty)
