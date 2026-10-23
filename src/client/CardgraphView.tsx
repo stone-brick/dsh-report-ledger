@@ -16,15 +16,25 @@
  * What the canvas also cannot offer is accessibility — so every card that is on
  * screen gets a real, transparent `<button>` on top of it, which is what a keyboard
  * or a screen reader reaches, and the list below stays the full accessible path.
+ * A frame gets one too, over its title bar: that is the keyboard's way in.
+ *
+ * Navigation is layered, in the sense a subgraph editor means it: a session frame
+ * can be **entered**, which swaps what the drawing is a drawing of — frames
+ * outside the scope stop existing rather than being zoomed out of sight — and the
+ * breadcrumb above the box walks back out. The scope itself is the model's
+ * (`scopeInput`); this file only keeps the drill state and remembers where the
+ * reader was in each scope, so leaving and coming back lands where they left it.
  *
  * @module dsh-report-ledger/client/CardgraphView
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { PointerEvent as ReactPointerEvent, ReactElement } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactElement } from 'react'
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ReportFrontMatter, TimelinePayload } from '../shared/wire.ts'
-import { buildCardgraph, fitTransform, hitTest, lodFor, MAX_ZOOM, MIN_ZOOM, ZOOM_STEP } from './cardgraph-model.ts'
+import {
+  buildCardgraph, cullByBounds, fitTransform, hitTest, lodFor, MAX_ZOOM, MIN_ZOOM, scopeInput, ZOOM_STEP,
+} from './cardgraph-model.ts'
 import type { CardgraphViewport, Rect } from './cardgraph-model.ts'
 import {
   FALLBACK_THEME, WIRE_TOKENS, createCanvasPainter, createThemeReader,
@@ -32,6 +42,7 @@ import {
 import type { CardgraphPainter, PaintScene, ThemeReader } from './cardgraph-painter.ts'
 import { EDGE_LABEL, STATUS_LABEL } from './locales.ts'
 import type { Translate } from './ReportsView.tsx'
+import { shortId } from './timeline-model.ts'
 
 /**
  * Wheel-zoom exponent per pixel of delta, so that one 100px notch — a mouse
@@ -163,6 +174,8 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
   const [zoom, setZoom] = useState(1)
   const [offset, setOffset] = useState({ x: 0, y: 0 })
   const [hover, setHover] = useState<HoverTarget>({})
+  /** The session id the drawing is scoped to; absent means the whole tree. */
+  const [drill, setDrill] = useState<string | undefined>(undefined)
   const [ready, setReady] = useState(false)
   /** Bumped when the palette changed, so the theme is read again. */
   const [themeTick, setThemeTick] = useState(0)
@@ -170,7 +183,24 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
   const [fontTick, setFontTick] = useState(0)
   /** Bumped when the device pixel ratio may have changed. */
   const [dprTick, setDprTick] = useState(0)
-  const fitted = useRef(false)
+  /**
+   * The scope whose view has already been chosen (fitted, or restored from the
+   * reader's own transform). Empty until the box has a width.
+   */
+  const fittedScope = useRef<string | null>(null)
+  /**
+   * A transform per scope.
+   *
+   * Leaving a level and coming back has to land where the reader was, not at the
+   * fit — the fit is only the first sight of a scope they have not touched. The
+   * `fitted` flag travels with it: a view the fit chose still follows the box, a
+   * view the reader took over does not.
+   */
+  const viewMemory = useRef(new Map<string, {
+    zoom: number
+    offset: { x: number; y: number }
+    fitted: boolean
+  }>())
   /**
    * Whether the transform on screen is still the fit's own.
    *
@@ -187,17 +217,41 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
   zoomRef.current = zoom
   offsetRef.current = offset
 
+  /**
+   * What this drawing is a drawing **of**.
+   *
+   * Drilling in swaps the input rather than the transform: the frames outside the
+   * scope stop existing, so their wires land on the outside frame instead of
+   * crossing the drawing, and no view of the parent level can be mistaken for this
+   * one. The trail comes from the model's ancestry walk, not from the drill state,
+   * so a scope whose session vanished from a refreshed payload degrades to the
+   * whole tree instead of leaving a crumb that leads nowhere.
+   */
+  const scope = useMemo(() => scopeInput(payload, reports, drill), [payload, reports, drill])
+  const scopeKey = scope.trail.join('/')
   const lod = lodFor(zoom)
-  const layout = useMemo(() => buildCardgraph(payload, reports, { lod }), [payload, reports, lod])
+  const layout = useMemo(() => buildCardgraph(scope.payload, scope.reports, { lod }), [scope, lod])
   /** The drawing as of this render, for that same listener: it needs its extent. */
   const layoutRef = useRef(layout)
   layoutRef.current = layout
 
+  /** Frame titles for the breadcrumb; a crumb that showed an id would be a riddle. */
+  const titles = useMemo(
+    () => new Map(payload.sessions.map((session) => [session.id, session.title])),
+    [payload],
+  )
+
   const labels = useMemo(() => {
     const status: Record<string, string> = {}
     for (const [state, key] of Object.entries(STATUS_LABEL)) status[state] = t(key)
-    return { external: t('cardgraph.external'), empty: t('cardgraph.empty'), status }
-  }, [t])
+    return {
+      // The same frame, two names: from outside a scope its members are "outside
+      // the tree", from inside it they are "outside the scope".
+      external: t(scope.trail.length === 0 ? 'cardgraph.external' : 'cardgraph.outside'),
+      empty: t('cardgraph.empty'),
+      status,
+    }
+  }, [scope.trail.length, t])
 
   // ---------------------------------------------------------------------------
   // Mounting: painters, theme reader, the observed size, and the two things that
@@ -358,7 +412,7 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
   const fit = useCallback(() => {
     const box = boxRef.current
     if (box === null) return
-    const next = fitTransform(payload, reports, box.clientWidth)
+    const next = fitTransform(scope.payload, scope.reports, box.clientWidth)
     if (next === undefined) return
     // The transform is the fit's own again, so it follows the box again.
     fittedTransform.current = true
@@ -366,7 +420,7 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
     // Anchored to the top rather than centred vertically: a frame's cards run
     // oldest first, so a drawing taller than its box is read from the top down.
     setOffset({ x: next.offsetX, y: next.offsetY })
-  }, [payload, reports])
+  }, [scope])
 
   /**
    * The `+`/`−` controls.
@@ -380,21 +434,84 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
     setZoom((z) => clamp(z * factor, MIN_ZOOM, MAX_ZOOM))
   }, [])
 
+  /** Remember the transform a scope is being left with, so coming back does not fit again. */
+  const remember = useCallback((key: string) => {
+    viewMemory.current.set(key, {
+      zoom: zoomRef.current,
+      offset: { ...offsetRef.current },
+      fitted: fittedTransform.current,
+    })
+  }, [])
+
   /**
-   * The first view is the fit — the same rule the control runs.
+   * Enter one session's subtree.
    *
-   * It used to be a rule of its own (fit the width, never below the card tier,
-   * never above 100%) because the fit of the day — the whole drawing inside the
-   * box — landed around 57%, the compact tier, and opened the tab as a wall of
-   * one-line cards. With the fit now filling the width in the richest tier that
-   * can afford it, that special case has nothing left to correct, and one rule is
-   * one fewer way for the first sight and the control to disagree.
+   * The payload's own root is not enterable: its scope *is* the whole tree, so a
+   * crumb for it would be indistinguishable from the first crumb.
+   * @param index - the frame's index in the current layout.
+   */
+  const enterFrame = useCallback((index: number) => {
+    const id = layoutRef.current.frames[index]?.id
+    if (id === undefined || id === payload.root) return
+    remember(scopeKey)
+    setDrill(id)
+  }, [payload.root, remember, scopeKey])
+
+  /**
+   * Walk back out to a breadcrumb level.
+   * @param level - how many crumbs to keep; 0 is the whole tree.
+   */
+  const leaveTo = useCallback((level: number) => {
+    if (level >= scope.trail.length) return
+    remember(scopeKey)
+    setDrill(level === 0 ? undefined : scope.trail[level - 1])
+  }, [remember, scope.trail, scopeKey])
+
+  /**
+   * Choose the view for a scope: the one the reader left it with, or the fit.
+   *
+   * This replaces the old "first sight is the fit" guard rather than adding to it.
+   * A scope is settled once, on arrival — fitted when it is new, restored (zoom,
+   * pan and all) when the reader had already adjusted it, and re-fitted when the
+   * box moved while they were inside. Keying it on the scope instead of on the
+   * layout is what keeps a poll from re-fitting the drawing every ten seconds.
    */
   useEffect(() => {
-    if (fitted.current || size.width === 0 || layout.cards.length === 0) return
-    fitted.current = true
+    if (size.width === 0 || layout.width === 0) return
+    if (fittedScope.current === scopeKey) return
+    fittedScope.current = scopeKey
+    // The hover named a frame index in the previous drawing; keeping it would
+    // highlight whatever happens to sit at that index here.
+    setHover((current) => (sameHover(current, {}) ? current : {}))
+    const remembered = viewMemory.current.get(scopeKey)
+    if (remembered !== undefined && !remembered.fitted) {
+      fittedTransform.current = false
+      setZoom(clamp(remembered.zoom, MIN_ZOOM, MAX_ZOOM))
+      setOffset(remembered.offset)
+      return
+    }
     fit()
-  }, [fit, layout, size])
+  }, [fit, layout, scopeKey, size])
+
+  /**
+   * Esc leaves the scope, like the breadcrumb does.
+   *
+   * Attached only while drilled, so it never competes with the page for the key,
+   * and skipped while the reader is typing somewhere.
+   */
+  useEffect(() => {
+    if (scope.trail.length === 0) return
+    const win = globalThis.window
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      const target = event.target
+      if (target instanceof Element && target.closest('input, textarea, select, [contenteditable="true"]') !== null) return
+      event.preventDefault()
+      leaveTo(scope.trail.length - 1)
+    }
+    win.addEventListener('keydown', onKeyDown)
+    return () => { win.removeEventListener('keydown', onKeyDown) }
+  }, [leaveTo, scope.trail.length])
 
   /**
    * Follow the box, but only while the box is what chose the view.
@@ -554,22 +671,64 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
     drag.current = null
   }, [])
 
+  /**
+   * Double-click a frame to enter it.
+   *
+   * The frame's title bar is also a real button (see the accessible layer), so
+   * this is the pointer reader's route and that one is the keyboard's. A press
+   * that turned into a pan never produces a double-click, which is why this shares
+   * the drag's slop instead of measuring its own.
+   */
+  const onDoubleClick = useCallback((event: ReactMouseEvent<HTMLDivElement>) => {
+    const hit = pick(event.clientX, event.clientY)
+    if (hit?.kind !== 'frame' || hit.frame === undefined) return
+    enterFrame(hit.frame)
+  }, [enterFrame, pick])
+
   // ---------------------------------------------------------------------------
-  // The accessible layer: one real button per visible card
+  // The accessible layer: one real button per visible thing
+  //
+  // The canvas has no elements to reach, so every card gets a transparent button
+  // over it and every enterable frame gets one over its title bar — the same
+  // rectangle the mouse double-clicks. Culling uses the model's own rectangle test,
+  // so "what is on screen" is one rule for the drawing, the buttons and the wires.
   // ---------------------------------------------------------------------------
-  const visibleCards = useMemo(() => {
-    const left = -offset.x / zoom
-    const top = -offset.y / zoom
-    const right = (size.width - offset.x) / zoom
-    const bottom = (size.height - offset.y) / zoom
-    return layout.cards.filter((card) => card.bounds.x < right && left < card.bounds.x + card.bounds.width
-      && card.bounds.y < bottom && top < card.bounds.y + card.bounds.height)
-  }, [layout, offset, zoom, size])
+  /** What the box can see, in drawing coordinates: the inverse of the painter's transform. */
+  const visibleRect = useMemo<Rect>(() => ({
+    x: -offset.x / zoom,
+    y: -offset.y / zoom,
+    width: size.width / zoom,
+    height: size.height / zoom,
+  }), [offset, zoom, size])
+  const visibleCards = useMemo(() => cullByBounds(layout.cards, visibleRect), [layout, visibleRect])
+  const visibleFrames = useMemo(() => cullByBounds(layout.frames, visibleRect), [layout, visibleRect])
 
   const percent = Math.round(zoom * 100)
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', ...(fill ? fillRoot : {}) }}>
       <div style={controls}>
+        <nav aria-label={t('cardgraph.breadcrumb')} style={crumbs}>
+          {scope.trail.length === 0
+            ? <span aria-current="page" style={crumbCurrent}>{t('cardgraph.all')}</span>
+            : <button type="button" style={crumbButton} onClick={() => { leaveTo(0) }}>{t('cardgraph.all')}</button>}
+          {scope.trail.map((id, index) => {
+            const current = index === scope.trail.length - 1
+            const label = titles.get(id) ?? shortId(id)
+            return (
+              <Fragment key={id}>
+                <span aria-hidden="true" style={crumbSep}>/</span>
+                {current
+                  ? <span aria-current="page" style={crumbCurrent} title={idHint(id)}>{label}</span>
+                  : <button type="button" style={crumbButton} title={idHint(id)} onClick={() => { leaveTo(index + 1) }}>{label}</button>}
+              </Fragment>
+            )
+          })}
+        </nav>
+        {scope.trail.length > 0 && (
+          <Button variant="outline" size="sm" onClick={() => { leaveTo(scope.trail.length - 1) }}>
+            {t('cardgraph.up')}
+          </Button>
+        )}
         <Button variant="outline" size="sm" aria-label={t('cardgraph.zoomOut')} onClick={() => { stepZoom(1 / ZOOM_STEP) }}>−</Button>
         <span style={percentStyle}>{t('cardgraph.zoom', { percent })}</span>
         <Button variant="outline" size="sm" aria-label={t('cardgraph.zoomIn')} onClick={() => { stepZoom(ZOOM_STEP) }}>+</Button>
@@ -584,6 +743,7 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
         onPointerUp={onPointerUp}
         onPointerCancel={onPointerCancel}
         onPointerLeave={onPointerLeave}
+        onDoubleClick={onDoubleClick}
         title={t('cardgraph.gestureHint')}
         style={{
           ...box,
@@ -593,6 +753,26 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
       >
         <canvas ref={baseRef} role="img" aria-label={t('cardgraph.summary', { frames: layout.frames.length, cards: layout.cards.length })} style={layer} />
         <canvas ref={pathRef} aria-hidden="true" style={layer} />
+        {visibleFrames.map((frame) => {
+          const id = frame.id
+          if (id === undefined || id === payload.root) return null
+          return (
+            <button
+              key={`frame-${String(frame.index)}`}
+              type="button"
+              aria-label={t('cardgraph.enterFrame', { title: titles.get(id) ?? shortId(id) })}
+              title={t('cardgraph.enterFrame', { title: idHint(id) })}
+              onClick={() => { enterFrame(frame.index) }}
+              style={{
+                ...hitButton,
+                left: `${frame.bounds.x * zoom + offset.x}px`,
+                top: `${frame.bounds.y * zoom + offset.y}px`,
+                width: `${frame.bounds.width * zoom}px`,
+                height: `${layout.frameHeaderHeight * zoom}px`,
+              }}
+            />
+          )
+        })}
         {visibleCards.map((card) => (
           <button
             key={card.report}
@@ -631,6 +811,54 @@ const percentStyle: Record<string, string> = {
   fontSize: 'var(--dsw-font-xxxs-11, 11px)',
   color: 'var(--dsw-alias-label-caption)',
   fontVariantNumeric: 'tabular-nums',
+}
+
+/**
+ * The breadcrumb: a real navigation landmark, because the drawing's own scope is
+ * not otherwise announced to a screen reader.
+ */
+const crumbs: Record<string, string> = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: '4px',
+  minWidth: '0',
+  flexWrap: 'wrap',
+}
+
+const crumbButton: Record<string, string> = {
+  border: '0',
+  padding: '0 2px',
+  background: 'transparent',
+  cursor: 'pointer',
+  font: 'inherit',
+  fontSize: 'var(--dsw-font-xxxs-11, 11px)',
+  color: 'var(--dsw-alias-label-caption)',
+  textDecoration: 'underline',
+}
+
+const crumbCurrent: Record<string, string> = {
+  padding: '0 2px',
+  fontSize: 'var(--dsw-font-xxxs-11, 11px)',
+  color: 'var(--dsw-alias-label-caption)',
+  fontWeight: '600',
+  maxWidth: '200px',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
+}
+
+const crumbSep: Record<string, string> = {
+  fontSize: 'var(--dsw-font-xxxs-11, 11px)',
+  color: 'var(--dsw-alias-label-caption)',
+}
+
+/** The transparent button layer: a frame's title bar, and every card. */
+const hitButton: Record<string, string> = {
+  position: 'absolute',
+  padding: '0',
+  border: '0',
+  background: 'transparent',
+  cursor: 'pointer',
 }
 
 const box: Record<string, string> = {
