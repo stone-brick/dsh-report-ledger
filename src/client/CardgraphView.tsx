@@ -28,7 +28,7 @@
  * @module dsh-report-ledger/client/CardgraphView
  */
 
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactElement } from 'react'
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ReportFrontMatter, TimelinePayload } from '../shared/wire.ts'
@@ -42,6 +42,7 @@ import {
 import type { CardgraphPainter, PaintScene, ThemeReader } from './cardgraph-painter.ts'
 import { EDGE_LABEL, STATUS_LABEL } from './locales.ts'
 import type { Translate } from './ReportsView.tsx'
+import { selection } from './selection-bridge.ts'
 import { shortId } from './timeline-model.ts'
 
 /**
@@ -174,6 +175,17 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
   const [zoom, setZoom] = useState(1)
   const [offset, setOffset] = useState({ x: 0, y: 0 })
   const [hover, setHover] = useState<HoverTarget>({})
+  /**
+   * What the other surface (the list) is pointing at, and the report it has open.
+   *
+   * The canvas is in the right column and the list is in the conversation area:
+   * two React trees, no shared props, one module — so the bridge under
+   * `selection-bridge.ts` is the whole channel. A pointer on a card wins over a
+   * row the list lit, because that pointer is physically here; the row's hover
+   * shows whenever this pointer is on empty canvas.
+   */
+  const bridged = useSyncExternalStore(selection.subscribe, selection.get)
+  const pointed = hover.report ?? bridged.hover
   /** The session id the drawing is scoped to; absent means the whole tree. */
   const [drill, setDrill] = useState<string | undefined>(undefined)
   const [ready, setReady] = useState(false)
@@ -349,10 +361,10 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
     ...baseScene,
     focus: {
       ...(openReport === undefined ? {} : { selected: openReport }),
-      ...(hover.report === undefined ? {} : { report: hover.report }),
+      ...(pointed === undefined ? {} : { report: pointed }),
       ...(hover.frame === undefined ? {} : { frame: hover.frame }),
     },
-  }), [baseScene, openReport, hover])
+  }), [baseScene, openReport, pointed, hover.frame])
 
   // ---------------------------------------------------------------------------
   // Painting
@@ -635,6 +647,10 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
     const next: HoverTarget = hit?.kind === 'card' && hit.report !== undefined
       ? { report: hit.report }
       : hit?.kind === 'frame' && hit.frame !== undefined ? { frame: hit.frame } : {}
+    // The list is the other half of this hover: tell it what the pointer is on,
+    // or that it is on nothing here (its own hover, if any, is not ours to erase).
+    if (next.report === undefined) selection.clearHover('canvas')
+    else selection.hover(next.report, 'canvas')
     // A move within the same card is not a new hover: returning the current state
     // lets React skip the render (and the overlay repaint that would follow).
     setHover((current) => (sameHover(current, next) ? current : next))
@@ -662,6 +678,7 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
     // the box: the release is delivered here anyway, so the drag is not abandoned.
     if (pressing !== null && event.currentTarget.hasPointerCapture(pressing.pointerId)) return
     drag.current = null
+    selection.clearHover('canvas')
     setHover((current) => (sameHover(current, {}) ? current : {}))
   }, [])
 
@@ -669,6 +686,7 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
   const onPointerCancel = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     if (!event.isPrimary) return
     drag.current = null
+    selection.clearHover('canvas')
   }, [])
 
   /**
@@ -788,8 +806,8 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
             aria-label={`${card.report} · ${card.subject}`}
             title={idHint(card.report)}
             onClick={() => { onOpen(card.report) }}
-            onFocus={() => { setHover({ report: card.report }) }}
-            onBlur={() => { setHover({}) }}
+            onFocus={() => { setHover({ report: card.report }); selection.hover(card.report, 'canvas') }}
+            onBlur={() => { setHover({}); selection.clearHover('canvas') }}
             style={{
               position: 'absolute',
               left: `${card.bounds.x * zoom + offset.x}px`,

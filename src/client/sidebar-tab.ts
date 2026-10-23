@@ -32,19 +32,25 @@
  * The drawing the conversation tab used to carry, filling the panel instead of
  * sitting in a fixed 420px box — the panel owns its height, and it can be split
  * or taken fullscreen, which is most of the reason to put a drawing in this
- * column at all. Picking a card opens that report's detail underneath, through
- * the same view the conversation tab's rows use, so one report cannot read
- * differently in the two places.
+ * column at all.
+ *
+ * Picking a card does **not** open the detail here. A half-height drawing is the
+ * price of an inline detail, and it is a bad price: the drawing is the reason the
+ * column exists. The click instead switches the conversation area to the report
+ * view and opens that report there, where there is room for the transfer path and
+ * the body — the two surfaces talk through `selection-bridge.ts`, which is also
+ * what makes hovering one highlight the other.
  *
  * @module dsh-report-ledger/client/sidebar-tab
  */
 
-import { createElement, useCallback, useMemo, useState } from 'react'
+import { createElement, useCallback, useMemo, useSyncExternalStore } from 'react'
 import type { ReactElement } from 'react'
 import { CardgraphView } from './CardgraphView.tsx'
-import { ReportDetailView } from './ReportDetailView.tsx'
-import { buildRows, reportIds, sessionTitles, shortId } from './timeline-model.ts'
-import { useReportDetail, useTimeline } from './timeline-source.ts'
+import { activateReportTab } from './report-tab.ts'
+import { selection } from './selection-bridge.ts'
+import { buildRows, sessionTitles } from './timeline-model.ts'
+import { useTimeline } from './timeline-source.ts'
 import type { Translate } from './ReportsView.tsx'
 
 /** This type's identity in the tab system: unique, and the key both seats use. */
@@ -126,22 +132,13 @@ const muted: Record<string, string> = {
 }
 
 /**
- * The canvas over the open report's detail.
+ * The drawing alone: it takes whatever the panel has.
  *
- * The split is even on purpose: the drawing keeps half the panel while a report
- * is read, and all of it otherwise. A reader who wants more of either has the
- * panel's own fullscreen and split rather than a second control here.
+ * There is no second cell any more. The detail used to split the panel evenly with
+ * the drawing, which halved the thing the column exists for; it now opens in the
+ * conversation area, where it has room and the drawing keeps its height.
  */
-const stack: Record<string, string> = {
-  display: 'flex',
-  flexDirection: 'column',
-  height: '100%',
-  minHeight: '0',
-}
-/** The drawing alone: it takes whatever the panel has. */
 const stackFull: Record<string, string> = { flex: '1 1 auto', minHeight: '0' }
-const stackCanvas: Record<string, string> = { flex: '1 1 50%', minHeight: '0' }
-const stackDetail: Record<string, string> = { flex: '1 1 50%', minHeight: '0', overflow: 'hidden' }
 
 /**
  * Bind the tab body to the plugin's copy.
@@ -156,22 +153,21 @@ function bodyFor(t: Translate): (props: TabBodyProps) => ReactElement {
   return function LedgerCanvasBody(props: TabBodyProps): ReactElement {
     const sessionId = typeof props.sessionId === 'string' ? props.sessionId : ''
     const { payload, error } = useTimeline(sessionId)
-    // Which card's path is being read. Unlike the conversation tab there is no
-    // list to expand a row into, so clicking a card opens its detail under the
-    // drawing and clicking it again puts the drawing back on its own.
-    const [openReport, setOpenReport] = useState<string | undefined>(undefined)
-    // The detail rides the timeline's own tick: a report amended while the reader
-    // watches it keeps up, without a second cadence to reason about.
-    const { detail, error: detailError } = useReportDetail(openReport, payload?.generatedAt ?? 0)
+    /**
+     * What the list has open.
+     *
+     * This surface does not open anything itself: the list is where a report is
+     * read, so it owns the state and the canvas follows it (for the selected
+     * card's accent). The session is compared before honoring it, so a value left
+     * by another session cannot light a card here.
+     */
+    const bridged = useSyncExternalStore(selection.subscribe, selection.get)
+    const openReport = bridged.session === sessionId ? bridged.report : undefined
 
     const rows = useMemo(() => (payload === undefined ? [] : buildRows(payload)), [payload])
     // Unfiltered on purpose: a docked canvas has no toolbar of its own to filter
     // with, and the conversation tab beside it is where narrowing belongs.
     const reports = useMemo(() => rows.flatMap((row) => (row.kind === 'report' ? [row.front] : [])), [rows])
-    // Which reports this tree actually holds — a thread link can lead to one it
-    // does not (a co-author's report, or a child living in another tree), and the
-    // detail says so rather than pretending the drawing lost it.
-    const inList = useMemo(() => (payload === undefined ? new Set<string>() : reportIds(payload)), [payload])
     const titles = useMemo(
       () => (payload === undefined ? new Map<string, string>() : sessionTitles(payload)),
       [payload],
@@ -180,23 +176,29 @@ function bodyFor(t: Translate): (props: TabBodyProps) => ReactElement {
       const title = titles.get(id)
       return title === undefined ? id : `${title} · ${id}`
     }, [titles])
+    /**
+     * Open this card's report in the report view.
+     *
+     * The selection crosses through the bridge; bringing the view forward has to
+     * be a tab click — `report-tab.ts` says why, and degrades to a no-op when the
+     * shell offers no tab. Clicking the open card again closes it, matching what a
+     * row does.
+     */
     const onOpen = useCallback((report: string) => {
-      setOpenReport((current) => (current === report ? undefined : report))
-    }, [])
+      selection.open(bridged.report === report ? undefined : report, sessionId)
+      activateReportTab(globalThis.document, t('view.tab'))
+    }, [bridged.report, sessionId, t])
 
     if (error !== undefined) return createElement('div', { style: muted }, t('view.error', { code: error }))
     if (payload === undefined) return createElement('div', { style: muted }, t('view.loading'))
     if (reports.length === 0) return createElement('div', { style: muted }, t('view.empty'))
 
-    // The canvas keeps its place in the tree whether or not a report is open: one
-    // container, the drawing in the first cell, the detail in the second. Switching
-    // the root between the drawing and a wrapper around it (the earlier shape)
-    // unmounted and remounted `CardgraphView` on every open and close, which threw
-    // away the reader's zoom, pan and fitted state — the one view the panel is
-    // supposed to leave where the reader put it.
-    const canvasCell = createElement(
+    // One container and one child: no open/closed layout to swap in and out, so
+    // the drawing keeps its zoom, pan and drill state across a click on a card —
+    // the state that used to be thrown away when the detail half appeared.
+    return createElement(
       'div',
-      { style: openReport === undefined ? stackFull : stackCanvas },
+      { style: stackFull },
       createElement(CardgraphView, {
         payload,
         reports,
@@ -206,30 +208,6 @@ function bodyFor(t: Translate): (props: TabBodyProps) => ReactElement {
         idHint,
         fill: true,
       }),
-    )
-    if (openReport === undefined) return createElement('div', { style: stack }, canvasCell)
-    return createElement(
-      'div',
-      { style: stack },
-      canvasCell,
-      createElement(
-        'div',
-        { style: stackDetail },
-        createElement(ReportDetailView, {
-          report: openReport,
-          detail,
-          error: detailError,
-          t,
-          idHint,
-          variant: 'pane',
-          onOpenReport: setOpenReport,
-          inList: inList.has(openReport),
-          // The drawing plots every report of the tree, so anything reachable from
-          // it is admitted by construction; the filter lives in the other surface.
-          visibleInFilter: true,
-          onClose: () => { setOpenReport(undefined) },
-        }),
-      ),
     )
   }
 }

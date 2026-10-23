@@ -17,7 +17,7 @@
  * @module dsh-report-ledger/client/ReportsView
  */
 
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { ReactElement } from 'react'
 import {
   Button,
@@ -51,6 +51,7 @@ import {
   type StatusFilter,
 } from './timeline-model.ts'
 import { ReportDetailView } from './ReportDetailView.tsx'
+import { selection } from './selection-bridge.ts'
 import { getJson, POLL_INTERVAL_MS, TIMELINE_URL, useReportDetail } from './timeline-source.ts'
 import { fill, stamp } from './format.ts'
 import { HOP_LABEL, LEASE_HINT, STATUS_LABEL, STATUS_TONE, type ReportLedgerKey } from './locales.ts'
@@ -106,6 +107,15 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
   const [scrollTarget, setScrollTarget] = useState<string | undefined>(undefined)
   /** Row containers, so a thread jump can bring its target on screen. */
   const rowRefs = useRef<Map<string, HTMLDivElement>>(new Map())
+  /**
+   * What the other surface (the right column's canvas) is pointing at, and the
+   * report it asked to open.
+   *
+   * The two surfaces are separate React trees in one bundle, so the bridge is the
+   * only channel between them; this side owns the open report — the canvas only
+   * requests it — and follows the hover in both directions.
+   */
+  const bridged = useSyncExternalStore(selection.subscribe, selection.get)
   const [status, setStatus] = useState<StatusFilter>(rememberedStatus)
   const [text, setText] = useState('')
   const [basis, setBasis] = useState<ReportTimeBasis>('created')
@@ -135,6 +145,18 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
     setOpenReport(undefined)
     setScrollTarget(undefined)
   }, [sessionId])
+
+  // The canvas's click arrives here: open the row it named, and let the scroll
+  // effect below bring it on screen once it has a row. The value carries the
+  // session it was published for, so a selection left behind by another session
+  // is inert rather than opening a stranger's report in this tree.
+  useEffect(() => {
+    if (sessionId === undefined || sessionId === '') return
+    if (bridged.session !== sessionId) return
+    if (bridged.report === openReport) return
+    setOpenReport(bridged.report)
+    if (bridged.report !== undefined) setScrollTarget(bridged.report)
+  }, [bridged.report, bridged.session, openReport, sessionId])
 
   useEffect(() => {
     if (sessionId === undefined || sessionId === '') {
@@ -266,7 +288,21 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
   const openLinked = useCallback((report: string | undefined) => {
     setOpenReport(report)
     setScrollTarget(report)
-  }, [])
+    selection.open(report, sessionId)
+  }, [sessionId])
+
+  /**
+   * Open or close one row, publishing the choice so the canvas can follow it.
+   *
+   * The row click and the disclosure button are the same act, so both go through
+   * here: one owner of "what is open", one write to the bridge, no chance of the
+   * two surfaces disagreeing about it.
+   */
+  const toggleReport = useCallback((report: string) => {
+    const next = openReport === report ? undefined : report
+    setOpenReport(next)
+    selection.open(next, sessionId)
+  }, [openReport, sessionId])
 
   const shell: Record<string, string | number> = {
     padding: '16px 20px',
@@ -497,7 +533,9 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
                 keeps a click handler with no role: the keyboard path is the
                 button, and the pointer path is the row. */}
             <div
-              onClick={() => { setOpenReport(expanded ? undefined : front.report) }}
+              onClick={() => { toggleReport(front.report) }}
+              onPointerEnter={() => { selection.hover(front.report, 'list') }}
+              onPointerLeave={() => { selection.clearHover('list') }}
               style={{
                 display: 'flex',
                 gap: '8px',
@@ -508,6 +546,12 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
                 cursor: 'pointer',
                 background: 'var(--dsw-alias-bg-layer-1, rgba(0,0,0,0.02))',
                 border: '1px solid var(--dsw-alias-border-l1, rgba(0,0,0,0.06))',
+                // The canvas's hover lands here: same pointer, other surface. The
+                // cue is an outline rather than a fill, so it reads as "the drawing
+                // is pointing at this row", not as a second selection.
+                ...(bridged.hover === front.report
+                  ? { boxShadow: 'inset 0 0 0 1px var(--dsw-alias-border-l2, rgba(0,0,0,0.22))' }
+                  : {}),
               }}
             >
               <Button
@@ -525,7 +569,7 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
                   // The row's own click handler is the same action; without this
                   // the one click would toggle twice and appear to do nothing.
                   event.stopPropagation()
-                  setOpenReport(expanded ? undefined : front.report)
+                  toggleReport(front.report)
                 }}
               />
               <span style={{ flex: '1 1 auto', minWidth: 0 }}>
