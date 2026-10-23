@@ -438,6 +438,8 @@ const CLEAR = 4
 const THREAD_ROW_STEP = 5
 /** The gap a card needs below it before its first thread run. */
 const THREAD_ROW_CLEAR = 6
+/** Vertical room a downward arrow needs above the card it lands on. */
+const THREAD_ARROW_CLEAR = 15
 
 /** How many lanes one build actually used per channel. */
 interface ChannelDemand {
@@ -445,6 +447,10 @@ interface ChannelDemand {
   readonly roads: Map<string, number>
   /** The most thread runs any one card had to fan out. */
   threadRows: number
+  /** Whether some thread lands on a card's top edge (so the arrow needs room). */
+  threadArrows: boolean
+  /** Whether some co-author wire lands on a card's side (same, horizontally). */
+  cardSideArrows: boolean
 }
 
 /**
@@ -474,7 +480,7 @@ export function buildCardgraph(
   reports: readonly ReportFrontMatter[],
   options: Partial<CardgraphOptions> = {},
 ): CardgraphLayout {
-  const demand: ChannelDemand = { gutters: new Map(), roads: new Map(), threadRows: 0 }
+  const demand: ChannelDemand = { gutters: new Map(), roads: new Map(), threadRows: 0, threadArrows: false, cardSideArrows: false }
   const first = buildOne(payload, reports, options, demand)
   if (options.fitChannels !== true) return first
   const opts: CardgraphOptions = { ...DEFAULT_CARDGRAPH_OPTIONS, ...options }
@@ -485,9 +491,14 @@ export function buildCardgraph(
   // Inside a frame, a card that fans several threads out needs room *below it* for
   // their horizontal runs: they leave the same bottom edge and all run to the
   // gutter, so without distinct rows they draw on top of one another.
-  const cardGap = Math.max(opts.cardGap, demand.threadRows * THREAD_ROW_STEP + THREAD_ROW_CLEAR)
-  if (columnGap === opts.columnGap && frameGap === opts.frameGap && cardGap === opts.cardGap) return first
-  return buildOne(payload, reports, { ...options, columnGap, frameGap, cardGap }, { gutters: new Map(), roads: new Map(), threadRows: 0 })
+  const cardGap = Math.max(opts.cardGap, demand.threadRows * THREAD_ROW_STEP + THREAD_ROW_CLEAR, demand.threadArrows ? THREAD_ARROW_CLEAR + 4 : 0)
+  const framePaddingTop = Math.max(opts.framePaddingTop, demand.threadArrows ? THREAD_ARROW_CLEAR + 4 : 0)
+  const framePaddingX = Math.max(opts.framePaddingX, demand.cardSideArrows ? THREAD_ARROW_CLEAR + 2 : 0)
+  if (columnGap === opts.columnGap && frameGap === opts.frameGap && cardGap === opts.cardGap
+    && framePaddingTop === opts.framePaddingTop && framePaddingX === opts.framePaddingX) return first
+  return buildOne(payload, reports, {
+    ...options, columnGap, frameGap, cardGap, framePaddingTop, framePaddingX,
+  }, { gutters: new Map(), roads: new Map(), threadRows: 0, threadArrows: false, cardSideArrows: false })
 }
 
 /**
@@ -1065,13 +1076,31 @@ function buildOne(
       ? { x: to.x + outward(to.side) * STUB, y: to.y }
       : { x: to.x, y: to.y + outward(to.side) * STUB }
     // Threads leaving one card run to the same gutter: give each its own row below
-    // the parent (and above the child) so they do not stack on the card's edge.
+    // the parent (and above the child) so they do not stack on the card's edge. The
+    // target side keeps room for the **arrowhead**, not just for the line: the head
+    // is drawn with its tip a few units short of the edge and its base further back,
+    // so the last horizontal run has to sit `THREAD_ARROW_CLEAR` away, or the head
+    // pokes out of the card above.
     const row = threadRow.get(edge)
     if (row !== undefined) {
-      const offset = THREAD_ROW_CLEAR + row * THREAD_ROW_STEP
-      start.y = from.y + offset
-      end.y = to.y - offset
+      const sourceOffset = THREAD_ROW_CLEAR + row * THREAD_ROW_STEP
+      const targetOffset = THREAD_ARROW_CLEAR + row * THREAD_ROW_STEP
+      start.y = from.y + outward(from.side) * sourceOffset
+      end.y = to.y + outward(to.side) * targetOffset
     }
+    // Even when the gap is too small to hold the arrow (a build without
+    // `fitChannels`, or a first card right under the header), the run must not be
+    // pushed into the title bar: clamp it below the header and let the arrow live
+    // in the smaller gap.
+    if (row !== undefined && to.side === 'top') {
+      const targetCard = to.kind === 'card' ? cards[to.index] : undefined
+      const frameBox = targetCard === undefined ? undefined : fixed[targetCard.frame]
+      if (frameBox !== undefined) {
+        end.y = Math.max(end.y, frameBox.y + opts.frameHeaderHeight + 2)
+      }
+    }
+    if (edge.kind === 'thread') demand.threadArrows = true
+    if (edge.kind === 'author' && to.kind === 'card') demand.cardSideArrows = true
     const fromColumn = columnOf(from)
     const toColumn = columnOf(to)
     const fromSide = horizontal(from.side) ? from.side : gutterSide(fromColumn)

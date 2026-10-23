@@ -364,13 +364,35 @@ check('the frame is taller to hold those rows', (() => {
   const grown = fanOut.frames.find((frame) => frame.id === 'session-peer')?.bounds.height ?? 0
   const plain = base.frames.find((frame) => frame.id === 'session-peer')?.bounds.height ?? 0
   return grown > plain
-})())// Adjacent cards in one frame: the thread is a short S in the 8px gap, not a detour
+})())
+// Adjacent cards in one frame: the thread is a short S in the 8px gap, not a detour
 // out to the gutter and back.
 const sameColumn = buildCardgraph(payload, [
   report('R-0090', { from: 'session-peer', created: at(5) }),
   report('R-0091', { from: 'session-peer', parent: 'R-0090', created: at(6) }),
 ])
 const loop = sameColumn.edges.find((edge) => edge.kind === 'thread')
+// The arrowhead needs vertical room, not just the line: its tip stops short of the
+// card's top edge and its base sits further back, so the last horizontal run must be
+// at least `THREAD_ARROW_CLEAR` above that edge.
+check('a downward thread arrow gets room above its card', (() => {
+  const thread = fanOut.edges.find((edge) => edge.kind === 'thread')
+  const points = thread?.points ?? []
+  const end = points[points.length - 2]
+  const child = thread?.to.kind === 'card'
+    ? fanOut.cards.find((card) => card.report === thread.to.id)
+    : undefined
+  return end !== undefined && child !== undefined && child.bounds.y - end.y >= 14
+})())
+check('the frame header leaves room for that arrow too', (() => {
+  const fit = buildCardgraph(payload, plotted, { fitChannels: true })
+  const frame = fit.frames.find((candidate) => candidate.id === 'session-child')
+  const first = fit.cards
+    .filter((card) => card.frame === frame?.index)
+    .sort((a, b) => a.bounds.y - b.bounds.y)[0]
+  return frame !== undefined && first !== undefined
+    && first.bounds.y - (frame.bounds.y + fit.frameHeaderHeight) >= 14
+})())
 check('a thread between adjacent cards stays in the gap between them', (() => {
   if (loop === undefined) return false
   const parent = sameColumn.cards.find((card) => card.report === 'R-0090')?.bounds
