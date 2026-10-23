@@ -530,6 +530,8 @@ const MARKER_MIN_LENGTH = 36
 /** Radii of the marker: the canvas-coloured halo, then the coloured dot. */
 const MARKER_HALO = 3.4
 const MARKER_DOT = 2.1
+/** How many travelling dots ride one hovered wire at once. */
+const HOVER_DOT_COUNT = 3
 
 /** Length of a polyline. */
 function wireLength(points: readonly { readonly x: number; readonly y: number }[]): number {
@@ -749,19 +751,23 @@ export function createCanvasPainter(canvas: HTMLCanvasElement): CardgraphPainter
     const points = wirePoints(edge)
     const total = wireLength(points)
     if (total < 12) return
-    const head = total * Math.min(1, Math.max(0, flow))
-    const at = cutPolyline(points, head).cut
-    if (at === undefined) return
-    ctx.globalAlpha = 1
-    ctx.setLineDash([])
-    ctx.fillStyle = theme.canvas
-    ctx.beginPath()
-    ctx.arc(at.x, at.y, MARKER_HALO + 0.6, 0, Math.PI * 2)
-    ctx.fill()
-    ctx.fillStyle = theme.hover
-    ctx.beginPath()
-    ctx.arc(at.x, at.y, MARKER_DOT + 0.4, 0, Math.PI * 2)
-    ctx.fill()
+    // Several dots ride each wire at once, spaced by the same fraction of the
+    // flow: the path reads as a stream, not as a single bead that can be missed.
+    for (let index = 0; index < HOVER_DOT_COUNT; index++) {
+      const position = (flow + index / HOVER_DOT_COUNT) % 1
+      const at = cutPolyline(points, total * position).cut
+      if (at === undefined) continue
+      ctx.globalAlpha = 1
+      ctx.setLineDash([])
+      ctx.fillStyle = theme.canvas
+      ctx.beginPath()
+      ctx.arc(at.x, at.y, MARKER_HALO + 0.6, 0, Math.PI * 2)
+      ctx.fill()
+      ctx.fillStyle = theme.hover
+      ctx.beginPath()
+      ctx.arc(at.x, at.y, MARKER_DOT + 0.4, 0, Math.PI * 2)
+      ctx.fill()
+    }
   }
 
   /**

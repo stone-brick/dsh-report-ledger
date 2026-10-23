@@ -634,6 +634,13 @@ check('a hovered path keeps a comet running after its reveal', (() => {
   const recorder = overlay({ focus: { report: 'R-0001' }, hoverPhase: 1, hoverFlow: 0.5 })
   return cometHead(recorder) !== undefined
 })())
+check('several dots ride one wire at once', (() => {
+  const recorder = overlay({ focus: { report: 'R-0001' }, hoverPhase: 1, hoverFlow: 0 })
+  const dots = recorder.fills.filter((fill) => fill.points === 2 && fill.style === themed.hover
+    && Math.abs(fill.box.width - 2.5) < 0.01)
+  const wires = layout.edges.filter((edge) => edge.report === 'R-0001').length
+  return wires > 0 && dots.length >= wires * 2
+})())
 check('the comet moves along the path as the flow advances', (() => {
   const early = cometHead(overlay({ focus: { report: 'R-0001' }, hoverPhase: 1, hoverFlow: 0.2 }))
   const late = cometHead(overlay({ focus: { report: 'R-0001' }, hoverPhase: 1, hoverFlow: 0.8 }))
