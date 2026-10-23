@@ -781,6 +781,37 @@ check('an unreadable title store still answers the timeline',
   brokenRead.captured.status === 200 && brokenRead.captured.body.includes('session-cold-1'),
   `${brokenRead.captured.status} ${brokenRead.captured.body.slice(0, 120)}`)
 
+// (f) the reuse window sits on the right side of the poll cadence
+// The bug this pins is subtle and was live for a while: a reuse window SHORTER
+// than the browser's poll interval can never hit, so every poll paid a full
+// corpus walk — a cache that is always cold is worse than no cache, because it
+// looks like one. The clock is shifted rather than waited on, so the assertion is
+// about the window's arithmetic, not about this machine's filesystem.
+const windowed = { calls: 0 }
+const windowedFixture = wiring({
+  listSessions: async () => { windowed.calls += 1; return coldTree(1) },
+})
+apply(windowedFixture.ctx as never, {})
+windowedFixture.mount()
+const windowedRoute = windowedFixture.routes.get(TIMELINE_PATH)
+if (windowedRoute === undefined) throw new Error('fixture: the timeline route was not registered')
+await windowedRoute(browserRequest('session-cold-root'), browserResponse().response)
+const realNow = Date.now
+try {
+  const base = realNow()
+  Date.now = () => base + 11_000
+  await windowedRoute(browserRequest('session-cold-root'), browserResponse().response)
+  const afterOneCadence = windowed.calls
+  Date.now = () => base + 16_000
+  await windowedRoute(browserRequest('session-cold-root'), browserResponse().response)
+  check('a poll one browser cadence later still reuses the corpus listing',
+    afterOneCadence === 1, `${afterOneCadence} listings`)
+  check('a listing past the reuse window is walked again instead of served forever',
+    windowed.calls === 2, `${windowed.calls} listings`)
+} finally {
+  Date.now = realNow
+}
+
 let failures = 0
 for (const [label, ok, detail] of checks) {
   if (!ok) failures++
