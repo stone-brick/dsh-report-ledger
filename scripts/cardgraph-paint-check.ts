@@ -479,7 +479,7 @@ check('a wire ends at its to end', bent[3]?.x === threadEdge?.to.x && bent[3]?.y
 
 const dashOf = (kind: string): string => {
   const edge = layout.edges.find((candidate) => candidate.kind === kind)
-  const stroke = wireStrokes(whole.recorder).find((candidate) => near(candidate.box, edge?.bounds as Box, 2))
+  const stroke = wireStrokes(whole.recorder).find((candidate) => near(candidate.box, edge?.bounds as Box, 5))
   return (stroke?.dash ?? ['?']).join(' ')
 }
 check('a delivery is solid', dashOf('to') === '', dashOf('to'))
@@ -487,18 +487,22 @@ check('a copy is dotted', dashOf('cc') === '2 3', dashOf('cc'))
 check('a co-author wire is finely dashed', dashOf('author') === '1 3', dashOf('author'))
 check('a thread is solid', dashOf('thread') === '', dashOf('thread'))
 check('a delivery is drawn heavier than a copy', (() => {
-  const to = wireStrokes(whole.recorder).find((stroke) => near(stroke.box, layout.edges.find((edge) => edge.kind === 'to')?.bounds as Box, 2))
-  const cc = wireStrokes(whole.recorder).find((stroke) => near(stroke.box, layout.edges.find((edge) => edge.kind === 'cc')?.bounds as Box, 2))
+  const to = wireStrokes(whole.recorder).find((stroke) => near(stroke.box, layout.edges.find((edge) => edge.kind === 'to')?.bounds as Box, 5))
+  const cc = wireStrokes(whole.recorder).find((stroke) => near(stroke.box, layout.edges.find((edge) => edge.kind === 'cc')?.bounds as Box, 5))
   return (to?.lineWidth ?? 0) > (cc?.lineWidth ?? 0)
 })())
 
 const heads = whole.recorder.fills.filter((fill) => fill.points === 3)
 check('every wire ends in a filled arrowhead', heads.length === layout.edges.length,
   `${heads.length} heads for ${layout.edges.length} wires`)
-check('every arrowhead lands on its wire\'s target', heads.every((head) =>
-  layout.edges.some((edge) =>
-    head.box.x <= edge.to.x + 0.001 && edge.to.x <= head.box.x + head.box.width + 0.001
-      && head.box.y <= edge.to.y + 0.001 && edge.to.y <= head.box.y + head.box.height + 0.001)))
+check('every arrowhead lands just short of its wire target', heads.every((head) =>
+  layout.edges.some((edge) => {
+    // Nearest-point distance from the head's box to the target: the head stops a
+    // short gap away, so the box edge (not the target) is the closest thing to it.
+    const dx = Math.max(head.box.x - edge.to.x, 0, edge.to.x - (head.box.x + head.box.width))
+    const dy = Math.max(head.box.y - edge.to.y, 0, edge.to.y - (head.box.y + head.box.height))
+    return Math.hypot(dx, dy) <= 4
+  })))
 
 /** Half way along a polyline, measured the same way the painter does. */
 const midpointOf = (points: readonly { readonly x: number; readonly y: number }[]): { x: number; y: number } | undefined => {
@@ -592,7 +596,7 @@ check('only the focused report\'s wires are drawn over the scrim', (() => {
   // 1.6, so the same colour does not make them indistinguishable.
   const drawn = wireStrokes(recorder).filter((stroke) => stroke.alpha === 1 && stroke.lineWidth < 1.6)
   return drawn.length === mine.length
-    && mine.every((edge) => drawn.some((stroke) => near(stroke.box, edge.bounds, 2)))
+    && mine.every((edge) => drawn.some((stroke) => near(stroke.box, edge.bounds, 5)))
 })())
 check('every drawn wire over the scrim is at full strength',
   wireStrokes(overlay({ focus: { report: 'R-0001' } })).every((stroke) => stroke.alpha === 1))

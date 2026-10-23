@@ -144,6 +144,9 @@ export const ZOOM_STEP = 1.25
  */
 export const MAX_FIT_ZOOM = ZOOM_STEP
 
+/** Inset from a card's corner to the band its own ports may occupy. */
+const CARD_PORT_INSET = 10
+
 /** One session's frame. */
 export interface CardgraphFrame {
   /** Session id, absent for the shared frame of out-of-tree sessions. */
@@ -723,30 +726,48 @@ export function buildCardgraph(
   }
 
   // -------------------------------------------------------------------------
-  // Ports: spread every wire that shares a frame edge, in the order of the far end
+  // Ports: spread every wire that shares an edge, in the order of the far end
+  //
+  // Frames and cards alike: a card's side is as shared as a frame's, and without
+  // this pass every delivery leaving one card's right side started at the same
+  // point — which is what made a busy drawing look like every arrow pointed at one
+  // spot. Cards spread inside their own edge (inset so a port never sits on a
+  // rounded corner); frames spread inside the card band, below the title bar.
   // -------------------------------------------------------------------------
   const groups = new Map<string, { end: PendingEnd; order: number; tie: string }[]>()
   for (const edge of pending) {
     for (const end of [edge.from, edge.to]) {
-      if (end.kind !== 'frame') continue
       const other = end === edge.from ? edge.to : edge.from
-      const key = `${end.index}|${end.side}`
+      const key = `${end.kind}|${end.index}|${end.side}`
       const list = groups.get(key) ?? []
-      list.push({ end, order: other.y, tie: `${edge.report}|${edge.kind}` })
+      list.push({ end, order: end.kind === 'card' && (end.side === 'top' || end.side === 'bottom') ? other.x : other.y, tie: `${edge.report}|${edge.kind}` })
       groups.set(key, list)
     }
   }
   for (const list of groups.values()) {
+    const first = list[0]
+    if (first === undefined) continue
     list.sort((a, b) => a.order - b.order || (a.tie < b.tie ? -1 : a.tie > b.tie ? 1 : 0))
-    const box = fixed[list[0]?.end.index ?? 0] ?? { x: 0, y: 0, width: 0, height: 0 }
-    const top = box.y + opts.frameHeaderHeight + opts.framePaddingTop
-    const bottom = box.y + box.height - opts.framePaddingBottom
-    const span = bottom - top
+    const end = first.end
+    const box = end.kind === 'frame'
+      ? fixed[end.index] ?? { x: 0, y: 0, width: 0, height: 0 }
+      : cards[end.index]?.bounds ?? { x: 0, y: 0, width: 0, height: 0 }
+    /** The band a port may occupy, along the side it is on. */
+    const along: 'x' | 'y' = end.side === 'left' || end.side === 'right' ? 'y' : 'x'
+    const inset = end.kind === 'frame' ? 0 : CARD_PORT_INSET
+    const low = along === 'y'
+      ? box.y + (end.kind === 'frame' ? opts.frameHeaderHeight + opts.framePaddingTop : inset)
+      : box.x + inset
+    const high = along === 'y'
+      ? box.y + box.height - (end.kind === 'frame' ? opts.framePaddingBottom : inset)
+      : box.x + box.width - inset
+    const span = high - low
     list.forEach((entry, index) => {
-      // Evenly inside the card band, which keeps every port off both the title bar
-      // and the frame's own edge. A frame too short for a band puts them on its
-      // middle line rather than stacking them on one another.
-      entry.end.y = span > 0 ? top + ((index + 1) * span) / (list.length + 1) : box.y + box.height / 2
+      // Evenly spaced inside the band; a band too small for spacing falls back to
+      // its middle line rather than stacking every wire on one another.
+      const at = span > 0 ? low + ((index + 1) * span) / (list.length + 1) : low + (span / 2)
+      if (along === 'y') entry.end.y = at
+      else entry.end.x = at
     })
   }
 

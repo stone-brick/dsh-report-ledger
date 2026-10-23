@@ -420,6 +420,8 @@ const STRIPE = 3
 /** Arrowhead length and half-width. */
 const ARROW_LENGTH = 7
 const ARROW_HALF = 3.5
+/** Distance the arrow tip stops short of the target edge, so it never sits on the border. */
+const ARROW_GAP = 3
 /**
  * How far the scrim pushes everything but the focused path back.
  *
@@ -681,12 +683,19 @@ export function createCanvasPainter(canvas: HTMLCanvasElement): CardgraphPainter
     const style = wireStyle(edge.kind, theme)
     const stroke = colour ?? style.stroke
     const points = wirePoints(edge)
+    // The head stops `ARROW_GAP` short of the target, so the triangle reads as an
+    // arrow beside the box instead of a blob sitting on its border.
+    const last = points[points.length - 2]
+    const end = points[points.length - 1]
+    const angle = last === undefined || end === undefined ? 0 : Math.atan2(end.y - last.y, end.x - last.x)
+    const tip = end === undefined ? undefined : { x: end.x - Math.cos(angle) * ARROW_GAP, y: end.y - Math.sin(angle) * ARROW_GAP }
+    const stroked = tip === undefined || points.length === 0 ? points : [...points.slice(0, -1), tip]
     ctx.globalAlpha = alpha
     ctx.strokeStyle = stroke
     ctx.lineWidth = style.width
     ctx.setLineDash(style.dash)
     ctx.beginPath()
-    points.forEach((point, index) => {
+    stroked.forEach((point, index) => {
       if (index === 0) ctx.moveTo(point.x, point.y)
       else ctx.lineTo(point.x, point.y)
     })
@@ -694,16 +703,13 @@ export function createCanvasPainter(canvas: HTMLCanvasElement): CardgraphPainter
 
     // The head turns with the last segment, so a wire that arrives through a
     // gutter points into the frame rather than along the way it came.
-    const last = points[points.length - 2]
-    const end = points[points.length - 1]
-    if (last === undefined || end === undefined) return
-    const angle = Math.atan2(end.y - last.y, end.x - last.x)
-    const back = { x: end.x - Math.cos(angle) * ARROW_LENGTH, y: end.y - Math.sin(angle) * ARROW_LENGTH }
+    if (tip === undefined) return
+    const back = { x: tip.x - Math.cos(angle) * ARROW_LENGTH, y: tip.y - Math.sin(angle) * ARROW_LENGTH }
     const side = { x: -Math.sin(angle) * ARROW_HALF, y: Math.cos(angle) * ARROW_HALF }
     ctx.setLineDash([])
     ctx.fillStyle = stroke
     ctx.beginPath()
-    ctx.moveTo(end.x, end.y)
+    ctx.moveTo(tip.x, tip.y)
     ctx.lineTo(back.x + side.x, back.y + side.y)
     ctx.lineTo(back.x - side.x, back.y - side.y)
     ctx.closePath()

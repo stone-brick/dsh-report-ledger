@@ -264,6 +264,23 @@ check('ports sit inside the frame\'s card band', (() => {
   return ports.edges.filter((edge) => edge.to.kind === 'frame').every((edge) => edge.to.y > top && edge.to.y < bottom)
 })())
 
+// A card's own edge is shared too. Two deliveries leaving one card must leave at
+// different points: without this, every delivery from a busy report starts at the
+// same pixel and the drawing reads as "all arrows point at one spot".
+const cardPorts = buildCardgraph(payload, [
+  report('R-0080', { from: 'session-root', to: ['session-peer', 'session-grand'], created: at(5) }),
+])
+const leaving = cardPorts.edges.filter((edge) => edge.from.kind === 'card')
+check('two wires leaving one card get different ports', leaving.length === 2
+  && leaving[0]?.from.y !== leaving[1]?.from.y, JSON.stringify(leaving.map((edge) => edge.from)))
+check('card ports stay inside the card edge', (() => {
+  const card = cardPorts.cards.find((entry) => entry.report === 'R-0080')
+  if (card === undefined) return false
+  return leaving.every((edge) => (edge.from.side === 'left' || edge.from.side === 'right')
+    ? edge.from.y >= card.bounds.y + 10 && edge.from.y <= card.bounds.y + card.bounds.height - 10
+    : edge.from.x >= card.bounds.x + 10 && edge.from.x <= card.bounds.x + card.bounds.width - 10)
+})())
+
 // ---------------------------------------------------------------------------
 // Wires: co-authorship and threads
 // ---------------------------------------------------------------------------
@@ -595,12 +612,16 @@ check('a fit inside a scope is idempotent', (() => {
 // be a layout control in disguise, and toggling it would re-fit the view.
 // ---------------------------------------------------------------------------
 const withoutTo = buildCardgraph(payload, plotted, { hiddenKinds: ['to'] })
+// Ports are spread per shared edge, so muting one kind may move the *other* wires
+// on the same edge to new port slots — that is spreading, not layout. The check
+// therefore compares identities, not coordinates; the "moves nothing" check below
+// is what covers the boxes.
 check('a muted kind is left out of the layout', (() => {
   const expected = layout.edges.filter((edge) => edge.kind !== 'to')
   return withoutTo.edges.length === expected.length
     && withoutTo.edges.every((edge) => edge.kind !== 'to')
     && expected.every((edge) => withoutTo.edges.some((kept) => kept.report === edge.report
-      && kept.kind === edge.kind && JSON.stringify(kept.from) === JSON.stringify(edge.from)))
+      && kept.kind === edge.kind && kept.to.kind === edge.to.kind && kept.to.id === edge.to.id))
 })())
 check('muting a kind moves nothing', withoutTo.width === layout.width
   && withoutTo.height === layout.height
