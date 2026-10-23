@@ -656,6 +656,8 @@ agents:
 
 它**不是** import 来的：open-in-app 的按钮只作为**它自己的 slot 贡献**存在（`deliverables.file.actions`、`sidebar.right.tab.document.actions`），第三方插件既不能跨插件 import 组件（客户端 bundle 的纯度门），也不能渲染别人的 slot（slot 由宿主渲染，视图是子节点不是宿主）。公开的是它背后那三个 Session Remote 动词，所以 `path-opener.ts` 按本插件一贯的做法**只声明要调的形状**：`canOpenWorkspacePath` / `workspacePathApplications` / `openWorkspacePath`，用 `ctx.get('remote.session')` 惰性取得——服务晚到或被替换都不会丢控件。降级很清楚：没有 Remote/没有桌面/读取失败时，卡片照样在（图标与路径就是那个文件），只是右侧换成复制；一次打开失败把副标题换成红字，不弹东西。关联应用在**进入详情时就预取**（实测查询要 1–2 秒，等菜单打开再取会先空后满），没赶上时菜单里有一行「正在读取应用…」。⚠️ 一个逐字踩到的协议细节：wire 上 **`action` 只认 `reveal`**，"用默认应用打开"是**省略** `action`；发 `action: 'open'` 会被网关的边界校验拒掉（`gateway/input-invalid: wire field "request" failed boundary validation`），第一次真机点开就是这条红字。
 
+**正文默认折叠，折起来看到的是 front matter。** 正文是汇报里最长、也最少被通读的一段：翻账本的人先要的是"谁 → 给谁、几跳、最后发生了什么"。所以详情的正文区是一个 disclosure（三角 + 「正文」），**默认收起**，收起时那一行就是 front matter 的缩略：状态 Tag、`from=` 与收件人短 id（悬停给全 id 与会话标题）、抄送、跳数、最后动作、任务标签——与列表行读的是同一组字段、同一批词。点开才渲染 `MarkdownText`，截断提示也只在那时出现。两个细节是刻意的：`aria-controls` 只在面板真的挂载时才给（指着一个不存在的元素比不给更糟）；换一份汇报时折叠状态复位（pane 可以原地换报告，而 disclosure 属于它下面那份报告）。
+
 
 **切换标签页只能点标签页。** 这是这版唯一一处通往平台内部的妥协：shell 只在**已挂载**的 `conversation.view` 的 props 里给 `openView`，而需要切换的恰恰是它没挂载的时候；每会话的 conversation store 是 slot 私有的，`ctx.uiConversation` 只发布注册表与 binding（binding 的 `activate` 激活的是装配 target，不是标签页）。所以 `report-tab.ts` 按**本插件自己注册的标签文字**在 `[role="tab"]` 里找到那颗标签并点它；找不到（宿主的标签条被隐藏、语言不匹配）就什么都不做，选择留在桥里，等读者自己切过去时再展开。这是写给未来的一行注脚：等 shell 给出 select-view 动词，这个文件删掉即可，其余不动。
 

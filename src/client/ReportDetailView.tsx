@@ -14,17 +14,19 @@
  * @module dsh-report-ledger/client/ReportDetailView
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import {
   Button,
   FileTypeIcon,
   IconChevronDownOutlineRegular,
+  IconChevronRightOutlineRegular,
   IconCopyOutlineRegular,
   IconFolderOpenOutlineRegular,
   MarkdownText,
   Menu,
   StateDot,
+  Tag,
   Tooltip,
   writeClipboard,
 } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -33,7 +35,7 @@ import type { HopAction, ReportDetail } from '../shared/wire.ts'
 import { closeOpenFence, displayBody, shortId } from './timeline-model.ts'
 import type { PathAction, PathOpener, WorkspacePathApplication } from './path-opener.ts'
 import { COPIED_HOLD_MS, fill, stamp } from './format.ts'
-import { HOP_LABEL } from './locales.ts'
+import { HOP_LABEL, STATUS_LABEL, STATUS_TONE } from './locales.ts'
 import type { Translate } from './ReportsView.tsx'
 
 /** Props for one report's detail. */
@@ -98,6 +100,23 @@ const bodyFrame: Record<string, string | number> = {
   background: 'var(--dsw-alias-bg-base, rgba(0,0,0,0.02))',
   border: '1px solid var(--dsw-alias-border-l1, rgba(0,0,0,0.06))',
   borderRadius: '4px',
+}
+
+/** The body's disclosure line, and the digest it shows while closed. */
+const bodyHead: Record<string, string | number> = {
+  display: 'flex',
+  alignItems: 'baseline',
+  gap: '6px',
+  margin: '8px 0 4px',
+  flexWrap: 'wrap',
+}
+const digestLine: Record<string, string | number> = {
+  display: 'inline-flex',
+  alignItems: 'baseline',
+  gap: '6px',
+  flexWrap: 'wrap',
+  color: 'var(--dsw-alias-label-caption, #70757d)',
+  fontSize: 'var(--dsw-font-xxxs-11, 11px)',
 }
 
 /** The ledger file as a delivery card: type tile, two lines, one compact control. */
@@ -495,6 +514,12 @@ function OpenFileCard({ path, opener, t }: {
  */
 export function ReportDetailView(props: ReportDetailViewProps): ReactElement {
   const { report, detail, error, t, idHint, id, variant, onOpenReport, inList, visibleInFilter, onClose, opener } = props
+  const [bodyOpen, setBodyOpen] = useState(false)
+  /** The panel id `aria-controls` points at; only claimed while the panel exists. */
+  const bodyPanelId = `${id ?? 'report-ledger-detail'}-body`
+  // A body that was open for one report must not stay open for the next one: the
+  // disclosure is about the report under it, and a pane can switch reports in place.
+  useEffect(() => { setBodyOpen(false) }, [report])
   const shownBody = useMemo(() => displayBody(detail?.body ?? ''), [detail])
   // The text the renderer gets. A cut body can end mid-fence, and an unterminated
   // fence would turn the rest of the report into a code block — see `closeOpenFence`.
@@ -516,6 +541,48 @@ export function ReportDetailView(props: ReportDetailViewProps): ReactElement {
           {target}
         </Button>
       </Tooltip>
+    </span>
+  )
+
+  /** One session reference, the same reading the list row uses. */
+  const idRef = (target: string): ReactElement => (
+    <Tooltip label={idHint(target)} side="bottom" delayMs={400}>
+      <span>{shortId(target)}</span>
+    </Tooltip>
+  )
+
+  /**
+   * The collapsed body's stand-in: exactly what the front matter carries.
+   *
+   * The body is the long part of a report and the least often needed: a reader
+   * scanning the ledger wants "who, to whom, how far, what happened last". That
+   * is the digest, and it is what the closed body shows instead of a wall of
+   * prose — the row above shows the same fields, and the pane variant (where
+   * there is no row) relies on this line alone.
+   */
+  const digest = (front: ReportDetail['front']): ReactElement => (
+    <span style={digestLine}>
+      <Tag tone={STATUS_TONE[front.status]}>{t(STATUS_LABEL[front.status])}</Tag>
+      <span>{'from='}{idRef(front.from)}</span>
+      {front.to.length === 0 ? null : (
+        <span>
+          {' → '}
+          {front.to.map((target, index) => (
+            <Fragment key={target}>{index > 0 ? ', ' : ''}{idRef(target)}</Fragment>
+          ))}
+        </span>
+      )}
+      {front.cc.length === 0 ? null : (
+        <span>
+          {' cc '}
+          {front.cc.map((target, index) => (
+            <Fragment key={target}>{index > 0 ? ', ' : ''}{idRef(target)}</Fragment>
+          ))}
+        </span>
+      )}
+      <span>{` · ${fill(t('row.hops'), { count: front.hops })}`}</span>
+      {front.last === undefined ? null : <span>{` · ${t('row.last')} ${t(HOP_LABEL[front.last.action])}`}</span>}
+      {front.task === undefined ? null : <Tag tone="info">{front.task}</Tag>}
     </span>
   )
 
@@ -623,14 +690,31 @@ export function ReportDetailView(props: ReportDetailViewProps): ReactElement {
             </div>
           ) : null}
 
-          <div style={{ margin: '8px 0 4px' }}><strong>{t('view.detail.body')}</strong></div>
-          {/* Rendered with the shell's own prose renderer — the same one the Chat
-              and Trajectory views use — so a report body reads like everything
-              else in the GUI instead of like a raw file. */}
-          <div style={bodyFrame}>
-            <MarkdownText text={bodyText} labels={markdownLabels} />
+          <div style={bodyHead}>
+            <Button
+              variant="ghost"
+              size="sm"
+              icon={bodyOpen
+                ? <IconChevronDownOutlineRegular size={14} />
+                : <IconChevronRightOutlineRegular size={14} />}
+              aria-expanded={bodyOpen}
+              {...(bodyOpen ? { 'aria-controls': bodyPanelId } : {})}
+              aria-label={bodyOpen ? t('detail.collapseBody') : t('detail.expandBody')}
+              title={bodyOpen ? t('detail.collapseBody') : t('detail.expandBody')}
+              onClick={() => { setBodyOpen((open) => !open) }}
+            />
+            <strong>{t('view.detail.body')}</strong>
+            {bodyOpen ? null : digest(detail.front)}
           </div>
-          {shownBody.truncated ? (
+          {bodyOpen ? (
+            <div id={bodyPanelId} style={bodyFrame}>
+              {/* Rendered with the shell's own prose renderer — the same one the
+                  Chat and Trajectory views use — so a report body reads like
+                  everything else in the GUI instead of like a raw file. */}
+              <MarkdownText text={bodyText} labels={markdownLabels} />
+            </div>
+          ) : null}
+          {bodyOpen && shownBody.truncated ? (
             <div style={{ ...wrap, marginTop: '4px' }}>
               {fill(t('detail.bodyTruncated'), { chars: shownBody.text.trim().length })}
             </div>
