@@ -498,6 +498,7 @@ check('a delivery is drawn heavier than a copy', (() => {
 })())
 
 const heads = whole.recorder.fills.filter((fill) => fill.points === 3)
+check('a wire with a bend is drawn with a rounded corner', whole.recorder.calls.includes('arcTo'))
 check('every wire ends in a filled arrowhead', heads.length === layout.edges.length,
   `${heads.length} heads for ${layout.edges.length} wires`)
 check('every arrowhead lands just short of its wire target', heads.every((head) =>

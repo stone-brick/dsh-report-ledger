@@ -422,6 +422,8 @@ const ARROW_LENGTH = 7
 const ARROW_HALF = 3.5
 /** Distance the arrow tip stops short of the target edge, so it never sits on the border. */
 const ARROW_GAP = 3
+/** Radius of the fillet drawn at a wire's bends. */
+const CORNER_RADIUS = 4
 /**
  * How far the scrim pushes everything but the focused path back.
  *
@@ -698,9 +700,26 @@ export function createCanvasPainter(canvas: HTMLCanvasElement): CardgraphPainter
     ctx.lineWidth = style.width
     ctx.setLineDash(style.dash)
     ctx.beginPath()
+    // Rounded bends. A routed wire crosses several times (gutter, road, gutter),
+    // and right angles at every one of them read as a wireframe; a 4px fillet is
+    // enough to say "this is one wire" without changing where it goes. The radius
+    // is clamped to half of each adjacent segment so a short stub stays straight.
+    const corner = CORNER_RADIUS
     stroked.forEach((point, index) => {
-      if (index === 0) ctx.moveTo(point.x, point.y)
-      else ctx.lineTo(point.x, point.y)
+      if (index === 0) { ctx.moveTo(point.x, point.y); return }
+      const previous = stroked[index - 1]
+      const next = stroked[index + 1]
+      if (previous === undefined || next === undefined) { ctx.lineTo(point.x, point.y); return }
+      const inLength = Math.hypot(point.x - previous.x, point.y - previous.y)
+      const outLength = Math.hypot(next.x - point.x, next.y - point.y)
+      const radius = Math.min(corner, inLength / 2, outLength / 2)
+      if (radius < 0.5) { ctx.lineTo(point.x, point.y); return }
+      const before = {
+        x: point.x - ((point.x - previous.x) / (inLength === 0 ? 1 : inLength)) * radius,
+        y: point.y - ((point.y - previous.y) / (inLength === 0 ? 1 : inLength)) * radius,
+      }
+      ctx.lineTo(before.x, before.y)
+      ctx.arcTo(point.x, point.y, next.x, next.y, radius)
     })
     ctx.stroke()
 
