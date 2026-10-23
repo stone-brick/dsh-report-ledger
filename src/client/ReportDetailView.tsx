@@ -280,8 +280,11 @@ function OpenFileControl({ path, opener, t }: {
   const [failed, setFailed] = useState(false)
   const loading = useRef<AbortController | null>(null)
 
-  // Ask once whether a desktop is serving this page. A read that fails is the
-  // same as "no": the control must not promise an opening it cannot perform.
+  // Ask once whether a desktop is serving this page, and — when it is — start
+  // reading the handlers too. The shell's own delivery cards load their desktop
+  // metadata on mount for the same reason: the association query is the slow one
+  // (measured at over a second here), and a dropdown that opens with two rows and
+  // grows a moment later reads as broken.
   useEffect(() => {
     let cancelled = false
     const face = opener?.()
@@ -290,13 +293,23 @@ function OpenFileControl({ path, opener, t }: {
       return () => { cancelled = true }
     }
     void face.available()
-      .then((yes) => { if (!cancelled) setDesktop(yes ? 'yes' : 'no') })
+      .then((yes) => {
+        if (cancelled) return
+        setDesktop(yes ? 'yes' : 'no')
+        if (!yes) return
+        const controller = new AbortController()
+        loading.current = controller
+        void face.applications(path, controller.signal)
+          .then((list) => { if (!controller.signal.aborted) setApps(list ?? []) })
+          .catch(() => { if (!controller.signal.aborted) setApps([]) })
+      })
       .catch(() => { if (!cancelled) setDesktop('no') })
     return () => { cancelled = true; loading.current?.abort() }
-  }, [opener])
+  }, [opener, path])
 
-  // Handlers are read when the menu first opens, not on mount: a reader who
-  // never opens it costs no Host query at all.
+  // A menu opened before the prefetch settled still asks for them itself (a
+  // failed prefetch must not leave an empty list forever), and says so while it
+  // waits.
   useEffect(() => {
     if (!menu || apps !== null) return
     const face = opener?.()
@@ -326,11 +339,13 @@ function OpenFileControl({ path, opener, t }: {
 
   const items: MenuEntry[] = [
     { id: 'default', label: t('detail.openFile') },
-    ...(apps ?? []).map((app): MenuEntry => ({
-      id: `app:${app.id}`,
-      label: app.name,
-      ...(app.icon === null ? {} : { icon: <img src={app.icon} alt="" width={14} height={14} /> }),
-    })),
+    ...(apps === null
+      ? [{ type: 'label' as const, id: 'loading', text: t('detail.openFileLoading') }]
+      : apps.map((app): MenuEntry => ({
+          id: `app:${app.id}`,
+          label: app.name,
+          ...(app.icon === null ? {} : { icon: <img src={app.icon} alt="" width={14} height={14} /> }),
+        }))),
     { type: 'separator', id: 'sep' },
     { id: 'reveal', label: t('detail.revealFile') },
   ]
