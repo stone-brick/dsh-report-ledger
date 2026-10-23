@@ -35,7 +35,7 @@ import type { ReportFrontMatter, TimelinePayload } from '../shared/wire.ts'
 import {
   buildCardgraph, cullByBounds, fitTransform, hitTest, lodFor, MAX_ZOOM, MIN_ZOOM, scopeInput, ZOOM_STEP,
 } from './cardgraph-model.ts'
-import type { CardgraphViewport, Rect } from './cardgraph-model.ts'
+import type { CardgraphEdgeKind, CardgraphViewport, Rect } from './cardgraph-model.ts'
 import {
   FALLBACK_THEME, WIRE_TOKENS, createCanvasPainter, createThemeReader,
 } from './cardgraph-painter.ts'
@@ -112,39 +112,75 @@ export interface CardgraphViewProps {
 }
 
 /**
- * The legend.
+ * The legend, and the only place the four kinds can be muted.
  *
  * Built from the painter's own wire table (`WIRE_TOKENS`) rather than from CSS, so
  * a legend that disagreed with the lines beside it would take a change to that one
  * table — the drift the swimlane's legend avoided a different way (by sharing a
  * class name with its paths).
- * @param props - the translator.
+ *
+ * Each entry is a toggle: the drawing has one line per delivery, and a report with
+ * several recipients makes a thicket. Muting a kind is a *view* filter — the layout
+ * only drops those wires, no card or frame moves (`hiddenKinds` in the model).
+ * `aria-pressed` carries the on/off state, so a keyboard reader hears which kinds
+ * are showing.
+ * @param props - the translator, the muted kinds, and the toggle handler.
  * @returns the legend row.
  */
-export function CardgraphLegend({ t }: { readonly t: Translate }): ReactElement {
+export function CardgraphLegend({ t, muted, onToggle }: {
+  readonly t: Translate
+  readonly muted?: readonly CardgraphEdgeKind[]
+  readonly onToggle?: (kind: CardgraphEdgeKind) => void
+}): ReactElement {
+  const off = new Set(muted ?? [])
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
-      {KINDS.map((kind) => (
-        <span
-          key={kind}
-          style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: 'var(--dsw-font-xxxs-11, 11px)', color: 'var(--dsw-alias-label-caption)' }}
-        >
-          <svg width="26" height="8" aria-hidden="true" focusable="false">
-            <line
-              x1="0"
-              y1="4"
-              x2="26"
-              y2="4"
-              stroke={`var(${WIRE_TOKENS[kind].colour})`}
-              strokeWidth={WIRE_TOKENS[kind].width}
-              {...(WIRE_TOKENS[kind].dash.length === 0 ? {} : { strokeDasharray: WIRE_TOKENS[kind].dash.join(' ') })}
-            />
-          </svg>
-          {t(EDGE_LABEL[kind])}
-        </span>
-      ))}
+    <div style={legendRow}>
+      {KINDS.map((kind) => {
+        const hidden = off.has(kind)
+        return (
+          <button
+            key={kind}
+            type="button"
+            aria-pressed={!hidden}
+            title={t(hidden ? 'cardgraph.showKind' : 'cardgraph.hideKind', { kind: t(EDGE_LABEL[kind]) })}
+            onClick={() => { onToggle?.(kind) }}
+            style={{
+              ...legendItem,
+              opacity: hidden ? 0.4 : 1,
+              ...(onToggle === undefined ? { cursor: 'default' } : {}),
+            }}
+          >
+            <svg width="26" height="8" aria-hidden="true" focusable="false">
+              <line
+                x1="0"
+                y1="4"
+                x2="26"
+                y2="4"
+                stroke={`var(${WIRE_TOKENS[kind].colour})`}
+                strokeWidth={WIRE_TOKENS[kind].width}
+                {...(WIRE_TOKENS[kind].dash.length === 0 ? {} : { strokeDasharray: WIRE_TOKENS[kind].dash.join(' ') })}
+              />
+            </svg>
+            {t(EDGE_LABEL[kind])}
+          </button>
+        )
+      })}
     </div>
   )
+}
+
+const legendRow: Record<string, string> = { display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }
+const legendItem: Record<string, string> = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: '6px',
+  padding: '0',
+  border: '0',
+  background: 'transparent',
+  cursor: 'pointer',
+  font: 'inherit',
+  fontSize: 'var(--dsw-font-xxxs-11, 11px)',
+  color: 'var(--dsw-alias-label-caption)',
 }
 
 /** Keep a number inside a range. */
@@ -188,6 +224,20 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
   const pointed = hover.report ?? bridged.hover
   /** The session id the drawing is scoped to; absent means the whole tree. */
   const [drill, setDrill] = useState<string | undefined>(undefined)
+  /**
+   * Kinds the reader muted with the legend.
+   *
+   * The legend is also the filter: a report with several recipients makes a
+   * thicket, and "show me only the thread" is the natural question. Muting is a
+   * view filter — `buildCardgraph` drops those wires (and their ports) without
+   * moving a card or a frame, so nothing re-fits and the reader's view stands.
+   */
+  const [mutedKinds, setMutedKinds] = useState<readonly CardgraphEdgeKind[]>([])
+  const toggleKind = useCallback((kind: CardgraphEdgeKind) => {
+    setMutedKinds((current) => (current.includes(kind)
+      ? current.filter((entry) => entry !== kind)
+      : [...current, kind]))
+  }, [])
   const [ready, setReady] = useState(false)
   /** Bumped when the palette changed, so the theme is read again. */
   const [themeTick, setThemeTick] = useState(0)
@@ -242,7 +292,10 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
   const scope = useMemo(() => scopeInput(payload, reports, drill), [payload, reports, drill])
   const scopeKey = scope.trail.join('/')
   const lod = lodFor(zoom)
-  const layout = useMemo(() => buildCardgraph(scope.payload, scope.reports, { lod }), [scope, lod])
+  const layout = useMemo(
+    () => buildCardgraph(scope.payload, scope.reports, { lod, hiddenKinds: mutedKinds }),
+    [scope, lod, mutedKinds],
+  )
   /** The drawing as of this render, for that same listener: it needs its extent. */
   const layoutRef = useRef(layout)
   layoutRef.current = layout
@@ -759,7 +812,7 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
         <span style={percentStyle}>{t('cardgraph.zoom', { percent })}</span>
         <Button variant="outline" size="sm" aria-label={t('cardgraph.zoomIn')} onClick={() => { stepZoom(ZOOM_STEP) }}>+</Button>
         <Button variant="outline" size="sm" onClick={fit}>{t('cardgraph.fit')}</Button>
-        <CardgraphLegend t={t} />
+        <CardgraphLegend t={t} muted={mutedKinds} onToggle={toggleKind} />
         <span style={percentStyle}>{t('cardgraph.summary', { frames: layout.frames.length, cards: layout.cards.length })}</span>
       </div>
       <div

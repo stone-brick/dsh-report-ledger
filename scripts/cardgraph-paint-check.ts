@@ -500,6 +500,55 @@ check('every arrowhead lands on its wire\'s target', heads.every((head) =>
     head.box.x <= edge.to.x + 0.001 && edge.to.x <= head.box.x + head.box.width + 0.001
       && head.box.y <= edge.to.y + 0.001 && edge.to.y <= head.box.y + head.box.height + 0.001)))
 
+/** Half way along a polyline, measured the same way the painter does. */
+const midpointOf = (points: readonly { readonly x: number; readonly y: number }[]): { x: number; y: number } | undefined => {
+  let total = 0
+  for (let index = 1; index < points.length; index++) {
+    const a = points[index - 1]
+    const b = points[index]
+    if (a === undefined || b === undefined) continue
+    total += Math.hypot(b.x - a.x, b.y - a.y)
+  }
+  if (total < 36) return undefined
+  let remaining = total / 2
+  for (let index = 1; index < points.length; index++) {
+    const a = points[index - 1]
+    const b = points[index]
+    if (a === undefined || b === undefined) continue
+    const length = Math.hypot(b.x - a.x, b.y - a.y)
+    if (remaining <= length && length > 0) {
+      const t = remaining / length
+      return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t }
+    }
+    remaining -= length
+  }
+  return undefined
+}
+/** Marker dots: small arc fills, told apart from the frame's own dots by radius. */
+const markerDots = (recorder: Recorder): Shape[] =>
+  recorder.fills.filter((fill) => fill.points === 2 && Math.abs(fill.box.width - 2.1) < 0.01)
+check('a wire carries a midpoint dot at its middle', (() => {
+  const edge = layout.edges.find((candidate) => candidate.kind === 'to')
+  const middle = midpointOf(wirePoints(edge as never))
+  if (middle === undefined) return false
+  return whole.recorder.fills.some((fill) => fill.points === 2
+    && Math.abs(fill.box.width - 2.1) < 0.01
+    && Math.abs(fill.box.x - middle.x) < 1 && Math.abs(fill.box.y - middle.y) < 1)
+})())
+check('the dot sits on a canvas-coloured halo', (() => {
+  const halo = whole.recorder.fills.find((fill) => fill.points === 2
+    && fill.style === themed.canvas && Math.abs(fill.box.width - 3.4) < 0.01)
+  const dot = markerDots(whole.recorder)[0]
+  return halo !== undefined && dot !== undefined && halo.seq < dot.seq
+})())
+check('no marker is drawn on a wire too short for one', (() => {
+  const middles = layout.edges
+    .map((edge) => midpointOf(wirePoints(edge)))
+    .filter((point): point is { x: number; y: number } => point !== undefined)
+  return markerDots(whole.recorder).every((dot) =>
+    middles.some((middle) => Math.abs(dot.box.x - middle.x) < 1 && Math.abs(dot.box.y - middle.y) < 1))
+})())
+
 // ---------------------------------------------------------------------------
 // The interaction layer
 // ---------------------------------------------------------------------------

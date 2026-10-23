@@ -498,6 +498,52 @@ export function wirePoints(edge: CardgraphEdge): readonly { readonly x: number; 
   return [from, { x: edge.viaX, y: from.y }, { x: edge.viaX, y: to.y }, to]
 }
 
+/** Shortest wire that earns a midpoint marker, in drawing units. */
+const MARKER_MIN_LENGTH = 36
+/** Radii of the marker: the canvas-coloured halo, then the coloured dot. */
+const MARKER_HALO = 3.4
+const MARKER_DOT = 2.1
+
+/** Length of a polyline. */
+function wireLength(points: readonly { readonly x: number; readonly y: number }[]): number {
+  let total = 0
+  for (let index = 1; index < points.length; index++) {
+    const a = points[index - 1]
+    const b = points[index]
+    if (a === undefined || b === undefined) continue
+    total += Math.hypot(b.x - a.x, b.y - a.y)
+  }
+  return total
+}
+
+/**
+ * The point half way along a wire, measured along the polyline.
+ *
+ * A wire that runs down a gutter is measured along its bends too, so the marker
+ * lands on the long vertical segment rather than in the corner. Short wires get
+ * none: at two or three card widths a dot would out-weigh the line it marks.
+ * @param points - the wire's points.
+ * @returns the midpoint, or `undefined` when the wire is too short to need one.
+ */
+function wireMidpoint(points: readonly { readonly x: number; readonly y: number }[]): { x: number; y: number } | undefined {
+  const total = wireLength(points)
+  if (total < MARKER_MIN_LENGTH) return undefined
+  let remaining = total / 2
+  for (let index = 1; index < points.length; index++) {
+    const a = points[index - 1]
+    const b = points[index]
+    if (a === undefined || b === undefined) continue
+    const length = Math.hypot(b.x - a.x, b.y - a.y)
+    if (length === 0) continue
+    if (remaining <= length) {
+      const t = remaining / length
+      return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t }
+    }
+    remaining -= length
+  }
+  return undefined
+}
+
 /** Trace a rounded rectangle into the current path. */
 function pathRoundRect(ctx: PaintContext, rect: Rect, radius: number): void {
   const r = Math.max(0, Math.min(radius, rect.width / 2, rect.height / 2))
@@ -662,6 +708,22 @@ export function createCanvasPainter(canvas: HTMLCanvasElement): CardgraphPainter
     ctx.lineTo(back.x - side.x, back.y - side.y)
     ctx.closePath()
     ctx.fill()
+
+    // Midpoint marker: a dot in the wire's colour on a canvas-coloured halo. The
+    // halo lifts it off whatever it crosses, so a long line still reads as one
+    // line and shows its kind where the eye lands — not only at its ends.
+    const midpoint = wireMidpoint(points)
+    if (midpoint !== undefined) {
+      ctx.globalAlpha = alpha
+      ctx.fillStyle = theme.canvas
+      ctx.beginPath()
+      ctx.arc(midpoint.x, midpoint.y, MARKER_HALO, 0, Math.PI * 2)
+      ctx.fill()
+      ctx.fillStyle = stroke
+      ctx.beginPath()
+      ctx.arc(midpoint.x, midpoint.y, MARKER_DOT, 0, Math.PI * 2)
+      ctx.fill()
+    }
   }
 
   /**

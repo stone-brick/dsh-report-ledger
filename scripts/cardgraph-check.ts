@@ -586,6 +586,27 @@ check('a fit inside a scope is idempotent', (() => {
   return once === JSON.stringify(fitTransform(scoped.payload, scoped.reports, 620))
 })())
 
+// ---------------------------------------------------------------------------
+// Muted kinds (the legend's toggles)
+//
+// Muting is a view filter, and the claim worth pinning is that it is ONLY that:
+// the wires of one kind disappear, everything else — every card, every frame,
+// the drawing's extent — stays exactly where it was. Otherwise the legend would
+// be a layout control in disguise, and toggling it would re-fit the view.
+// ---------------------------------------------------------------------------
+const withoutTo = buildCardgraph(payload, plotted, { hiddenKinds: ['to'] })
+check('a muted kind is left out of the layout', (() => {
+  const expected = layout.edges.filter((edge) => edge.kind !== 'to')
+  return withoutTo.edges.length === expected.length
+    && withoutTo.edges.every((edge) => edge.kind !== 'to')
+    && expected.every((edge) => withoutTo.edges.some((kept) => kept.report === edge.report
+      && kept.kind === edge.kind && JSON.stringify(kept.from) === JSON.stringify(edge.from)))
+})())
+check('muting a kind moves nothing', withoutTo.width === layout.width
+  && withoutTo.height === layout.height
+  && JSON.stringify(withoutTo.cards.map((card) => card.bounds)) === JSON.stringify(layout.cards.map((card) => card.bounds))
+  && JSON.stringify(withoutTo.frames.map((frame) => frame.bounds)) === JSON.stringify(layout.frames.map((frame) => frame.bounds)))
+
 let failed = 0
 for (const [label, ok, detail] of checks) {
   if (!ok) failed++

@@ -57,6 +57,14 @@ export type CardgraphSide = 'left' | 'right' | 'top' | 'bottom'
 export interface CardgraphOptions {
   /** Level of detail to lay out at. Pick it with {@link lodFor}. */
   readonly lod: CardgraphLod
+  /**
+   * Edge kinds the reader has muted.
+   *
+   * A view filter, not a layout one: the cards and frames are unchanged, only
+   * those wires (and the ports they would have taken) disappear — which is what
+   * lets the legend toggle without moving anything or re-fitting the view.
+   */
+  readonly hiddenKinds?: readonly CardgraphEdgeKind[]
   /** Zoom at or above which reports are drawn as full cards. */
   readonly cardMinZoom: number
   /** Zoom at or above which reports are drawn as compact cards. */
@@ -429,6 +437,8 @@ export function buildCardgraph(
   const opts: CardgraphOptions = { ...DEFAULT_CARDGRAPH_OPTIONS, ...options }
   const size = opts.sizes[opts.lod]
   const frameWidth = Math.max(opts.minFrameWidth, size.width + opts.framePaddingX * 2)
+  /** Kinds the reader muted in the legend; they take no ports either. */
+  const hidden = new Set(opts.hiddenKinds ?? [])
 
   // -------------------------------------------------------------------------
   // Frames
@@ -643,6 +653,7 @@ export function buildCardgraph(
     // facing the sender. The digest carries no per-hop times (those live in the
     // route sidecar), so the landing y is the port's business, not the wire's.
     for (const [kind, ids] of [['to', front.to], ['cc', front.cc]] as const) {
+      if (hidden.has(kind)) continue
       for (const id of new Set(ids)) {
         const target = frameIndexById(id)
         // Nothing to draw for a report delivered to its own session, and nothing
@@ -666,7 +677,7 @@ export function buildCardgraph(
 
     // Co-authorship reads the other way round: the co-author's frame reaches the
     // card, and the card is the end with the arrowhead.
-    for (const id of new Set(front.authors)) {
+    for (const id of hidden.has('author') ? [] : new Set(front.authors)) {
       if (id === front.from) continue
       const source = frameIndexById(id)
       if (source < 0 || source === ownFrame) continue
@@ -691,7 +702,7 @@ export function buildCardgraph(
       ? undefined
       : cardIndexOf.get(front.parent)
     const parentCard = parentIndex === undefined ? undefined : cards[parentIndex]
-    if (parentIndex !== undefined && parentCard !== undefined) {
+    if (parentIndex !== undefined && parentCard !== undefined && !hidden.has('thread')) {
       const from = cardEnd(parentIndex, 'bottom')
       const to = cardEnd(cardIndex, 'top')
       const column = parentCard.column
