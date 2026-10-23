@@ -732,44 +732,35 @@ export function createCanvasPainter(canvas: HTMLCanvasElement): CardgraphPainter
   }
 
   /**
-   * The travelling light on a hovered wire.
+   * The travelling dot on a hovered wire.
    *
-   * A short tail (a quarter of the wire, capped) plus a glowing head in the pointer
-   * colour. `flow` is where the head sits along the wire — 0 at the source, 1 at the
-   * target — so one loop reads as "this report flows to its recipients", and a new
-   * loop starts from the card again.
+   * Just the dot, in the pointer colour: a tail would draw a second bent line on
+   * top of the wire — the same route, twice, and the eye reads the tail as "a short
+   * line moving" rather than "a signal travelling". One dot reads as a signal.
+   * `flow` is where it sits along the wire — 0 at the source, 1 at the target — so
+   * one loop reads as "this report flows to its recipients", and the next loop
+   * starts from the card again.
    * @param edge - the focused wire.
    * @param scene - the resolved palette.
    * @param flow - 0..1 along the wire.
    */
-  const drawComet = (edge: CardgraphEdge, scene: PaintScene, flow: number): void => {
+  const drawTraveller = (edge: CardgraphEdge, scene: PaintScene, flow: number): void => {
     const { theme } = scene
     const points = wirePoints(edge)
     const total = wireLength(points)
     if (total < 12) return
     const head = total * Math.min(1, Math.max(0, flow))
-    const tail = Math.max(0, head - Math.min(total * 0.25, 90))
-    if (head - tail < 1) return
-    const from = cutPolyline(points, tail).cut
-    const to = cutPolyline(points, head).cut
-    if (from === undefined || to === undefined) return
-    const style = wireStyle(edge.kind, theme)
-    ctx.globalAlpha = 0.9
-    ctx.strokeStyle = theme.hover
-    ctx.lineWidth = style.width + 0.8
-    ctx.setLineDash([])
-    ctx.beginPath()
-    ctx.moveTo(from.x, from.y)
-    ctx.lineTo(to.x, to.y)
-    ctx.stroke()
+    const at = cutPolyline(points, head).cut
+    if (at === undefined) return
     ctx.globalAlpha = 1
+    ctx.setLineDash([])
     ctx.fillStyle = theme.canvas
     ctx.beginPath()
-    ctx.arc(to.x, to.y, MARKER_HALO + 0.6, 0, Math.PI * 2)
+    ctx.arc(at.x, at.y, MARKER_HALO + 0.6, 0, Math.PI * 2)
     ctx.fill()
     ctx.fillStyle = theme.hover
     ctx.beginPath()
-    ctx.arc(to.x, to.y, MARKER_DOT + 0.4, 0, Math.PI * 2)
+    ctx.arc(at.x, at.y, MARKER_DOT + 0.4, 0, Math.PI * 2)
     ctx.fill()
   }
 
@@ -1101,7 +1092,7 @@ export function createCanvasPainter(canvas: HTMLCanvasElement): CardgraphPainter
       const flow = scene.hoverFlow
       if (flow !== undefined && reveal >= 1) {
         for (const edge of edges) {
-          if (intersects(edge.bounds, world)) drawComet(edge, scene, flow)
+          if (intersects(edge.bounds, world)) drawTraveller(edge, scene, flow)
         }
       }
       for (const card of layout.cards) {
