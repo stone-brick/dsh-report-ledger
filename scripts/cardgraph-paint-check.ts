@@ -634,12 +634,19 @@ check('a hovered path keeps a comet running after its reveal', (() => {
   const recorder = overlay({ focus: { report: 'R-0001' }, hoverPhase: 1, hoverFlow: 0.5 })
   return cometHead(recorder) !== undefined
 })())
-check('several dots ride one wire at once', (() => {
+check('the dots are spaced by wire length, not one per wire', (() => {
+  const lengthOf = (edge: (typeof layout.edges)[number]): number =>
+    wirePoints(edge).slice(1).reduce((sum, point, index) => {
+      const previous = wirePoints(edge)[index]
+      return previous === undefined ? sum : sum + Math.hypot(point.x - previous.x, point.y - previous.y)
+    }, 0)
+  const edges = layout.edges.filter((edge) => edge.report === 'R-0001')
+  const longest = Math.max(0, ...edges.map(lengthOf))
+  const expected = Math.min(8, Math.max(1, Math.round(longest / 90)))
   const recorder = overlay({ focus: { report: 'R-0001' }, hoverPhase: 1, hoverFlow: 0 })
   const dots = recorder.fills.filter((fill) => fill.points === 2 && fill.style === themed.hover
-    && Math.abs(fill.box.width - 2.5) < 0.01)
-  const wires = layout.edges.filter((edge) => edge.report === 'R-0001').length
-  return wires > 0 && dots.length >= wires * 2
+    && Math.abs(fill.box.width - 2.5) < 0.01).length
+  return edges.length > 0 && expected >= 2 && dots >= expected
 })())
 check('the comet moves along the path as the flow advances', (() => {
   const early = cometHead(overlay({ focus: { report: 'R-0001' }, hoverPhase: 1, hoverFlow: 0.2 }))

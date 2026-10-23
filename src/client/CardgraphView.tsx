@@ -56,7 +56,7 @@ const WHEEL_ZOOM_RATE = Math.log(ZOOM_STEP) / 100
 /** How long the hovered path takes to draw itself out, in milliseconds. */
 const HOVER_REVEAL_MS = 200
 /** One loop of the travelling comet on a hovered path, in milliseconds. */
-const HOVER_FLOW_MS = 1400
+const HOVER_FLOW_MS = 2200
 /** How close to the box's edge a wheel-pan stops, in screen pixels. */
 const EDGE_MARGIN = 12
 /** Drawing units to keep beyond the viewport, so a pan does not reveal a blank band. */

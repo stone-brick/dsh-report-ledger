@@ -531,7 +531,7 @@ const MARKER_MIN_LENGTH = 36
 const MARKER_HALO = 3.4
 const MARKER_DOT = 2.1
 /** How many travelling dots ride one hovered wire at once. */
-const HOVER_DOT_COUNT = 3
+const HOVER_DOT_SPACING = 90
 
 /** Length of a polyline. */
 function wireLength(points: readonly { readonly x: number; readonly y: number }[]): number {
@@ -751,10 +751,13 @@ export function createCanvasPainter(canvas: HTMLCanvasElement): CardgraphPainter
     const points = wirePoints(edge)
     const total = wireLength(points)
     if (total < 12) return
-    // Several dots ride each wire at once, spaced by the same fraction of the
-    // flow: the path reads as a stream, not as a single bead that can be missed.
-    for (let index = 0; index < HOVER_DOT_COUNT; index++) {
-      const position = (flow + index / HOVER_DOT_COUNT) % 1
+    // Density is per unit of wire, not per wire: a long route gets more dots than a
+    // short one, so the stream looks equally dense wherever the eye lands. The
+    // count comes from the wire's own length, which is why the layout measures it
+    // first and the painter only reads it.
+    const count = Math.min(8, Math.max(1, Math.round(total / HOVER_DOT_SPACING)))
+    for (let index = 0; index < count; index++) {
+      const position = (flow + index / count) % 1
       const at = cutPolyline(points, total * position).cut
       if (at === undefined) continue
       ctx.globalAlpha = 1
