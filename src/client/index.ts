@@ -19,6 +19,7 @@ import { ReportsView, type Translate } from './ReportsView.tsx'
 import { en, zh } from './locales.ts'
 import { installStyles } from './styles.ts'
 import { installSidebarTab, type ScopedContext } from './sidebar-tab.ts'
+import { createPathOpener } from './path-opener.ts'
 
 /** Locale namespace this plugin owns. */
 const NS = 'report-ledger'
@@ -83,6 +84,13 @@ export function apply(ctx: ClientContext): void {
 
   const t = ctx.locale.bind(NS)
 
+  // The host desktop's file verbs, resolved per gesture: the Remote service is
+  // published (and replaced) on the client root, and reading it once at apply
+  // time would miss a host that mounts it later. `ctx.get` is the optional read
+  // the plugin already uses for the sidebar registry; a host without the Remote
+  // simply has no native controls on the ledger path.
+  const opener = () => createPathOpener(ctx.get('remote.session'))
+
   // The right column is optional twice over — a host may not mount it at all, and
   // this one publishes its tab registry after this plugin in the same boot — so
   // the contribution hangs off `ctx.inject`, not the `inject` list above.
@@ -98,6 +106,6 @@ export function apply(ctx: ClientContext): void {
       label: () => t('view.tab'),
       locale: NS,
     },
-    (props: Record<string, unknown>) => createElement(ReportsView, { ...props, t } as never) as never,
+    (props: Record<string, unknown>) => createElement(ReportsView, { ...props, t, opener } as never) as never,
   ))
 }

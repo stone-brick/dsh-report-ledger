@@ -26,7 +26,10 @@
  *   - `StateDot` states are `done | warning | ongoing | error | idle`;
  *   - `Button` / `Input` / `Pill` accept native element attributes (`Button` and
  *     `Input` forward refs);
- *   - `writeClipboard` returns `Promise<boolean>`.
+ *   - `writeClipboard` returns `Promise<boolean>`;
+ *   - `Menu` is owner-controlled (`open` + `onClose`), renders its `anchor` in
+ *     place, and its `items` are data rows — `onSelect(id)` fires for a row, not
+ *     for a separator or a label.
  *
  * The shape asserted below is exactly what this plugin uses, and nothing more:
  * adding a field here that the view then passes and the shell ignores would be a
@@ -164,6 +167,55 @@ declare module '@deepseek-ai/dsh-client-ui-primitives' {
   export function IconChevronDownOutlineRegular(props: IconProps): ReactElement
   export function IconCopyOutlineRegular(props: IconProps): ReactElement
   export function IconCheckOutlineRegular(props: IconProps): ReactElement
+  export function IconFolderOpenOutlineRegular(props: IconProps): ReactElement
+
+  /** One selectable row in a {@link Menu}. */
+  export interface MenuItem {
+    readonly id: string
+    readonly label: ReactNode
+    readonly disabled?: boolean
+    /** Leading glyph. */
+    readonly icon?: ReactNode
+    readonly danger?: boolean
+    readonly submenu?: readonly MenuEntry[]
+  }
+  /** A hairline between groups. */
+  export interface MenuSeparator {
+    readonly type: 'separator'
+    readonly id: string
+  }
+  /** A non-interactive heading row. */
+  export interface MenuLabel {
+    readonly type: 'label'
+    readonly id: string
+    readonly text: string
+  }
+  /** One entry: a row, a separator, or a heading. */
+  export type MenuEntry = MenuItem | MenuSeparator | MenuLabel
+
+  /**
+   * The shell's anchored dropdown.
+   *
+   * Owner-controlled: `open` decides, `onClose` reports an outside click or
+   * Escape, `onSelect(id)` reports a chosen row. `anchor` is rendered in place,
+   * so the owner supplies its own trigger; `portal` lifts the list out of a
+   * clipping ancestor, which a detail panel with `overflow: auto` needs.
+   */
+  export function Menu(props: {
+    readonly open: boolean
+    readonly anchor: ReactNode
+    readonly items?: readonly MenuEntry[]
+    readonly children?: ReactNode
+    readonly selectedId?: string
+    readonly onSelect?: (id: string) => void
+    readonly onClose: () => void
+    readonly align?: 'start' | 'end'
+    readonly side?: 'bottom' | 'top' | 'right'
+    readonly portal?: boolean
+    readonly dense?: boolean
+    readonly compact?: boolean
+    readonly autoFocus?: boolean
+  }): ReactElement
 
   /**
    * Copy text with the shell's own fallback chain.

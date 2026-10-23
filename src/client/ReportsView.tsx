@@ -51,6 +51,7 @@ import {
   type StatusFilter,
 } from './timeline-model.ts'
 import { ReportDetailView } from './ReportDetailView.tsx'
+import type { PathOpener } from './path-opener.ts'
 import { selection } from './selection-bridge.ts'
 import { getJson, POLL_INTERVAL_MS, TIMELINE_URL, useReportDetail } from './timeline-source.ts'
 import { fill, stamp } from './format.ts'
@@ -66,6 +67,14 @@ export interface ReportsViewProps {
   sessionId?: string
   /** Injected by the registration closure from the plugin's locale namespace. */
   t: Translate
+  /**
+   * The host desktop's file verbs, resolved lazily by the plugin body.
+   *
+   * Passed in rather than imported here: it comes from the client context, which
+   * this view does not hold. Absent in a deployment without the Remote, and the
+   * ledger path row then shows only its copy control.
+   */
+  opener?: () => PathOpener | undefined
 }
 
 /** Storage key for the remembered status filter. */
@@ -91,7 +100,7 @@ function rememberedStatus(): StatusFilter {
  * @returns the tab content.
  */
 export function ReportsView(props: ReportsViewProps): ReactElement {
-  const { sessionId, t } = props
+  const { sessionId, t, opener } = props
   const [payload, setPayload] = useState<TimelinePayload | undefined>(undefined)
   const [error, setError] = useState<string | undefined>(undefined)
   const [timelineNonce, setTimelineNonce] = useState(0)
@@ -674,6 +683,7 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
                 onOpenReport={openLinked}
                 inList={inList.has(front.report)}
                 visibleInFilter={filteredReportIds.has(front.report)}
+                {...(opener === undefined ? {} : { opener })}
               />
             ) : null}
           </div>

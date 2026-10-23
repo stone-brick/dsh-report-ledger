@@ -21,13 +21,17 @@ import {
   IconCheckOutlineRegular,
   IconChevronDownOutlineRegular,
   IconCopyOutlineRegular,
+  IconFolderOpenOutlineRegular,
   MarkdownText,
+  Menu,
   StateDot,
   Tooltip,
   writeClipboard,
 } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { HopAction, ReportDetail } from '../shared/wire.ts'
 import { closeOpenFence, displayBody, shortId } from './timeline-model.ts'
+import type { PathAction, PathOpener, WorkspacePathApplication } from './path-opener.ts'
 import { COPIED_HOLD_MS, fill, stamp } from './format.ts'
 import { HOP_LABEL } from './locales.ts'
 import type { Translate } from './ReportsView.tsx'
@@ -55,6 +59,15 @@ export interface ReportDetailViewProps {
   readonly visibleInFilter: boolean
   /** Show a collapse control in the pane's own header. */
   readonly onClose?: () => void
+  /**
+   * Resolve the host desktop's file verbs, lazily.
+   *
+   * A getter rather than a value: the Remote service arrives (and is replaced)
+   * on the client root, so reading it per gesture is what keeps a late-mounted
+   * deployment from losing the control. `undefined` means no opener at all —
+   * the path row then keeps its plain copy control.
+   */
+  readonly opener?: () => PathOpener | undefined
 }
 
 const time: Record<string, string | number> = {
@@ -245,12 +258,134 @@ const paneBody: Record<string, string | number> = {
 }
 
 /**
+ * The ledger file's native controls: default app, a picker, and reveal.
+ *
+ * This is the shell's own "open in default app" split button, re-built on the
+ * public Remote verbs (`path-opener.ts` says why it cannot be imported). It
+ * appears only where a Host desktop answered that it can take paths; everywhere
+ * else the row keeps its copy control and nothing else, which is the same
+ * degradation the shell's control has.
+ * @param props - the file to open, the lazy opener, and the translator.
+ * @returns the split control, or null when this host has no desktop.
+ */
+function OpenFileControl({ path, opener, t }: {
+  readonly path: string
+  readonly opener?: () => PathOpener | undefined
+  readonly t: Translate
+}): ReactElement | null {
+  const [desktop, setDesktop] = useState<'unknown' | 'yes' | 'no'>('unknown')
+  const [apps, setApps] = useState<readonly WorkspacePathApplication[] | null>(null)
+  const [menu, setMenu] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [failed, setFailed] = useState(false)
+  const loading = useRef<AbortController | null>(null)
+
+  // Ask once whether a desktop is serving this page. A read that fails is the
+  // same as "no": the control must not promise an opening it cannot perform.
+  useEffect(() => {
+    let cancelled = false
+    const face = opener?.()
+    if (face === undefined) {
+      setDesktop('no')
+      return () => { cancelled = true }
+    }
+    void face.available()
+      .then((yes) => { if (!cancelled) setDesktop(yes ? 'yes' : 'no') })
+      .catch(() => { if (!cancelled) setDesktop('no') })
+    return () => { cancelled = true; loading.current?.abort() }
+  }, [opener])
+
+  // Handlers are read when the menu first opens, not on mount: a reader who
+  // never opens it costs no Host query at all.
+  useEffect(() => {
+    if (!menu || apps !== null) return
+    const face = opener?.()
+    if (face === undefined) return
+    loading.current?.abort()
+    const controller = new AbortController()
+    loading.current = controller
+    void face.applications(path, controller.signal)
+      .then((list) => { if (!controller.signal.aborted) setApps(list ?? []) })
+      .catch(() => { if (!controller.signal.aborted) setApps([]) })
+    return () => { controller.abort() }
+  }, [apps, menu, opener, path])
+
+  const act = useCallback((action: PathAction, application?: string) => {
+    const face = opener?.()
+    if (face === undefined) return
+    setBusy(true)
+    setFailed(false)
+    setMenu(false)
+    void face.open(path, action, application)
+      .then((ok) => { if (!ok) setFailed(true) })
+      .catch(() => { setFailed(true) })
+      .finally(() => { setBusy(false) })
+  }, [opener, path])
+
+  if (desktop !== 'yes') return null
+
+  const items: MenuEntry[] = [
+    { id: 'default', label: t('detail.openFile') },
+    ...(apps ?? []).map((app): MenuEntry => ({
+      id: `app:${app.id}`,
+      label: app.name,
+      ...(app.icon === null ? {} : { icon: <img src={app.icon} alt="" width={14} height={14} /> }),
+    })),
+    { type: 'separator', id: 'sep' },
+    { id: 'reveal', label: t('detail.revealFile') },
+  ]
+
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '2px', flex: '0 0 auto' }}>
+      <Tooltip label={t('detail.openFile')} side="top" delayMs={400}>
+        <Button
+          variant="outline"
+          size="sm"
+          icon={<IconFolderOpenOutlineRegular size={14} />}
+          aria-label={t('detail.openFile')}
+          disabled={busy}
+          onClick={() => { act('open') }}
+        />
+      </Tooltip>
+      <Menu
+        open={menu}
+        anchor={(
+          <Button
+            variant="outline"
+            size="sm"
+            icon={<IconChevronDownOutlineRegular size={14} />}
+            aria-label={t('detail.openFileMenu')}
+            aria-expanded={menu}
+            disabled={busy}
+            onClick={() => { setMenu((current) => !current) }}
+          />
+        )}
+        items={items}
+        align="end"
+        portal
+        onSelect={(id) => {
+          if (id === 'default') act('open')
+          else if (id === 'reveal') act('reveal')
+          else if (id.startsWith('app:')) act('open', id.slice('app:'.length))
+        }}
+        onClose={() => { setMenu(false) }}
+      />
+      {failed ? (
+        <span style={{ color: 'var(--dsw-alias-state-error-primary, #b00)', fontSize: '11px' }}>
+          {t('detail.openFileFailed')}
+        </span>
+      ) : null}
+    </span>
+  )
+}
+
+/**
  * Render one report: route, thread, body and path.
  * @param props - the read result, the copy seat, and how the box is dressed.
  * @returns the detail block.
  */
 export function ReportDetailView(props: ReportDetailViewProps): ReactElement {
-  const { report, detail, error, t, idHint, id, variant, onOpenReport, inList, visibleInFilter, onClose } = props
+  const { report, detail, error, t, idHint, id, variant, onOpenReport, inList, visibleInFilter, onClose, opener } = props
   const [copiedPath, setCopiedPath] = useState(false)
   const copyTimer = useRef<ReturnType<typeof globalThis.setTimeout> | undefined>(undefined)
   useEffect(() => () => {
@@ -411,12 +546,14 @@ export function ReportDetailView(props: ReportDetailViewProps): ReactElement {
             </div>
           ) : null}
           {/* The ledger path is the longest string here and the only one with no
-              spaces to break at, so it wraps mid-segment on purpose — and it has a
-              copy control, because "see the file" is only useful if you can get
-              there. */}
+              spaces to break at, so it wraps mid-segment on purpose. Its controls
+              are the ones a file gets everywhere else in this GUI: open in the
+              default app, a picker for another handler, reveal — and copy, for
+              the times the reader wants the path itself. */}
           <div style={pathRow}>
             <StateDot state="idle" size={6} />
             <span style={{ wordBreak: 'break-all' }}>{t('view.detail.path')}: {detail.path}</span>
+            <OpenFileControl path={detail.path} opener={opener} t={t} />
             <Tooltip label={copiedPath ? t('body.copied') : t('view.copyPath')} side="bottom" delayMs={300}>
               <Button
                 variant="ghost"

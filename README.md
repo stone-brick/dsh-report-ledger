@@ -652,6 +652,11 @@ agents:
 
 列表用 `<ol>`：跳是序列，读屏应当听成序列。旧的 `1fr` 网格连同那条"备注把面板撑宽 426px"的老账一起删掉了。
 
+**账本文件那一行用 GUI 自己的打开方式。** 路径旁边不再只有「复制」：宿主桌面可用时，它有 **默认应用打开 + 选择器 + 在文件管理器中显示**——和会话里点交付物、侧栏预览文件时看到的是同一套手势（图标按钮 + `Menu` 下拉，`reveal` 排在最后）。
+
+它**不是** import 来的：open-in-app 的按钮只作为**它自己的 slot 贡献**存在（`deliverables.file.actions`、`sidebar.right.tab.document.actions`），第三方插件既不能跨插件 import 组件（客户端 bundle 的纯度门），也不能渲染别人的 slot（slot 由宿主渲染，视图是子节点不是宿主）。公开的是它背后那三个 Session Remote 动词，所以 `path-opener.ts` 按本插件一贯的做法**只声明要调的形状**：`canOpenWorkspacePath` / `workspacePathApplications` / `openWorkspacePath`，用 `ctx.get('remote.session')` 惰性取得——服务晚到或被替换都不会丢控件。降级很清楚：没有 Remote、没有桌面、读取失败，都**不渲染**控件，只留复制；一次打开失败给一行红字，不弹东西。
+
+
 **切换标签页只能点标签页。** 这是这版唯一一处通往平台内部的妥协：shell 只在**已挂载**的 `conversation.view` 的 props 里给 `openView`，而需要切换的恰恰是它没挂载的时候；每会话的 conversation store 是 slot 私有的，`ctx.uiConversation` 只发布注册表与 binding（binding 的 `activate` 激活的是装配 target，不是标签页）。所以 `report-tab.ts` 按**本插件自己注册的标签文字**在 `[role="tab"]` 里找到那颗标签并点它；找不到（宿主的标签条被隐藏、语言不匹配）就什么都不做，选择留在桥里，等读者自己切过去时再展开。这是写给未来的一行注脚：等 shell 给出 select-view 动词，这个文件删掉即可，其余不动。
 
 实测（右栏，真实浏览器）：
@@ -866,7 +871,7 @@ DSH 的委派层拒绝非相邻通信，源码原话是"其他代理、祖先、
 
 ```sh
 pnpm build        # 产出 lib/index.js（host 半）与 lib/client.js（client 半）
-pnpm test         # 十五套确定性检查共 1065 项断言：账本内核与生命周期 135 + 提示词角色分流 64
+pnpm test         # 十六套确定性检查共 1078 项断言：账本内核与生命周期 135 + 提示词角色分流 64
                   # + 开发者名册 59 + 开发者归档 29 + 退役交接 25
                   # + 读路径（前缀读/签名缓存/单趟投递）31
                   # + 时间线装配与路由守卫 77
@@ -878,6 +883,7 @@ pnpm test         # 十五套确定性检查共 1065 项断言：账本内核与
                   # + 分配（命名 ref 安全性/两套预算/回收与脏跳过/幽灵终态/回滚）95
                   # + 维护视图（六种检出状态/未绑定检出/悬空条目/故意移除不误报/路由守卫）48
                   # + 两界面共选（画布 ↔ 汇报列表：悬停来源/打开状态/标签点击）15
+                  # + 宿主桌面打开（可用性/应用列表/默认·指定·reveal/失败降级）13
                   #（不需要 DSH，不触碰真实账本，不启动服务器；worktree 相关的四套会在临时目录里建真仓库）
 pnpm test:tools   # 工作区工具面 + 宿主接线 + 同伴名册 162 项（55 + 38 + 69）—— 只能在有官方包层的地方跑，见下
 pnpm typecheck    # 对部署中的 harness 类型做全量类型检查
@@ -951,7 +957,7 @@ Node ≥ 20（见 `engines`）。
 提交的产物与源码是否一致，避免"改了 `src` 忘了 `build`"。
 
 ```sh
-pnpm check          # 完整门禁：类型检查 + 十五套可移植检查（1065 项）+ 工具面三套（162 项）
+pnpm check          # 完整门禁：类型检查 + 十六套可移植检查（1078 项）+ 工具面三套（162 项）
 pnpm build && pnpm pack   # lib/ 随源码提交，pack 前显式重建一次
 npm publish         # ⚠ 本机 registry 若是镜像站，必须显式 --registry=https://registry.npmjs.org
 ```
