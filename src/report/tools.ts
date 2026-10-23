@@ -21,7 +21,7 @@ import { listReports, readHops } from './ledger.ts'
 import type { ReportFrontMatter, RouteHop } from './types.ts'
 import type { WorktreeRuntime } from './allocate.ts'
 import type { PeerService } from './peer.ts'
-import { DEFAULT_RECEIPT_MS, type PeerReceipt, type WorkspaceRegistration } from './peer.ts'
+import { DEFAULT_RECEIPT_MS, type PeerPermission, type PeerReceipt, type WorkspaceRegistration } from './peer.ts'
 import type { PreparedWorktree, ReportService, WorktreeOutcome } from './service.ts'
 import { renderRow } from './service.ts'
 import type { DeliveryOutcome } from './deliver.ts'
@@ -234,6 +234,30 @@ function renderWorkspace(registration: WorkspaceRegistration | undefined): strin
     return `⚠ the peer was created but could not be listed under its workspace: ${registration.warning ?? 'unknown error'}`
   }
   return undefined
+}
+
+/**
+ * Render the permission state the new peer inherited.
+ *
+ * One line, and deliberately not a warning: inheriting is the correct behaviour
+ * and the line exists to be checkable, not alarming. It earns its place because
+ * the failure it exposes is otherwise invisible from the caller's side — a peer
+ * pinned to the deployment default answers every question correctly except the
+ * one about authority, and the first symptom is an approval prompt in a session
+ * nobody is watching. Reporting the inherited knobs here makes that visible in
+ * the transcript the agent and the human already read.
+ * @param permission - what the host captured, or `undefined` when it captured nothing.
+ * @returns one line for the tool output, or `undefined` when there is nothing to say.
+ */
+function renderPeerPermission(permission: PeerPermission | undefined): string | undefined {
+  if (permission === undefined) return undefined
+  const parts = [
+    permission.sandbox === undefined ? undefined : `sandbox=${permission.sandbox}`,
+    permission.approval === undefined ? undefined : `approval=${permission.approval}`,
+    permission.preset === undefined ? undefined : `preset=${permission.preset}`,
+  ].filter((part): part is string => part !== undefined)
+  if (parts.length === 0) return undefined
+  return `permissions inherited from this session: ${parts.join(', ')}`
 }
 
 /**
@@ -794,7 +818,7 @@ export function registerReportTools(
 
   disposers.push(ctx.tools.register(defineTool({
     name: 'peer_start',
-    description: 'Open a new independent agent session — a peer, not a subordinate. A peer is a root session with its own lifecycle that outlives this turn, so it is the right move when the work is long-running, when you want a partner that keeps its own context across days, or when a task should not be nested under you. This creates the session, records that you started it (which is what later lets you address it directly), and hands it the task as a REPORT — so the assignment is durable and traceable, and the peer can answer by contributing to that same report. The output also reports what became of the peer\'s first turn (running, already ended, or failed): a delivered digest proves only that the peer is resident, never that work started. Do not use this as a cheaper subagent: for a bounded subtask, delegation is the right tool.',
+    description: 'Open a new independent agent session — a peer, not a subordinate. A peer is a root session with its own lifecycle that outlives this turn, so it is the right move when the work is long-running, when you want a partner that keeps its own context across days, or when a task should not be nested under you. This creates the session, records that you started it (which is what later lets you address it directly), and hands it the task as a REPORT — so the assignment is durable and traceable, and the peer can answer by contributing to that same report. The peer inherits your composition, model route, and current permission state (sandbox mode, approval policy, preset), and the output reports the permission state it actually got. The output also reports what became of the peer\'s first turn (running, already ended, or failed): a delivered digest proves only that the peer is resident, never that work started. Do not use this as a cheaper subagent: for a bounded subtask, delegation is the right tool.',
     parameters: {
       task: { type: 'string', required: true, description: 'What this peer is for and what it should do first. It becomes the opening report body.' },
       name: { type: 'string', description: 'Optional short display name for the peer (60 characters or fewer).' },
@@ -887,6 +911,7 @@ export function registerReportTools(
       return [
         `opened peer ${started.sessionId}${started.name === undefined ? '' : ` (name=${started.name})`}`,
         started.cwd === undefined ? '' : `cwd=${started.cwd}`,
+        renderPeerPermission(started.permission),
         `peers you have started: ${started.started}`,
         `assignment report: ${result.front.report}`,
         ...(provisioned === undefined ? [] : renderProvision(provisioned.prepared)),

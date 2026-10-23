@@ -168,6 +168,28 @@ check('the caller now holds a channel to what it started', await loose.holdsChan
 check('the new peer appears as started in the roster',
   (await loose.roster(SELF, { scope: 'related' })).some((row) => row.sessionId === startedOne.sessionId && row.relation === 'started'))
 
+// The permission state is what a peer inherits that cannot be seen from any other
+// field, and the host is the only side that can capture it. It has to survive the
+// round trip through the service unchanged, or `peer_start` cannot report it and
+// the failure it guards against (a peer pinned to the deployment default) stays
+// invisible to the agent that opened it.
+const permissionHost = {
+  ...host,
+  createPeer: async ({ sessionId }: { sessionId: string }) => ({
+    id: sessionId,
+    steer: () => {},
+    permission: { sandbox: 'danger-full-access', approval: 'never', preset: 'danger-full-access' },
+  }),
+}
+const inheriting = await new PeerService(permissionHost as never, 100).start(SELF, { task: 'inherit the permissions' })
+check('the host\'s captured permission state reaches the caller',
+  inheriting.permission?.sandbox === 'danger-full-access'
+  && inheriting.permission.approval === 'never'
+  && inheriting.permission.preset === 'danger-full-access',
+  JSON.stringify(inheriting.permission))
+check('a host that captures no permission state reports none rather than guessing',
+  startedOne.permission === undefined, JSON.stringify(startedOne.permission))
+
 const before = await loose.startedCount(SELF)
 const budgeted = new PeerService(host as never, before)
 let budgetError = ''
@@ -360,6 +382,23 @@ const namedOutput = await namedTools.get('peer_start')?.execute(
 ) ?? ''
 check('a whitespace-only name does not become a subject prefix', namedSubject === 'do the work', JSON.stringify(namedSubject))
 check('a whitespace-only name is dropped rather than printed empty', !namedOutput.includes('name='), namedOutput)
+
+// The inherited permission state is reported in the tool output, because that is
+// the transcript the caller and the human actually read. Leaving it implicit is
+// how a peer that runs under a different authority than its starter goes unnoticed.
+const permissionOutput = await toolSurface(
+  {
+    author: async () => ({
+      front: { report: 'R-0045', status: 'open', subject: 'permissions', from: 'session-perm', to: [], cc: [], authors: [], created: at(44), updated: at(45), children: [], artifacts: [], hops: 1 },
+      outcomes: [],
+    }),
+  },
+  new PeerService(permissionHost as never, 100),
+  undefined,
+).get('peer_start')?.execute({ task: 'work under my own permissions' }, { agent: { id: SELF } }) ?? ''
+check('the tool output names the inherited permission state',
+  permissionOutput.includes('permissions inherited from this session: sandbox=danger-full-access, approval=never, preset=danger-full-access'),
+  permissionOutput)
 
 // report_release exists on a deployment without the worktree feature, so its
 // refusals must name the deployment fact that explains them instead of leaving

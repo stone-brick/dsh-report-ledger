@@ -54,7 +54,7 @@ import { resolveWorktree, type WorktreeConfig, type WorktreeRuntime } from './re
 import { installDevMode } from './report/dev/index.ts'
 import { devModeEnabled } from './report/dev/roster.ts'
 import { buildWorktreeReport } from './report/maintenance.ts'
-import { DEFAULT_MAX_PEERS, PeerService, type PeerHost, type PeerReceipt, type WorkspaceRegistration } from './report/peer.ts'
+import { DEFAULT_MAX_PEERS, PeerService, type PeerHost, type PeerPermission, type PeerReceipt, type WorkspaceRegistration } from './report/peer.ts'
 import { REPORT_PATH, TIMELINE_PATH, WORKTREES_PATH, createReportHandler, createTimelineHandler, createWorktreesHandler, type ReportDetail } from './report/route.ts'
 import { ReportService, type ReportServiceHost } from './report/service.ts'
 import { buildTimeline, type SessionRecordLike } from './report/timeline.ts'
@@ -142,6 +142,135 @@ interface AgentPresetsLike {
    * @returns the preset id joined, or `undefined` when the parent joined none.
    */
   composeFrom(agentCtx: Context, parentCtx: Context): string | undefined
+}
+
+/**
+ * Structural face of the per-session sandbox-mode owner.
+ *
+ * Optional like the other service faces: a deployment may compose no sandbox
+ * policy at all, and there the peer simply keeps whatever mode its own creation
+ * pinned. What is read here is the starter's *effective* mode — its own logged
+ * override when it has one, the deployment default otherwise — because that is
+ * the mode the starter was actually running under when it opened the peer.
+ */
+interface SandboxPolicyLike {
+  /**
+   * Resolve one session's effective mode.
+   * @param request - the session whose mode to resolve.
+   * @returns the resolved policy; only `mode` is read.
+   */
+  resolve(request: { session: unknown }): { mode?: unknown } | undefined
+}
+
+/**
+ * Structural face of the per-session approval-policy owner.
+ *
+ * Read for the same reason as the sandbox mode: an escalation prompt is a
+ * per-session fact, so a peer that does not inherit the policy its starter ran
+ * under runs under a different authority than the session that opened it.
+ */
+interface ApprovalLike {
+  /**
+   * One session's effective policy.
+   * @param session - the session whose policy to read.
+   * @returns `'ask'`, `'never'`, or `undefined` on a harness that answers neither.
+   */
+  effectivePolicy(session: unknown): unknown
+}
+
+/** Structural face of the permission-preset owner (the durable identity of the two knobs above). */
+interface PermissionPresetsLike {
+  /**
+   * The preset one session currently matches.
+   * @param session - the session to resolve.
+   * @returns a configured preset name, `'auto'`, or `'custom'`.
+   */
+  current(session: unknown): string | undefined
+}
+
+/** The value `permissionPresets.current()` returns when the effective knobs match no configured preset. */
+const CUSTOM_PRESET = 'custom'
+
+/**
+ * One session's permission state, captured at peer creation.
+ *
+ * The shape is owned by {@link PeerPermission} in the peer module, because it is
+ * also what `peer_start` reports back: one type on both halves of the seam, so a
+ * field cannot be captured here and silently dropped there.
+ */
+export type InheritedPermission = PeerPermission
+
+/**
+ * The unpublished session a peer is composed on, as much of it as this plugin
+ * touches. The harness hands it to `setup()` as the second argument, exactly as
+ * its own delegation seam does; `append` is the only method read.
+ */
+interface PeerAppendTarget {
+  /** The session whose log is still unpublished at this point. */
+  readonly session?: {
+    /**
+     * Append one event to the unfinished log.
+     * @param type - the event type.
+     * @param data - the event payload.
+     */
+    append(type: string, data: Record<string, unknown>): void
+  }
+}
+
+/**
+ * Capture the permission state a peer should inherit from its starter.
+ *
+ * Called synchronously before creation, for the same reason the harness captures
+ * delegated policy before the child's first await: a switch the starter makes
+ * afterwards belongs to the starter's future, not to this peer. Nothing here
+ * consults the harness's event vocabulary directly — the three optional services
+ * already fold each session's log, and asking them is what keeps the answer
+ * identical to the one the starter's own tools resolve at execution time.
+ * @param ctx - the host capabilities, for the optional policy services.
+ * @param session - the starter's live session.
+ * @returns the fields worth inheriting; empty when no service is composed.
+ */
+export function captureInheritedPermission(ctx: PeerHostContext, session: PeerCallerAgent['session']): InheritedPermission {
+  const presets = ctx.get('permissionPresets') as PermissionPresetsLike | undefined
+  const sandboxPolicy = ctx.get('sandboxPolicy') as SandboxPolicyLike | undefined
+  const approval = ctx.get('approval') as ApprovalLike | undefined
+  const preset = presets?.current(session)
+  const sandbox = sandboxPolicy?.resolve({ session })?.mode
+  const policy = approval?.effectivePolicy(session)
+  return {
+    // `custom` is the derived "matches no preset" state, reserved and not a valid
+    // identity: copying it would name a preset nothing can resolve. The knobs
+    // below still travel, so the peer lands in the same custom state honestly.
+    ...(typeof preset === 'string' && preset !== '' && preset !== CUSTOM_PRESET ? { preset } : {}),
+    ...(typeof sandbox === 'string' && sandbox !== '' ? { sandbox } : {}),
+    ...(typeof policy === 'string' && policy !== '' ? { approval: policy } : {}),
+  }
+}
+
+/**
+ * Record an inherited permission state on the peer's unpublished log.
+ *
+ * `source: 'delegation'` is the harness's own marker for exactly this fact — a
+ * policy the session did not choose for itself — so a cold read of the peer's log
+ * can tell an inherited mode from one the user later picked in that session, and
+ * a later switch in the peer still wins because it is simply a later event.
+ *
+ * The preset identity is written LAST and separately: the permission service's
+ * own pinning pass runs after this window, fills any knob this run could not
+ * capture, and derives the identity itself when none was inherited. Writing ours
+ * first means that pass has something to reconcile against rather than a blank.
+ * @param created - the unpublished agent, when the harness handed one over.
+ * @param inherited - the captured state.
+ * @returns true when there was something to write and a log to write it to.
+ */
+export function appendInheritedPermission(created: PeerAppendTarget | undefined, inherited: InheritedPermission): boolean {
+  const log = created?.session
+  if (log === undefined || typeof log.append !== 'function') return false
+  const write = (type: string, data: Record<string, unknown>): void => { log.append(type, data) }
+  if (inherited.sandbox !== undefined) write('sandbox/mode', { mode: inherited.sandbox, source: 'delegation' })
+  if (inherited.approval !== undefined) write('approval/policy', { policy: inherited.approval, source: 'delegation' })
+  if (inherited.preset !== undefined) write('permission/preset', { preset: inherited.preset })
+  return true
 }
 
 /** Structural face of the optional deployment default model service. */
@@ -271,10 +400,17 @@ export interface PeerCreateOptions {
   /** The inherited model route. */
   readonly agentOptions: never
   /**
-   * Join the peer to its starter's composition.
+   * Compose the peer: join its starter's composition, then inherit the
+   * starter's permission state.
+   *
+   * Runs while the session is still unpublished — the harness's `setup()` window,
+   * shared with its own delegation seam — which is what makes the appended
+   * permission events part of the peer's first stored snapshot instead of a
+   * mutation that could lose a race with its first turn.
    * @param agentCtx - the new agent's scope context.
+   * @param created - the unpublished agent, whose session log may be appended to.
    */
-  setup(agentCtx: Context): void
+  setup(agentCtx: Context, created?: PeerAppendTarget): void
 }
 
 /** The model route a peer inherits from its starter. */
@@ -621,6 +757,16 @@ async function readDetail(id: string): Promise<ReportDetail | undefined> {
  *  - **Preset identity.** The joined preset is recorded in the durable session
  *    header, so a cold read of the peer's log rebuilds the composition it
  *    actually ran under instead of the deployment default.
+ *  - **Permissions.** The peer inherits the starter's effective sandbox mode,
+ *    approval policy, and permission-preset identity, written onto its own log
+ *    with the harness's `source: 'delegation'` marker. This is the part that does
+ *    NOT happen by itself and is easy to miss, because its absence is silent:
+ *    without it a peer is pinned to the deployment's default preset, so a peer
+ *    started by a fully-permissive session still asks the user to approve what
+ *    that session could already do — and a peer started by a read-only session is
+ *    more powerful than its starter. Inheriting is also what keeps the peer a
+ *    peer rather than a subordinate: the state lands in the peer's own log, so
+ *    the user can inspect it and switch it in that session afterwards.
  *
  * It is also, on a deployment that composes a workspace registry, the only place
  * that can put the new peer into a workspace group — see
@@ -663,6 +809,10 @@ export function buildPeerHost(ctx: PeerHostContext, host: HostBundle): PeerHost 
       // Refuse before creating anything: a peer published without a route is a
       // session whose every turn fails at step 1, which is far worse than an error.
       const agentOptions = peerRoute(caller, defaultModel())
+      // Captured synchronously, before the first await: a preset switch the starter
+      // makes while this peer is being created belongs to its future, not to the
+      // peer. The same rule (and the same reason) as the harness's delegation seam.
+      const inherited = captureInheritedPermission(ctx, caller.session)
       const agentPreset = presets()?.composedPreset(caller.ctx)
       const meta = {
         ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
@@ -674,8 +824,19 @@ export function buildPeerHost(ctx: PeerHostContext, host: HostBundle): PeerHost 
         agentOptions: agentOptions as never,
         // Synchronous and roster-free, which is what lets it run inside the
         // creation window; a rosterless deployment joins nothing here.
-        setup: (agentCtx: Context) => {
+        setup: (agentCtx: Context, created?: PeerAppendTarget) => {
           presets()?.composeFrom(agentCtx, caller.ctx)
+          // A peer that kept the deployment default while its starter ran on full
+          // access is the defect this call closes: it asks the user to approve what
+          // the session that opened it was already allowed to do. The state is
+          // written onto the peer's own log, so the peer stays a root session with
+          // its own authority — inheritable, inspectable, and switchable later.
+          if (!appendInheritedPermission(created, inherited) && Object.keys(inherited).length > 0) {
+            ctx.logger?.warn?.(
+              `report-ledger: peer ${input.sessionId} could not inherit ${JSON.stringify(inherited)} from ${input.startedBy} — `
+              + 'the harness handed no unpublished session to setup(); the peer runs on its own creation-time preset instead',
+            )
+          }
         },
       })
       // The handle is intentionally NOT retained. Its `dispose()` removes the
@@ -684,6 +845,9 @@ export function buildPeerHost(ctx: PeerHostContext, host: HostBundle): PeerHost 
       return {
         id: String(handle.agent.id),
         steer: (message) => { handle.agent.steer(message as never) },
+        // Reported back so the caller (and the user reading its transcript) can see
+        // what authority the peer actually got instead of inferring it from silence.
+        ...(Object.keys(inherited).length === 0 ? {} : { permission: inherited }),
       }
     },
     /**

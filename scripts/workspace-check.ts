@@ -207,23 +207,57 @@ check('a vanished directory is reported as failed rather than thrown',
 // fails its first request while the ledger still reports a delivered hand-off.
 interface CreationCall {
   readonly agentOptions: Record<string, unknown>
+  /** What the stub harness handed `setup()`, in append order. */
+  readonly appended: readonly AppendedEvent[]
+}
+
+/** One event the peer's unpublished log received during its creation window. */
+interface AppendedEvent {
+  readonly type: string
+  readonly data: Record<string, unknown>
+}
+
+/**
+ * The optional permission services a peer creation reads.
+ *
+ * Each is independently optional because each is separately composed in the real
+ * deployment, and the capture has to keep working when one of them is missing.
+ */
+interface PermissionServices {
+  readonly permissionPresets?: { current(session: unknown): string | undefined }
+  readonly sandboxPolicy?: { resolve(request: { session: unknown }): { mode?: unknown } | undefined }
+  readonly approval?: { effectivePolicy(session: unknown): unknown }
 }
 
 const captureCreation = (
   caller: { options: Record<string, unknown>; session: { requestHeader(): { config?: Record<string, unknown> } | undefined } },
+  services: PermissionServices = {},
+  warnings: string[] = [],
+  beforeSetup?: () => void,
 ): { peerHost: ReturnType<typeof buildPeerHost>; calls: CreationCall[] } => {
   const calls: CreationCall[] = []
   const creationCtx = {
     agents: {
       get: () => caller,
       list: () => [],
-      create: async (options: { agentOptions: Record<string, unknown> }) => {
-        calls.push({ agentOptions: options.agentOptions })
+      create: async (options: {
+        agentOptions: Record<string, unknown>
+        setup(agentCtx: unknown, created?: { session: { append(type: string, data: Record<string, unknown>): void } }): void
+      }) => {
+        const appended: AppendedEvent[] = []
+        // The harness runs setup with the session still unpublished and hands over
+        // the agent precisely so the log can be seeded — the seam the peer's
+        // permission inheritance depends on, so the stub exposes it the same way.
+        beforeSetup?.()
+        options.setup(undefined, {
+          session: { append: (type: string, data: Record<string, unknown>) => { appended.push({ type, data }) } },
+        })
+        calls.push({ agentOptions: options.agentOptions, appended })
         return { agent: { id: 'session-peer-created' } }
       },
     },
-    get: () => undefined,
-    logger: { warn: () => {} },
+    get: (name: string) => (services as Record<string, unknown>)[name],
+    logger: { warn: (message: string) => { warnings.push(message) } },
   }
   return { peerHost: buildPeerHost(creationCtx as unknown as PeerHostContext, host()), calls }
 }
@@ -262,6 +296,101 @@ check('a starter with no request header inherits its creation-time effort',
   noHeader?.reasoningEffort === 'low', JSON.stringify(noHeader))
 check('provider and model still fall back to creation options',
   noHeader?.provider === 'p' && noHeader?.model === 'm', JSON.stringify(noHeader))
+
+// ---------------------------------------------------------------------------
+// 6b. peer creation inherits the starter's permission state
+// ---------------------------------------------------------------------------
+// This is the failure a deployment reports as "the peer still asks me to approve
+// what this session was already allowed to do": the peer is pinned to the
+// deployment's default preset instead of the state of the session that opened it.
+// Nothing about a peer's own fields shows it, so the seam is pinned here.
+const starterCaller = {
+  options: { provider: 'p', model: 'm' },
+  session: { requestHeader: () => undefined },
+}
+
+const fullAccess = {
+  permissionPresets: { current: () => 'danger-full-access' },
+  sandboxPolicy: { resolve: () => ({ mode: 'danger-full-access' }) },
+  approval: { effectivePolicy: () => 'never' },
+}
+const inheritedWarnings: string[] = []
+const inheritedPeer = captureCreation(starterCaller, fullAccess, inheritedWarnings)
+await inheritedPeer.peerHost.createPeer({ sessionId: 'session-peer-created', startedBy: 'session-starter' })
+const inheritedEvents = [...(inheritedPeer.calls[0]?.appended ?? [])]
+check('the peer inherits its starter\'s sandbox mode and approval policy',
+  inheritedEvents[0]?.type === 'sandbox/mode' && inheritedEvents[0]?.data.mode === 'danger-full-access'
+  && inheritedEvents[1]?.type === 'approval/policy' && inheritedEvents[1]?.data.policy === 'never',
+  JSON.stringify(inheritedEvents))
+check('inherited knobs are marked as delegation, not as the peer\'s own choice',
+  inheritedEvents[0]?.data.source === 'delegation' && inheritedEvents[1]?.data.source === 'delegation',
+  JSON.stringify(inheritedEvents.map((event) => event.data.source)))
+check('the peer also inherits the preset identity, written last',
+  inheritedEvents[2]?.type === 'permission/preset' && inheritedEvents[2]?.data.preset === 'danger-full-access',
+  JSON.stringify(inheritedEvents))
+check('a working inheritance path raises no warning',
+  inheritedWarnings.length === 0, inheritedWarnings.join(' | '))
+
+const bare = captureCreation(starterCaller)
+await bare.peerHost.createPeer({ sessionId: 'session-peer-bare', startedBy: 'session-starter' })
+check('a starter with no permission services yields no inherited events',
+  bare.calls[0]?.appended.length === 0, JSON.stringify(bare.calls[0]?.appended))
+
+// `custom` is the derived "matches no preset" state and is not a valid identity to
+// copy; the knobs still travel, so the peer lands in the same custom state honestly.
+const customPeer = captureCreation(starterCaller, {
+  permissionPresets: { current: () => 'custom' },
+  sandboxPolicy: { resolve: () => ({ mode: 'read-only' }) },
+  approval: { effectivePolicy: () => 'ask' },
+})
+await customPeer.peerHost.createPeer({ sessionId: 'session-peer-custom', startedBy: 'session-starter' })
+const customEvents = [...(customPeer.calls[0]?.appended ?? [])]
+check('a custom preset is not copied as an identity',
+  customEvents.every((event) => event.type !== 'permission/preset'), JSON.stringify(customEvents))
+check('a custom preset still carries its two knobs',
+  customEvents[0]?.data.mode === 'read-only' && customEvents[1]?.data.policy === 'ask', JSON.stringify(customEvents))
+
+// The capture is synchronous and happens before the first await: a switch the
+// starter makes while the peer is being created belongs to the starter's future.
+// Without this rule the peer would silently pick up a mode the user changed after
+// asking for it, and the log would attribute it to a delegation that never happened.
+const moving = { mode: 'workspace-write' }
+const racingPeer = captureCreation(
+  starterCaller,
+  {
+    permissionPresets: { current: () => 'workspace-write' },
+    sandboxPolicy: { resolve: () => ({ mode: moving.mode }) },
+    approval: { effectivePolicy: () => 'ask' },
+  },
+  [],
+  () => { moving.mode = 'danger-full-access' },
+)
+await racingPeer.peerHost.createPeer({ sessionId: 'session-peer-racing', startedBy: 'session-starter' })
+check('a starter switching preset mid-creation does not leak into the peer',
+  racingPeer.calls[0]?.appended[0]?.data.mode === 'workspace-write',
+  JSON.stringify(racingPeer.calls[0]?.appended))
+
+// A harness that does not hand the unpublished session to setup() degrades to the
+// peer's own creation-time preset — and says so, because the silent version of
+// this is exactly the bug this section pins.
+const appendlessWarnings: string[] = []
+const appendless = {
+  agents: {
+    get: () => starterCaller,
+    list: () => [],
+    create: async (options: { setup(): void }) => {
+      options.setup()
+      return { agent: { id: 'session-peer-created' } }
+    },
+  },
+  get: (name: string) => (fullAccess as Record<string, unknown>)[name],
+  logger: { warn: (message: string) => { appendlessWarnings.push(message) } },
+}
+const appendlessHost = buildPeerHost(appendless as unknown as PeerHostContext, host())
+await appendlessHost.createPeer({ sessionId: 'session-peer-appendless', startedBy: 'session-starter' })
+check('a creation window without the unpublished session is reported, not silent',
+  appendlessWarnings.some((line) => line.includes('session-peer-appendless') && line.includes('inherit')),
+  appendlessWarnings.join(' | '))
 
 // ---------------------------------------------------------------------------
 // 7. apply(): route registration is failure-atomic

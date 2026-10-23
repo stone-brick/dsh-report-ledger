@@ -31,11 +31,19 @@
  * resolve `{{model}}` during prompt assembly, so its very first turn dies at
  * step 1. Both halves are the host adapter's job, which is why
  * {@link PeerHost.createPeer} receives the starter's session id: the peer is
- * composed from the live starter (its model route, its composition) instead of
- * being left to resolve against nothing. Both failures are also completely
- * silent unless someone looks, which is why {@link PeerHost.confirmPeer} exists:
- * `delivered` certifies that a digest reached a live agent, and must never be
- * reported as "someone is working".
+ * composed from the live starter (its model route, its composition, and its
+ * permission state) instead of being left to resolve against nothing. Both
+ * failures are also completely silent unless someone looks, which is why
+ * {@link PeerHost.confirmPeer} exists: `delivered` certifies that a digest
+ * reached a live agent, and must never be reported as "someone is working".
+ *
+ * The permission half deserves its own sentence because it is the one a reader
+ * is most likely to assume: a peer pinned to the deployment default instead of
+ * its starter's state looks perfectly healthy in every other field, and shows up
+ * only as an approval prompt in a session nobody is watching. Inheriting it is
+ * not the same as widening it — the state is written onto the peer's own log, so
+ * the peer keeps its own authority, the user can read where it came from, and a
+ * later switch in that session still wins.
  *
  * Creation and conversation are kept separate on purpose: this module only
  * creates, records, and (optionally) observes the peer's first turn. Handing the
@@ -92,6 +100,24 @@ export interface PeerReceipt {
   readonly error?: string
 }
 
+/**
+ * The permission state a host captured for a peer at creation.
+ *
+ * Every field is optional because each knob is owned by a separate optional
+ * service: a deployment can compose the sandbox policy and not the presets, and
+ * the host reports exactly what it could read rather than guessing. The state is
+ * a copy, not a live view — a peer's own later switch is its business, and the
+ * starter's later switches are the starter's.
+ */
+export interface PeerPermission {
+  /** The inherited preset identity, when it names a configured preset (or live Auto). */
+  readonly preset?: string
+  /** The inherited sandbox mode. */
+  readonly sandbox?: string
+  /** The inherited approval policy. */
+  readonly approval?: string
+}
+
 /** A freshly created peer. */
 export interface StartedPeer {
   /** Its session id — the address to report to. */
@@ -102,6 +128,15 @@ export interface StartedPeer {
   readonly cwd?: string
   /** How many peers the starter now owns, including this one. */
   readonly started: number
+  /**
+   * The permission state the peer inherited, when the host captured one.
+   *
+   * Reported rather than assumed because the failure it guards against is silent:
+   * a peer pinned to the deployment default looks healthy everywhere else and
+   * surfaces only later, as an approval prompt in a session nobody is watching.
+   * Absent means the host answers no question about permissions at all.
+   */
+  readonly permission?: PeerPermission
   /**
    * What became of the attempt to put the peer in a workspace group.
    *
@@ -167,10 +202,18 @@ export interface PeerHost {
    * model route of its own, so the adapter resolves both from the live starter
    * session named here. An adapter that ignores it produces a peer whose first
    * turn fails immediately.
+   *
+   * The same argument covers the peer's permission state, and the failure there is
+   * quieter: composition and route mistakes kill the first turn, while a peer that
+   * keeps the deployment's default preset merely runs under a different authority
+   * than the session that opened it — inviting the user to approve, in a session
+   * they are not looking at, work the starter could already do. {@link
+   * PeerService.start} therefore hands the starter's id to every implementation on
+   * the assumption that it is used for all of these, not just for the route.
    * @param input - the session id, the starter it is composed from, and the inherited directory.
-   * @returns the new session id and its wake channel.
+   * @returns the new session id, its wake channel, and the permission state it inherited.
    */
-  createPeer(input: { sessionId: string; startedBy: string; cwd?: string }): Promise<{ id: string; steer(message: OutboundMessage): void }>
+  createPeer(input: { sessionId: string; startedBy: string; cwd?: string }): Promise<{ id: string; steer(message: OutboundMessage): void; permission?: PeerPermission }>
   /**
    * Put a freshly created peer session into the workspace group that owns its
    * directory, so the GUI lists it under that workspace instead of leaving it
@@ -371,7 +414,8 @@ export class PeerService {
     const cwd = input.cwd ?? this.#host.selfCwd(self)
     const sessionId = `session-${randomUUID()}`
     // The starter is named, not just recorded: the adapter composes the peer from
-    // that live session, because a root agent has no composition or route of its own.
+    // that live session, because a root agent has no composition, route, or standing
+    // permission state of its own.
     const created = await this.#host.createPeer({ sessionId, startedBy: self, ...(cwd === undefined ? {} : { cwd }) })
 
     // Registration follows creation, never precedes it: the registry validates
@@ -400,6 +444,7 @@ export class PeerService {
       started: already + 1,
       ...(name === undefined ? {} : { name }),
       ...(cwd === undefined ? {} : { cwd }),
+      ...(created.permission === undefined ? {} : { permission: created.permission }),
       ...(workspace === undefined ? {} : { workspace }),
     }
   }
