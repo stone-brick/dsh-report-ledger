@@ -49,8 +49,14 @@ interface SessionRemoteLike {
     request: { readonly path: string },
     signal?: AbortSignal,
   ): Promise<RemoteResultLike<readonly WorkspacePathApplication[]>>
+  /**
+   * The Host's own request shape, not this module's: `action` names **only**
+   * `reveal`, and omitting it is how "open in the default application" is said.
+   * Sending `action: 'open'` fails the gateway's boundary validation — measured
+   * in the GUI, and the reason {@link PathAction} is translated, not passed on.
+   */
   openWorkspacePath?(
-    request: { readonly path: string; readonly action: PathAction; readonly application?: string },
+    request: { readonly path: string; readonly action?: 'reveal'; readonly application?: string },
     signal?: AbortSignal,
   ): Promise<RemoteResultLike<unknown>>
 }
@@ -79,7 +85,8 @@ export function createPathOpener(remote: unknown): PathOpener | undefined {
     async open(path: string, action: PathAction, application?: string): Promise<boolean> {
       const answer = await face.openWorkspacePath?.({
         path,
-        action,
+        // `reveal` is the only action the wire knows; a plain open is its absence.
+        ...(action === 'reveal' ? { action: 'reveal' as const } : {}),
         ...(application === undefined ? {} : { application }),
       })
       return answer?.ok === true

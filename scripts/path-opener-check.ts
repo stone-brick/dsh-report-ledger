@@ -85,13 +85,16 @@ check('a session face without the handler query answers null', await (async () =
 const { remote: recording, calls } = fakeRemote()
 const recorder = createPathOpener(recording)
 await recorder?.open('/tmp/R-0001.md', 'open')
-const defaultCall = calls[0] as { request: { path: string; action: string; application?: string } }
-check('the default gesture names the path and the open action', defaultCall.request.path === '/tmp/R-0001.md'
-  && defaultCall.request.action === 'open' && !('application' in defaultCall.request), JSON.stringify(defaultCall))
+const defaultCall = calls[0] as { request: { path: string; action?: string; application?: string } }
+// The wire's default open is the ABSENCE of `action`, not `action: 'open'` — the
+// gateway's boundary validation rejects the latter, measured in the GUI.
+check('the default gesture names the path and omits the action', defaultCall.request.path === '/tmp/R-0001.md'
+  && !('action' in defaultCall.request) && !('application' in defaultCall.request), JSON.stringify(defaultCall))
 
 await recorder?.open('/tmp/R-0001.md', 'open', 'code')
-const appCall = calls[1] as { request: { action: string; application?: string } }
-check('an explicit handler is carried through', appCall.request.application === 'code')
+const appCall = calls[1] as { request: { action?: string; application?: string } }
+check('an explicit handler is carried through, still without an action', appCall.request.application === 'code'
+  && !('action' in appCall.request))
 
 await recorder?.open('/tmp/R-0001.md', 'reveal')
 const revealCall = calls[2] as { request: { action: string } }
