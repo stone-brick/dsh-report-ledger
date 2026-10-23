@@ -21,6 +21,8 @@ export interface WorkspacePathApplication {
   readonly name: string
   /** Small inline icon (data URL), or null when the desktop reported none. */
   readonly icon: string | null
+  /** Whether this is the operating system's default handler for the path. */
+  readonly default?: boolean
 }
 
 /** What one gesture asks of the desktop. */

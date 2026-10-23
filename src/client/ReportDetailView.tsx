@@ -18,7 +18,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import {
   Button,
-  IconCheckOutlineRegular,
+  FileTypeIcon,
   IconChevronDownOutlineRegular,
   IconCopyOutlineRegular,
   IconFolderOpenOutlineRegular,
@@ -100,13 +100,62 @@ const bodyFrame: Record<string, string | number> = {
   borderRadius: '4px',
 }
 
-/** The footer line: ledger path plus its copy control. */
-const pathRow: Record<string, string | number> = {
-  ...wrap,
-  marginTop: '6px',
+/** The ledger file as a delivery card: type tile, two lines, one compact control. */
+const fileCard: Record<string, string | number> = {
   display: 'flex',
-  alignItems: 'baseline',
-  gap: '6px',
+  alignItems: 'center',
+  gap: '10px',
+  padding: '8px 10px',
+  marginTop: '6px',
+  borderRadius: '8px',
+  background: 'var(--dsw-alias-bg-layer-1, rgba(0,0,0,0.02))',
+  border: '1px solid var(--dsw-alias-border-l1, rgba(0,0,0,0.08))',
+}
+/** The delivery cards' file-type tile: white at 50% in light, 5% in dark (their rule). */
+const fileTile: Record<string, string | number> = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  width: '30px',
+  height: '30px',
+  borderRadius: '6px',
+  background: 'var(--dsw-alias-bg-layer-3, rgba(0,0,0,0.05))',
+  flex: '0 0 auto',
+}
+const fileName: Record<string, string | number> = {
+  display: 'block',
+  fontWeight: 500,
+  whiteSpace: 'nowrap',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+}
+const filePath: Record<string, string | number> = {
+  display: 'block',
+  color: 'var(--dsw-alias-label-caption, #70757d)',
+  fontSize: 'var(--dsw-font-xxxs-11, 11px)',
+  whiteSpace: 'nowrap',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+}
+/** The native control, one pill: default-app part and the picker part, divided. */
+const split: Record<string, string | number> = {
+  display: 'inline-flex',
+  alignItems: 'stretch',
+  borderRadius: '6px',
+  border: '1px solid var(--dsw-alias-border-l1, rgba(0,0,0,0.12))',
+  overflow: 'hidden',
+}
+const splitPart: Record<string, string | number> = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  width: '26px',
+  height: '24px',
+  padding: 0,
+  border: 0,
+  background: 'transparent',
+  color: 'inherit',
+  cursor: 'pointer',
 }
 
 /** A row's inline panel: indented under its row, growing with the page. */
@@ -258,27 +307,34 @@ const paneBody: Record<string, string | number> = {
 }
 
 /**
- * The ledger file's native controls: default app, a picker, and reveal.
+ * The ledger file, dressed as one of the GUI's delivery cards.
  *
- * This is the shell's own "open in default app" split button, re-built on the
- * public Remote verbs (`path-opener.ts` says why it cannot be imported). It
- * appears only where a Host desktop answered that it can take paths; everywhere
- * else the row keeps its copy control and nothing else, which is the same
- * degradation the shell's control has.
- * @param props - the file to open, the lazy opener, and the translator.
- * @returns the split control, or null when this host has no desktop.
+ * The delivery cards in a finished turn are the shape this GUI uses for "here is
+ * a file": a type icon in a rounded tile, the filename, one muted line, and a
+ * compact native split control on the right. That is what a reader already knows
+ * how to use, so the ledger file borrows it instead of inventing a row of outline
+ * buttons — and the control inside is the same "open in default app + picker +
+ * reveal" the shell's own cards carry (`path-opener.ts` explains why it is
+ * re-built on the public Remote verbs rather than imported).
+ *
+ * Without a Host desktop the card still renders: the icon and the path are the
+ * file, and copying the path stays available from the same menu.
+ * @param props - the file to show and open, the lazy opener, and the translator.
+ * @returns the file card.
  */
-function OpenFileControl({ path, opener, t }: {
+function OpenFileCard({ path, opener, t }: {
   readonly path: string
   readonly opener?: () => PathOpener | undefined
   readonly t: Translate
-}): ReactElement | null {
+}): ReactElement {
   const [desktop, setDesktop] = useState<'unknown' | 'yes' | 'no'>('unknown')
   const [apps, setApps] = useState<readonly WorkspacePathApplication[] | null>(null)
   const [menu, setMenu] = useState(false)
   const [busy, setBusy] = useState(false)
   const [failed, setFailed] = useState(false)
+  const [copied, setCopied] = useState(false)
   const loading = useRef<AbortController | null>(null)
+  const copiedTimer = useRef<ReturnType<typeof globalThis.setTimeout> | undefined>(undefined)
 
   // Ask once whether a desktop is serving this page, and — when it is — start
   // reading the handlers too. The shell's own delivery cards load their desktop
@@ -304,7 +360,11 @@ function OpenFileControl({ path, opener, t }: {
           .catch(() => { if (!controller.signal.aborted) setApps([]) })
       })
       .catch(() => { if (!cancelled) setDesktop('no') })
-    return () => { cancelled = true; loading.current?.abort() }
+    return () => {
+      cancelled = true
+      loading.current?.abort()
+      if (copiedTimer.current !== undefined) globalThis.clearTimeout(copiedTimer.current)
+    }
   }, [opener, path])
 
   // A menu opened before the prefetch settled still asks for them itself (a
@@ -335,62 +395,96 @@ function OpenFileControl({ path, opener, t }: {
       .finally(() => { setBusy(false) })
   }, [opener, path])
 
-  if (desktop !== 'yes') return null
+  const copy = useCallback(() => {
+    setMenu(false)
+    void writeClipboard(path).then((ok) => {
+      if (!ok) return
+      setCopied(true)
+      if (copiedTimer.current !== undefined) globalThis.clearTimeout(copiedTimer.current)
+      copiedTimer.current = globalThis.setTimeout(() => { setCopied(false) }, COPIED_HOLD_MS)
+    })
+  }, [path])
 
-  const items: MenuEntry[] = [
-    { id: 'default', label: t('detail.openFile') },
-    ...(apps === null
-      ? [{ type: 'label' as const, id: 'loading', text: t('detail.openFileLoading') }]
-      : apps.map((app): MenuEntry => ({
-          id: `app:${app.id}`,
-          label: app.name,
-          ...(app.icon === null ? {} : { icon: <img src={app.icon} alt="" width={14} height={14} /> }),
-        }))),
-    { type: 'separator', id: 'sep' },
-    { id: 'reveal', label: t('detail.revealFile') },
-  ]
+  const base = path.split(/[\\/]/).pop() ?? path
+  const defaultApp = apps?.find((app) => app.default === true)
+  const items: MenuEntry[] = desktop === 'yes'
+    ? [
+        { id: 'default', label: t('detail.openFile') },
+        ...(apps === null
+          ? [{ type: 'label' as const, id: 'loading', text: t('detail.openFileLoading') }]
+          : apps.map((app): MenuEntry => ({
+              id: `app:${app.id}`,
+              label: app.name,
+              ...(app.icon === null ? {} : { icon: <img src={app.icon} alt="" width={14} height={14} /> }),
+            }))),
+        { type: 'separator', id: 'sep-native' },
+        { id: 'reveal', label: t('detail.revealFile') },
+        { type: 'separator', id: 'sep-copy' },
+        { id: 'copy', label: t('view.copyPath'), icon: <IconCopyOutlineRegular size={14} /> },
+      ]
+    : [{ id: 'copy', label: t('view.copyPath'), icon: <IconCopyOutlineRegular size={14} /> }]
 
   return (
-    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '2px', flex: '0 0 auto' }}>
-      <Tooltip label={t('detail.openFile')} side="top" delayMs={400}>
-        <Button
-          variant="outline"
-          size="sm"
-          icon={<IconFolderOpenOutlineRegular size={14} />}
-          aria-label={t('detail.openFile')}
-          disabled={busy}
-          onClick={() => { act('open') }}
-        />
-      </Tooltip>
-      <Menu
-        open={menu}
-        anchor={(
-          <Button
-            variant="outline"
-            size="sm"
-            icon={<IconChevronDownOutlineRegular size={14} />}
-            aria-label={t('detail.openFileMenu')}
-            aria-expanded={menu}
-            disabled={busy}
-            onClick={() => { setMenu((current) => !current) }}
-          />
-        )}
-        items={items}
-        align="end"
-        portal
-        onSelect={(id) => {
-          if (id === 'default') act('open')
-          else if (id === 'reveal') act('reveal')
-          else if (id.startsWith('app:')) act('open', id.slice('app:'.length))
-        }}
-        onClose={() => { setMenu(false) }}
-      />
-      {failed ? (
-        <span style={{ color: 'var(--dsw-alias-state-error-primary, #b00)', fontSize: '11px' }}>
-          {t('detail.openFileFailed')}
+    <div style={fileCard}>
+      {/* The same file-type tile the delivery cards use. */}
+      <span style={fileTile}>
+        <FileTypeIcon path={path} size={18} />
+      </span>
+      <span style={{ flex: '1 1 auto', minWidth: 0 }}>
+        <span style={fileName}>{t('view.detail.path')} · {base}</span>
+        <span style={filePath} title={path}>
+          {copied ? t('body.copied') : failed ? t('detail.openFileFailed') : path}
         </span>
-      ) : null}
-    </span>
+      </span>
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', flex: '0 0 auto' }}>
+        {desktop === 'yes' ? (
+          <span style={split}>
+            <Tooltip label={t('detail.openFile')} side="top" delayMs={400}>
+              <button
+                type="button"
+                aria-label={t('detail.openFile')}
+                disabled={busy}
+                onClick={() => { act('open') }}
+                style={splitPart}
+              >
+                {defaultApp !== undefined && defaultApp.icon !== null
+                  ? <img src={defaultApp.icon} alt="" width={14} height={14} />
+                  : <IconFolderOpenOutlineRegular size={14} />}
+              </button>
+            </Tooltip>
+            <Menu
+              open={menu}
+              anchor={(
+                <button
+                  type="button"
+                  aria-label={t('detail.openFileMenu')}
+                  aria-expanded={menu}
+                  disabled={busy}
+                  onClick={() => { setMenu((current) => !current) }}
+                  style={{ ...splitPart, borderLeft: '1px solid var(--dsw-alias-border-l1, rgba(0,0,0,0.12))' }}
+                >
+                  <IconChevronDownOutlineRegular size={14} />
+                </button>
+              )}
+              items={items}
+              align="end"
+              portal
+              onSelect={(id) => {
+                if (id === 'default') act('open')
+                else if (id === 'reveal') act('reveal')
+                else if (id === 'copy') copy()
+                else if (id.startsWith('app:')) act('open', id.slice('app:'.length))
+              }}
+              onClose={() => { setMenu(false) }}
+            />
+          </span>
+        ) : (
+          <button type="button" aria-label={t('view.copyPath')} title={t('view.copyPath')} onClick={copy} style={splitPart}>
+            <IconCopyOutlineRegular size={14} />
+          </button>
+        )}
+      </span>
+    </div>
   )
 }
 
@@ -401,11 +495,6 @@ function OpenFileControl({ path, opener, t }: {
  */
 export function ReportDetailView(props: ReportDetailViewProps): ReactElement {
   const { report, detail, error, t, idHint, id, variant, onOpenReport, inList, visibleInFilter, onClose, opener } = props
-  const [copiedPath, setCopiedPath] = useState(false)
-  const copyTimer = useRef<ReturnType<typeof globalThis.setTimeout> | undefined>(undefined)
-  useEffect(() => () => {
-    if (copyTimer.current !== undefined) globalThis.clearTimeout(copyTimer.current)
-  }, [])
   const shownBody = useMemo(() => displayBody(detail?.body ?? ''), [detail])
   // The text the renderer gets. A cut body can end mid-fence, and an unterminated
   // fence would turn the rest of the report into a code block — see `closeOpenFence`.
@@ -419,20 +508,6 @@ export function ReportDetailView(props: ReportDetailViewProps): ReactElement {
     () => ({ code: { copyLabel: t('body.copy'), copiedLabel: t('body.copied') }, footnotes: t('body.footnotes') }),
     [t],
   )
-  /**
-   * Copy the ledger path.
-   *
-   * Uses the shell's `writeClipboard` rather than `navigator.clipboard`, so the
-   * plugin inherits whatever fallback chain the rest of the GUI relies on.
-   */
-  const copyPath = useCallback((path: string) => {
-    void writeClipboard(path).then((ok) => {
-      if (!ok) return
-      setCopiedPath(true)
-      if (copyTimer.current !== undefined) globalThis.clearTimeout(copyTimer.current)
-      copyTimer.current = globalThis.setTimeout(() => { setCopiedPath(false) }, COPIED_HOLD_MS)
-    })
-  }, [])
 
   const link = (target: string): ReactElement => (
     <span key={target} style={{ marginRight: '6px' }}>
@@ -560,25 +635,9 @@ export function ReportDetailView(props: ReportDetailViewProps): ReactElement {
               {fill(t('detail.bodyTruncated'), { chars: shownBody.text.trim().length })}
             </div>
           ) : null}
-          {/* The ledger path is the longest string here and the only one with no
-              spaces to break at, so it wraps mid-segment on purpose. Its controls
-              are the ones a file gets everywhere else in this GUI: open in the
-              default app, a picker for another handler, reveal — and copy, for
-              the times the reader wants the path itself. */}
-          <div style={pathRow}>
-            <StateDot state="idle" size={6} />
-            <span style={{ wordBreak: 'break-all' }}>{t('view.detail.path')}: {detail.path}</span>
-            <OpenFileControl path={detail.path} opener={opener} t={t} />
-            <Tooltip label={copiedPath ? t('body.copied') : t('view.copyPath')} side="bottom" delayMs={300}>
-              <Button
-                variant="ghost"
-                size="sm"
-                icon={copiedPath ? <IconCheckOutlineRegular size={16} /> : <IconCopyOutlineRegular size={16} />}
-                aria-label={copiedPath ? t('body.copied') : t('view.copyPath')}
-                onClick={() => { copyPath(detail.path) }}
-              />
-            </Tooltip>
-          </div>
+          {/* The ledger file, as the delivery card this GUI already uses for
+              files: type tile, name, path, and the same native open control. */}
+          <OpenFileCard path={detail.path} opener={opener} t={t} />
         </>
       )}
     </>

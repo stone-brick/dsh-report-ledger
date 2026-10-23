@@ -29,7 +29,9 @@
  *   - `writeClipboard` returns `Promise<boolean>`;
  *   - `Menu` is owner-controlled (`open` + `onClose`), renders its `anchor` in
  *     place, and its `items` are data rows — `onSelect(id)` fires for a row, not
- *     for a separator or a label.
+ *     for a separator or a label;
+ *   - `FileTypeIcon` takes a path (or a resolved kind) and draws the platform's
+ *     own category glyph — the delivery cards' file tiles use it.
  *
  * The shape asserted below is exactly what this plugin uses, and nothing more:
  * adding a field here that the view then passes and the shell ignores would be a
@@ -168,6 +170,14 @@ declare module '@deepseek-ai/dsh-client-ui-primitives' {
   export function IconCopyOutlineRegular(props: IconProps): ReactElement
   export function IconCheckOutlineRegular(props: IconProps): ReactElement
   export function IconFolderOpenOutlineRegular(props: IconProps): ReactElement
+
+  /**
+   * The category-coloured file glyph the delivery cards use.
+   *
+   * Classified from the path by the platform (`markdown`, `pdf`, `folder`, …), so
+   * a caller can show the same glyph the shell would show for the same file.
+   */
+  export function FileTypeIcon(props: { readonly path: string } & IconProps): ReactElement
 
   /** One selectable row in a {@link Menu}. */
   export interface MenuItem {
