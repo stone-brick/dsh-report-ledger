@@ -418,10 +418,10 @@ const CARD_PADDING = 9
 /** Width of the status stripe down a card's left edge. */
 const STRIPE = 3
 /** Arrowhead length and half-width. */
-const ARROW_LENGTH = 7
-const ARROW_HALF = 3.5
+const ARROW_LENGTH = 9
+const ARROW_HALF = 4.5
 /** Distance the arrow tip stops short of the target edge, so it never sits on the border. */
-const ARROW_GAP = 3
+const ARROW_GAP = 4
 /** Radius of the fillet drawn at a wire's bends. */
 const CORNER_RADIUS = 4
 /**
@@ -468,10 +468,10 @@ export const WIRE_TOKENS: Readonly<Record<CardgraphEdgeKind, {
   readonly dash: readonly number[]
   readonly width: number
 }>> = {
-  to: { colour: '--dsw-alias-state-business-primary', dash: [], width: 1.4 },
-  cc: { colour: '--dsw-alias-label-caption', dash: [2, 3], width: 1 },
-  author: { colour: '--dsw-alias-state-success-primary', dash: [1, 3], width: 1 },
-  thread: { colour: '--dsw-alias-label-primary', dash: [], width: 1.2 },
+  to: { colour: '--dsw-alias-state-business-primary', dash: [], width: 1.8 },
+  cc: { colour: '--dsw-alias-label-caption', dash: [3, 4], width: 1.3 },
+  author: { colour: '--dsw-alias-state-success-primary', dash: [1, 4], width: 1.3 },
+  thread: { colour: '--dsw-alias-label-primary', dash: [], width: 1.5 },
 }
 
 /** Reverse lookup: which theme field a token fills. */

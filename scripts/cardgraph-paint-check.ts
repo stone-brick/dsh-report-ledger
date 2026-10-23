@@ -16,7 +16,7 @@ export {}
 
 const { buildCardgraph } = await import('../src/client/cardgraph-model.ts')
 const {
-  createCanvasPainter, readTheme, createThemeReader, fontString, foldText, elide, wirePoints, FALLBACK_THEME,
+  createCanvasPainter, readTheme, createThemeReader, fontString, foldText, elide, wirePoints, WIRE_TOKENS, FALLBACK_THEME,
 } = await import('../src/client/cardgraph-painter.ts')
 
 /** One report digest, as the layout consumes it. */
@@ -488,8 +488,8 @@ const dashOf = (kind: string): string => {
   return (stroke?.dash ?? ['?']).join(' ')
 }
 check('a delivery is solid', dashOf('to') === '', dashOf('to'))
-check('a copy is dotted', dashOf('cc') === '2 3', dashOf('cc'))
-check('a co-author wire is finely dashed', dashOf('author') === '1 3', dashOf('author'))
+check('a copy is dotted', dashOf('cc') === '3 4', dashOf('cc'))
+check('a co-author wire is finely dashed', dashOf('author') === '1 4', dashOf('author'))
 check('a thread is solid', dashOf('thread') === '', dashOf('thread'))
 check('a delivery is drawn heavier than a copy', (() => {
   const to = wireStrokes(whole.recorder).find((stroke) => near(stroke.box, layout.edges.find((edge) => edge.kind === 'to')?.bounds as Box, 5))
@@ -598,9 +598,10 @@ check('the scrim leaves more than a third of the drawing showing', 1 - 0.55 > 0.
 check('only the focused report\'s wires are drawn over the scrim', (() => {
   const recorder = overlay({ focus: { report: 'R-0001' } })
   const mine = layout.edges.filter((edge) => edge.report === 'R-0001')
-  // Wires keep their own weight (1 or 1.4); the card ring and frame outlines are
-  // 1.6, so the same colour does not make them indistinguishable.
-  const drawn = wireStrokes(recorder).filter((stroke) => stroke.alpha === 1 && stroke.lineWidth < 1.6)
+  // Wires keep their own weight, from the one table; the card ring is 1.6 and the
+  // frame outlines are 1, so the same colour does not make them indistinguishable.
+  const wireWidths = new Set(Object.values(WIRE_TOKENS).map((token) => token.width))
+  const drawn = wireStrokes(recorder).filter((stroke) => stroke.alpha === 1 && wireWidths.has(stroke.lineWidth))
   return drawn.length === mine.length
     && mine.every((edge) => drawn.some((stroke) => near(stroke.box, edge.bounds, 5)))
 })())
@@ -614,7 +615,8 @@ check('the focused card is redrawn in the pointer colour, with an uncoloured id'
 })())
 check('every focused wire is drawn in the pointer colour', (() => {
   const recorder = overlay({ focus: { report: 'R-0001' } })
-  const mine = wireStrokes(recorder).filter((stroke) => stroke.alpha === 1 && stroke.lineWidth < 1.6)
+  const wireWidths = new Set(Object.values(WIRE_TOKENS).map((token) => token.width))
+  const mine = wireStrokes(recorder).filter((stroke) => stroke.alpha === 1 && wireWidths.has(stroke.lineWidth))
   return mine.length > 0 && mine.every((stroke) => stroke.style === themed.hover)
 })())
 check('the frames the path touches are re-outlined', (() => {

@@ -437,7 +437,7 @@ interface PendingEdge {
 
 /** Lane geometry: how far a lane keeps from the edge of its channel, and how far apart lanes are. */
 const LANE_CLEAR = 10
-const LANE_STEP = 7
+const LANE_STEP = 9
 /** The stub each wire leaves its port with, and the clearance it keeps from a frame. */
 const STUB = 6
 const CLEAR = 4
@@ -901,7 +901,7 @@ function buildOne(
    * Lane allocation.
    *
    * Two wires in the same gutter or the same road used to run *on* each other: same
-   * x for the vertical run, same y for the crossing. A channel now hands out 7px
+   * x for the vertical run, same y for the crossing. A channel now hands out 9px
    * lanes, centred on it, in allocation order (which is card order, so the drawing
    * stays a function of the data). Full channels wrap — the only place overlap can
    * still happen, and only past ~12 wires through one gutter.
