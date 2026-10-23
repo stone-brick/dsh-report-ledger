@@ -704,6 +704,14 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
   const visibleFrames = useMemo(() => cullByBounds(layout.frames, visibleRect), [layout, visibleRect])
 
   const percent = Math.round(zoom * 100)
+  /**
+   * The frame this scope is already scoped to.
+   *
+   * Entering it would be a no-op — its subtree *is* this drawing — so it gets no
+   * "enter" button. The payload's own root is excluded for the same reason: its
+   * scope is the whole tree, which is what the first crumb already is.
+   */
+  const scopeRoot = scope.trail[scope.trail.length - 1]
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', ...(fill ? fillRoot : {}) }}>
       <div style={controls}>
@@ -755,7 +763,7 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
         <canvas ref={pathRef} aria-hidden="true" style={layer} />
         {visibleFrames.map((frame) => {
           const id = frame.id
-          if (id === undefined || id === payload.root) return null
+          if (id === undefined || id === payload.root || id === scopeRoot) return null
           return (
             <button
               key={`frame-${String(frame.index)}`}
