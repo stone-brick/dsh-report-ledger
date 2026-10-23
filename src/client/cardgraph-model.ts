@@ -795,12 +795,31 @@ export function buildCardgraph(
   // -------------------------------------------------------------------------
   const STUB = 6
   const CLEAR = 4
+  /** A lane keeps this far from the gutter's own edges. */
+  const LANE_CLEAR = 10
+  /** Spacing between two parallel lanes in one channel. */
+  const LANE_STEP = 2.5
   const tallest = heights.reduce((max, height) => Math.max(max, height), 0)
   const obstacles = fixed.map((box) => grow(box, CLEAR))
-  const roadCandidates = (() => {
+  /** A horizontal crossing band: where a road runs, and the space lanes may use. */
+  interface Road {
+    readonly key: string
+    readonly y: number
+    readonly low: number
+    readonly high: number
+  }
+  const roadCandidates: readonly Road[] = (() => {
     // Above everything and below everything are always free; between two frames in
     // a column lies a `frameGap`, and its middle is the natural place to cross.
-    const ys = [opts.margin / 2, opts.margin + tallest + opts.margin / 2]
+    const roads: Road[] = [
+      { key: 'top', y: opts.margin / 2, low: 4, high: Math.max(4, opts.margin - CLEAR) },
+      {
+        key: 'bottom',
+        y: opts.margin + tallest + opts.margin / 2,
+        low: opts.margin + tallest + CLEAR,
+        high: opts.margin + tallest + opts.margin - 4,
+      },
+    ]
     for (const column of columns) {
       const boxes = fixed
         .filter((_, index) => frames[index]?.column === column.index)
@@ -808,10 +827,14 @@ export function buildCardgraph(
       for (let index = 1; index < boxes.length; index++) {
         const above = boxes[index - 1]
         const below = boxes[index]
-        if (above !== undefined && below !== undefined) ys.push((above.y + above.height + below.y) / 2)
+        if (above === undefined || below === undefined) continue
+        const low = above.y + above.height + CLEAR
+        const high = below.y - CLEAR
+        if (high <= low) continue
+        roads.push({ key: `gap:${column.index}:${index}`, y: (low + high) / 2, low, high })
       }
     }
-    return [...new Set(ys)]
+    return roads
   })()
   const freeRoad = (left: number, right: number, y: number): boolean => {
     const lo = Math.min(left, right)
@@ -825,6 +848,29 @@ export function buildCardgraph(
   }
   const columnOf = (end: PendingEnd): number =>
     end.kind === 'card' ? (cards[end.index]?.column ?? 0) : (frames[end.index]?.column ?? 0)
+  const clampTo = (value: number, low: number, high: number): number => Math.min(high, Math.max(low, value))
+  /**
+   * Lane allocation.
+   *
+   * Two wires in the same gutter or the same road used to run *on* each other: same
+   * x for the vertical run, same y for the crossing. A channel now hands out 2.5px
+   * lanes, centred on it, in allocation order (which is card order, so the drawing
+   * stays a function of the data). Full channels wrap — the only place overlap can
+   * still happen, and only past ~12 wires through one gutter.
+   */
+  const laneCounters = new Map<string, number>()
+  const nextLane = (key: string, capacity: number): number => {
+    const used = laneCounters.get(key) ?? 0
+    laneCounters.set(key, used + 1)
+    return ((used % capacity) - (capacity - 1) / 2) * LANE_STEP
+  }
+  const laneX = (column: number, side: CardgraphSide): number => {
+    const box = columns[column]?.bounds ?? { x: 0, y: 0, width: 0, height: 0 }
+    const low = side === 'right' ? box.x + box.width + LANE_CLEAR : box.x - opts.columnGap + LANE_CLEAR
+    const high = side === 'right' ? box.x + box.width + opts.columnGap - LANE_CLEAR : box.x - LANE_CLEAR
+    const capacity = Math.max(1, Math.floor((high - low) / LANE_STEP) + 1)
+    return clampTo(gutterAt(column, side) + nextLane(`gutter:${column}:${side}`, capacity), low, high)
+  }
   /** Drop repeated points and merge collinear ones, so a route has no stutter. */
   const tidy = (input: { x: number; y: number }[]): { x: number; y: number }[] => {
     const out: { x: number; y: number }[] = []
@@ -847,22 +893,26 @@ export function buildCardgraph(
     const outward = (side: CardgraphSide): number => (side === 'right' ? 1 : -1)
     const start = { x: from.x + outward(from.side) * STUB, y: from.y }
     const end = { x: to.x + outward(to.side) * STUB, y: to.y }
-    const fromGutter = gutterAt(columnOf(from), from.side)
-    const toGutter = gutterAt(columnOf(to), to.side)
-    if (Math.abs(fromGutter - toGutter) < 0.5) {
-      return tidy([from, start, { x: fromGutter, y: start.y }, { x: fromGutter, y: end.y }, end, to])
+    const fromColumn = columnOf(from)
+    const toColumn = columnOf(to)
+    const fromX = laneX(fromColumn, from.side)
+    if (fromColumn === toColumn) {
+      return tidy([from, start, { x: fromX, y: start.y }, { x: fromX, y: end.y }, end, to])
     }
+    const toX = laneX(toColumn, to.side)
     const middle = (start.y + end.y) / 2
     const road = roadCandidates
-      .filter((y) => freeRoad(fromGutter, toGutter, y))
-      .sort((a, b) => Math.abs(a - middle) - Math.abs(b - middle) || a - b)[0]
+      .filter((candidate) => freeRoad(fromX, toX, candidate.y))
+      .sort((a, b) => Math.abs(a.y - middle) - Math.abs(b.y - middle) || a.y - b.y)[0]
     if (road === undefined) return undefined
+    const capacity = Math.max(1, Math.floor((road.high - road.low) / LANE_STEP) + 1)
+    const roadY = clampTo(road.y + nextLane(`road:${road.key}`, capacity), road.low, road.high)
     return tidy([
       from, start,
-      { x: fromGutter, y: start.y },
-      { x: fromGutter, y: road },
-      { x: toGutter, y: road },
-      { x: toGutter, y: end.y },
+      { x: fromX, y: start.y },
+      { x: fromX, y: roadY },
+      { x: toX, y: roadY },
+      { x: toX, y: end.y },
       end, to,
     ])
   }

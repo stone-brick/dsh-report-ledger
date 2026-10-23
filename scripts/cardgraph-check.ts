@@ -669,6 +669,42 @@ check('no routed segment crosses a title bar', routed.every((edge) => segmentsOf
   })))))
 check('a routed wire stays inside the drawing', routed.every((edge) => (edge.points ?? []).every((point) =>
   point.x >= 0 && point.x <= layout.width && point.y >= 0 && point.y <= layout.height)))
+check('two routed wires never run on top of each other', (() => {
+  // Interior segments only: the first and last are the port stubs, which sit on
+  // their own card/frame edge. Channel lanes are 2.5px apart, so collinear overlap
+  // here would mean the lane allocator handed out one lane twice.
+  const interior = routed.flatMap((edge) => {
+    const points = edge.points ?? []
+    return points.slice(1, -1).flatMap((point, index) => {
+      const a = points[index + 1]
+      return a === undefined ? [] : [{ edge, a: { x: a.x, y: a.y }, b: { x: point.x, y: point.y } }]
+    })
+  })
+  const overlaps = (a: { x: number; y: number }, b: { x: number; y: number }, c: { x: number; y: number }, d: { x: number; y: number }): boolean => {
+    if (a.x === b.x && c.x === d.x) {
+      if (a.x !== c.x) return false
+      const lo = Math.max(Math.min(a.y, b.y), Math.min(c.y, d.y))
+      const hi = Math.min(Math.max(a.y, b.y), Math.max(c.y, d.y))
+      return hi - lo > 0.5
+    }
+    if (a.y === b.y && c.y === d.y) {
+      if (a.y !== c.y) return false
+      const lo = Math.max(Math.min(a.x, b.x), Math.min(c.x, d.x))
+      const hi = Math.min(Math.max(a.x, b.x), Math.max(c.x, d.x))
+      return hi - lo > 0.5
+    }
+    return false
+  }
+  for (let first = 0; first < interior.length; first++) {
+    for (let second = first + 1; second < interior.length; second++) {
+      const one = interior[first]
+      const other = interior[second]
+      if (one === undefined || other === undefined || one.edge === other.edge) continue
+      if (overlaps(one.a, one.b, other.a, other.b)) return false
+    }
+  }
+  return true
+})())
 
 let failed = 0
 for (const [label, ok, detail] of checks) {
