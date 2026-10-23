@@ -628,6 +628,48 @@ check('muting a kind moves nothing', withoutTo.width === layout.width
   && JSON.stringify(withoutTo.cards.map((card) => card.bounds)) === JSON.stringify(layout.cards.map((card) => card.bounds))
   && JSON.stringify(withoutTo.frames.map((frame) => frame.bounds)) === JSON.stringify(layout.frames.map((frame) => frame.bounds)))
 
+// ---------------------------------------------------------------------------
+// Channel routing
+//
+// A routed wire must stay orthogonal, must not cut through a frame it does not
+// enter, must never cross a title bar, and must stay inside the drawing — the
+// four properties that together mean "a wire cannot hide text".
+// ---------------------------------------------------------------------------
+const segmentsOf = (points: readonly { readonly x: number; readonly y: number }[]): { a: { x: number; y: number }; b: { x: number; y: number } }[] =>
+  points.slice(1).flatMap((point, index) => {
+    const a = points[index]
+    return a === undefined ? [] : [{ a: { x: a.x, y: a.y }, b: { x: point.x, y: point.y } }]
+  })
+const crosses = (a: { x: number; y: number }, b: { x: number; y: number }, box: { x: number; y: number; width: number; height: number }): boolean => {
+  const loX = Math.min(a.x, b.x)
+  const hiX = Math.max(a.x, b.x)
+  const loY = Math.min(a.y, b.y)
+  const hiY = Math.max(a.y, b.y)
+  return loX < box.x + box.width && box.x < hiX && loY < box.y + box.height && box.y < hiY
+}
+const frameOfCard = (report: string | undefined): number =>
+  layout.cards.find((card) => card.report === report)?.frame ?? -1
+const endFrame = (end: { readonly kind: 'card' | 'frame'; readonly index: number; readonly id?: string }): number =>
+  end.kind === 'frame' ? end.index : frameOfCard(end.id)
+const routed = layout.edges.filter((edge) => edge.points !== undefined)
+check('left/right wires are routed', routed.length > 0 && routed.length === layout.edges.filter((edge) => edge.from.side !== 'top' && edge.to.side !== 'top').length)
+check('every routed segment is orthogonal', routed.every((edge) => segmentsOf(edge.points ?? []).every(({ a, b }) => a.x === b.x || a.y === b.y)))
+check('a routed wire only touches the frames it enters and leaves', routed.every((edge) => {
+  const source = endFrame(edge.from)
+  const target = endFrame(edge.to)
+  return segmentsOf(edge.points ?? []).every(({ a, b }) => layout.frames.every((frame) =>
+    frame.index === source || frame.index === target || !crosses(a, b, frame.bounds)))
+}))
+check('no routed segment crosses a title bar', routed.every((edge) => segmentsOf(edge.points ?? [])
+  .every(({ a, b }) => layout.frames.every((frame) => !crosses(a, b, {
+    x: frame.bounds.x,
+    y: frame.bounds.y,
+    width: frame.bounds.width,
+    height: layout.frameHeaderHeight,
+  })))))
+check('a routed wire stays inside the drawing', routed.every((edge) => (edge.points ?? []).every((point) =>
+  point.x >= 0 && point.x <= layout.width && point.y >= 0 && point.y <= layout.height)))
+
 let failed = 0
 for (const [label, ok, detail] of checks) {
   if (!ok) failed++

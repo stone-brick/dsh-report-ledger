@@ -467,7 +467,12 @@ check('a resident session gets a filled dot and an absent one an outline', (() =
 // ---------------------------------------------------------------------------
 const delivery = layout.edges.find((edge) => edge.kind === 'to')
 const threadEdge = layout.edges.find((edge) => edge.kind === 'thread')
-check('a wire with no gutter is two points', wirePoints(delivery as never).length === 2)
+check('a routed wire is a polyline that starts and ends at its ports', (() => {
+  const points = wirePoints(delivery as never)
+  return points.length >= 4
+    && points[0]?.x === delivery?.from.x && points[0]?.y === delivery?.from.y
+    && points[points.length - 1]?.x === delivery?.to.x && points[points.length - 1]?.y === delivery?.to.y
+})())
 const bent = wirePoints(threadEdge as never)
 check('a wire with a gutter is four points', bent.length === 4)
 check('the bend runs down the gutter between the second and third points',

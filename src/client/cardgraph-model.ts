@@ -201,9 +201,9 @@ export type CardgraphEdgeKind = 'to' | 'cc' | 'author' | 'thread'
 /**
  * One end of a wire.
  *
- * `card` ends are anchored to a card's edge, at the middle of that edge. `frame`
- * ends are **ports**: a frame edge is shared by every wire that touches it, so
- * the y is assigned by the spreading pass rather than by any single wire.
+ * Both kinds are **ports**: a card's edge and a frame's edge are each shared by
+ * every wire that touches them, so the coordinate along the edge is assigned by
+ * the spreading pass rather than by any single wire.
  */
 export interface CardgraphEnd {
   readonly kind: 'card' | 'frame'
@@ -235,6 +235,15 @@ export interface CardgraphEdge {
    * keeps it in the margin band, where only other wires are.
    */
   readonly viaX?: number
+  /**
+   * The orthogonal route, when the wire has one.
+   *
+   * Left/right wires are routed through the layout's own empty channels (column
+   * gutters and the gaps between frames) instead of cutting across frames and
+   * their titles. Top/bottom wires (threads) keep the single-gutter `viaX` shape.
+   * The first and last points are the ports themselves.
+   */
+  readonly points?: readonly { readonly x: number; readonly y: number }[]
   /**
    * The wire's bounding box: both ends, plus the gutter a thread bends through.
    *
@@ -415,6 +424,7 @@ interface PendingEdge {
   to: PendingEnd
   external: boolean
   viaX?: number
+  points?: { x: number; y: number }[]
 }
 
 /**
@@ -771,9 +781,104 @@ export function buildCardgraph(
     })
   }
 
+  // -------------------------------------------------------------------------
+  // Channels: route left/right wires through the drawing's own empty space
+  //
+  // The layout already reserves the room. A column gutter is empty by construction
+  // (frames never overlap it), and so is the gap between two frames in one column.
+  // So a wire exits toward its column's gutter, travels vertically there, crosses to
+  // the target's gutter along a **road** — a y no frame occupies between the two
+  // gutters — and enters the target from its own gutter. Nothing crosses a frame
+  // body or a title bar except the two endpoint frames the wire must enter and
+  // leave. Top/bottom ends (threads) keep the single-gutter `viaX` shape: their
+  // geometry is vertical, and a road would only make them wander.
+  // -------------------------------------------------------------------------
+  const STUB = 6
+  const CLEAR = 4
+  const tallest = heights.reduce((max, height) => Math.max(max, height), 0)
+  const obstacles = fixed.map((box) => grow(box, CLEAR))
+  const roadCandidates = (() => {
+    // Above everything and below everything are always free; between two frames in
+    // a column lies a `frameGap`, and its middle is the natural place to cross.
+    const ys = [opts.margin / 2, opts.margin + tallest + opts.margin / 2]
+    for (const column of columns) {
+      const boxes = fixed
+        .filter((_, index) => frames[index]?.column === column.index)
+        .sort((a, b) => a.y - b.y)
+      for (let index = 1; index < boxes.length; index++) {
+        const above = boxes[index - 1]
+        const below = boxes[index]
+        if (above !== undefined && below !== undefined) ys.push((above.y + above.height + below.y) / 2)
+      }
+    }
+    return [...new Set(ys)]
+  })()
+  const freeRoad = (left: number, right: number, y: number): boolean => {
+    const lo = Math.min(left, right)
+    const hi = Math.max(left, right)
+    return !obstacles.some((box) => box.y < y && y < box.y + box.height && box.x < hi && lo < box.x + box.width)
+  }
+  const gutterAt = (column: number, side: CardgraphSide): number => {
+    const box = columns[column]?.bounds
+    if (box === undefined) return 0
+    return side === 'right' ? box.x + box.width + opts.columnGap / 2 : box.x - opts.columnGap / 2
+  }
+  const columnOf = (end: PendingEnd): number =>
+    end.kind === 'card' ? (cards[end.index]?.column ?? 0) : (frames[end.index]?.column ?? 0)
+  /** Drop repeated points and merge collinear ones, so a route has no stutter. */
+  const tidy = (input: { x: number; y: number }[]): { x: number; y: number }[] => {
+    const out: { x: number; y: number }[] = []
+    for (const point of input) {
+      const last = out[out.length - 1]
+      if (last !== undefined && last.x === point.x && last.y === point.y) continue
+      const before = out[out.length - 2]
+      if (before !== undefined && last !== undefined
+        && ((before.x === last.x && last.x === point.x) || (before.y === last.y && last.y === point.y))) {
+        out[out.length - 1] = point
+        continue
+      }
+      out.push(point)
+    }
+    return out
+  }
+  const route = (edge: PendingEdge): { x: number; y: number }[] | undefined => {
+    const { from, to } = edge
+    if (from.side === 'top' || from.side === 'bottom' || to.side === 'top' || to.side === 'bottom') return undefined
+    const outward = (side: CardgraphSide): number => (side === 'right' ? 1 : -1)
+    const start = { x: from.x + outward(from.side) * STUB, y: from.y }
+    const end = { x: to.x + outward(to.side) * STUB, y: to.y }
+    const fromGutter = gutterAt(columnOf(from), from.side)
+    const toGutter = gutterAt(columnOf(to), to.side)
+    if (Math.abs(fromGutter - toGutter) < 0.5) {
+      return tidy([from, start, { x: fromGutter, y: start.y }, { x: fromGutter, y: end.y }, end, to])
+    }
+    const middle = (start.y + end.y) / 2
+    const road = roadCandidates
+      .filter((y) => freeRoad(fromGutter, toGutter, y))
+      .sort((a, b) => Math.abs(a - middle) - Math.abs(b - middle) || a - b)[0]
+    if (road === undefined) return undefined
+    return tidy([
+      from, start,
+      { x: fromGutter, y: start.y },
+      { x: fromGutter, y: road },
+      { x: toGutter, y: road },
+      { x: toGutter, y: end.y },
+      end, to,
+    ])
+  }
+  for (const edge of pending) {
+    const points = route(edge)
+    if (points !== undefined) edge.points = points
+  }
+
   const edges: CardgraphEdge[] = pending.map((edge) => {
-    const xs = [edge.from.x, edge.to.x, ...(edge.viaX === undefined ? [] : [edge.viaX])]
-    const ys = [edge.from.y, edge.to.y]
+    const points = edge.points
+    const xs = points === undefined
+      ? [edge.from.x, edge.to.x, ...(edge.viaX === undefined ? [] : [edge.viaX])]
+      : points.map((point) => point.x)
+    const ys = points === undefined
+      ? [edge.from.y, edge.to.y]
+      : points.map((point) => point.y)
     const minX = Math.min(...xs)
     const minY = Math.min(...ys)
     return {
@@ -783,6 +888,7 @@ export function buildCardgraph(
       to: { ...edge.to },
       external: edge.external,
       ...(edge.viaX === undefined ? {} : { viaX: edge.viaX }),
+      ...(points === undefined ? {} : { points }),
       bounds: {
         x: minX,
         y: minY,
