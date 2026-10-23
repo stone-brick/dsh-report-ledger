@@ -546,11 +546,14 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
                 cursor: 'pointer',
                 background: 'var(--dsw-alias-bg-layer-1, rgba(0,0,0,0.02))',
                 border: '1px solid var(--dsw-alias-border-l1, rgba(0,0,0,0.06))',
-                // The canvas's hover lands here: same pointer, other surface. The
-                // cue is an outline rather than a fill, so it reads as "the drawing
-                // is pointing at this row", not as a second selection.
+                // The canvas's hover lands here: same pointer, other surface. Both
+                // sides use the same light blue — the row a tint plus a blue edge,
+                // the canvas a blue ring and path — so one hover reads as one state.
                 ...(bridged.hover === front.report
-                  ? { boxShadow: 'inset 0 0 0 1px var(--dsw-alias-border-l2, rgba(0,0,0,0.22))' }
+                  ? {
+                      background: 'var(--dsw-alias-state-business-tertiary, #e4edfd)',
+                      boxShadow: 'inset 0 0 0 1px var(--dsw-alias-button-info-hover, #7aaaff)',
+                    }
                   : {}),
               }}
             >

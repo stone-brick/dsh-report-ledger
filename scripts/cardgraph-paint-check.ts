@@ -177,8 +177,11 @@ const tokens: Record<string, string> = {
   '--dsw-alias-state-warn-primary': '#ffaa00',
   // Distinct from every wire colour on purpose: the fallback theme happens to give
   // the accent and the thread colour the same value, which would make "is this
-  // stroke a wire or a frame outline" unanswerable for the recorder.
+  // stroke a wire or a frame outline" unanswerable for the recorder. The hover
+  // colour gets its own token for the same reason: the pointer layer must be
+  // attributable even when a focused path is drawn on top of the drawing.
   '--dsw-alias-brand-primary': '#ff00ff',
+  '--dsw-alias-button-info-hover': '#0088ff',
   '--dsw-alias-state-business-primary': '#00aa88',
   '--dsw-font-xs-13-font-size': '13px',
   '--dsw-font-xs-13-font-weight': '600',
@@ -306,7 +309,7 @@ const paint = (scene: Record<string, unknown> = {}): { recorder: Recorder; paint
 
 /** A stroke that is a wire rather than a frame or card border, told apart by colour. */
 const wireStrokes = (recorder: Recorder): Shape[] =>
-  recorder.strokes.filter((stroke) => [themed.secondary, themed.caption, themed.business].includes(stroke.style))
+  recorder.strokes.filter((stroke) => [themed.secondary, themed.caption, themed.business, themed.hover].includes(stroke.style))
 
 const whole = paint()
 check('the background is painted in the theme\'s canvas colour', whole.recorder.rects[0]?.style === themed.canvas)
@@ -495,17 +498,24 @@ check('the scrim leaves more than a third of the drawing showing', 1 - 0.55 > 0.
 check('only the focused report\'s wires are drawn over the scrim', (() => {
   const recorder = overlay({ focus: { report: 'R-0001' } })
   const mine = layout.edges.filter((edge) => edge.report === 'R-0001')
-  const drawn = wireStrokes(recorder).filter((stroke) => stroke.alpha === 1)
+  // Wires keep their own weight (1 or 1.4); the card ring and frame outlines are
+  // 1.6, so the same colour does not make them indistinguishable.
+  const drawn = wireStrokes(recorder).filter((stroke) => stroke.alpha === 1 && stroke.lineWidth < 1.6)
   return drawn.length === mine.length
     && mine.every((edge) => drawn.some((stroke) => near(stroke.box, edge.bounds, 2)))
 })())
 check('every drawn wire over the scrim is at full strength',
   wireStrokes(overlay({ focus: { report: 'R-0001' } })).every((stroke) => stroke.alpha === 1))
-check('the focused card is redrawn in the accent', (() => {
+check('the focused card is redrawn in the pointer colour, with an uncoloured id', (() => {
   const recorder = overlay({ focus: { report: 'R-0001' } })
-  return recorder.texts.some((text) => text.text === 'R-0001' && text.style === themed.accent)
-    && recorder.strokes.some((stroke) => stroke.style === themed.accent
+  return recorder.texts.some((text) => text.text === 'R-0001' && text.style === themed.text)
+    && recorder.strokes.some((stroke) => stroke.style === themed.hover
       && near(stroke.box, layout.cards.find((card) => card.report === 'R-0001')?.bounds as Box, 6))
+})())
+check('every focused wire is drawn in the pointer colour', (() => {
+  const recorder = overlay({ focus: { report: 'R-0001' } })
+  const mine = wireStrokes(recorder).filter((stroke) => stroke.alpha === 1 && stroke.lineWidth < 1.6)
+  return mine.length > 0 && mine.every((stroke) => stroke.style === themed.hover)
 })())
 check('the frames the path touches are re-outlined', (() => {
   const recorder = overlay({ focus: { report: 'R-0001' } })
@@ -514,7 +524,7 @@ check('the frames the path touches are re-outlined', (() => {
     if (edge.from.kind === 'frame') touched.add(edge.from.index)
     if (edge.to.kind === 'frame') touched.add(edge.to.index)
   }
-  const outlines = recorder.strokes.filter((stroke) => stroke.style === themed.accent)
+  const outlines = recorder.strokes.filter((stroke) => stroke.style === themed.hover)
     .filter((stroke) => layout.frames.some((frame) => near(stroke.box, frame.bounds, 2)))
   return outlines.length === touched.size
 })())
@@ -522,7 +532,7 @@ check('focusing a frame outlines it without a scrim', (() => {
   const recorder = overlay({ focus: { frame: 0 } })
   return recorder.rects.length === 0
     && recorder.strokes.length === 1
-    && recorder.strokes[0]?.style === themed.accent
+    && recorder.strokes[0]?.style === themed.hover
     && near(recorder.strokes[0]?.box as Box, layout.frames[0]?.bounds as Box, 2)
 })())
 check('the open card is named in the accent on the base layer',

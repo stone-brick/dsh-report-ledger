@@ -14,7 +14,7 @@
  * @module dsh-report-ledger/client/ReportDetailView
  */
 
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import {
   Button,
@@ -26,8 +26,8 @@ import {
   Tooltip,
   writeClipboard,
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { ReportDetail } from '../shared/wire.ts'
-import { closeOpenFence, displayBody } from './timeline-model.ts'
+import type { HopAction, ReportDetail } from '../shared/wire.ts'
+import { closeOpenFence, displayBody, shortId } from './timeline-model.ts'
 import { COPIED_HOLD_MS, fill, stamp } from './format.ts'
 import { HOP_LABEL } from './locales.ts'
 import type { Translate } from './ReportsView.tsx'
@@ -103,6 +103,109 @@ const rowBox: Record<string, string | number> = {
   borderRadius: '6px',
   background: 'var(--dsw-alias-bg-layer-2, rgba(0,0,0,0.03))',
   border: '1px solid var(--dsw-alias-border-l1, rgba(0,0,0,0.06))',
+}
+
+/**
+ * How one hop reads in the rail.
+ *
+ * The four wire kinds on the canvas already own a colour semantics, so the path
+ * reuses it rather than inventing a second one: a delivery is the business blue,
+ * participation and acknowledgement are the success green, addressing (cc, copy)
+ * is the quiet caption grey and dashed, and state changes take the warning ink.
+ * Every hop keeps its **dash** as well as its colour, because the path must stay
+ * readable printed in grayscale or read by a colour-blind reader.
+ */
+const HOP_TONE: Readonly<Record<HopAction, { readonly colour: string; readonly dash: 'solid' | 'dashed' | 'dotted' }>> = {
+  authored: { colour: 'var(--dsw-alias-state-business-primary, #4176e6)', dash: 'solid' },
+  contributed: { colour: 'var(--dsw-alias-state-success-primary, #1f9254)', dash: 'solid' },
+  sent: { colour: 'var(--dsw-alias-state-business-primary, #4176e6)', dash: 'solid' },
+  delivered: { colour: 'var(--dsw-alias-state-success-primary, #1f9254)', dash: 'solid' },
+  cc: { colour: 'var(--dsw-alias-label-caption, #70757d)', dash: 'dashed' },
+  forwarded: { colour: 'var(--dsw-alias-state-business-primary, #4176e6)', dash: 'dashed' },
+  copied: { colour: 'var(--dsw-alias-label-caption, #70757d)', dash: 'dashed' },
+  read: { colour: 'var(--dsw-alias-label-caption, #70757d)', dash: 'dotted' },
+  acked: { colour: 'var(--dsw-alias-state-success-primary, #1f9254)', dash: 'solid' },
+  leased: { colour: 'var(--dsw-alias-label-tertiary, #9aa0a8)', dash: 'dotted' },
+  released: { colour: 'var(--dsw-alias-label-tertiary, #9aa0a8)', dash: 'dotted' },
+  reclaimed: { colour: 'var(--dsw-alias-label-tertiary, #9aa0a8)', dash: 'dotted' },
+  amended: { colour: 'var(--dsw-alias-state-warn-primary, #c77700)', dash: 'dotted' },
+  closed: { colour: 'var(--dsw-alias-label-caption, #70757d)', dash: 'solid' },
+  reopened: { colour: 'var(--dsw-alias-state-warn-primary, #c77700)', dash: 'solid' },
+  transferred: { colour: 'var(--dsw-alias-state-business-primary, #4176e6)', dash: 'dashed' },
+}
+
+/** The rail: a list, because the hops are a sequence and a screen reader should hear one. */
+const rail: Record<string, string | number> = {
+  listStyle: 'none',
+  margin: '0 0 8px',
+  padding: 0,
+}
+const railItem: Record<string, string | number> = { display: 'flex', gap: '8px', alignItems: 'stretch' }
+/** The dot-and-line column; `align-self: stretch` keeps the line reaching the next row. */
+const railSpine: Record<string, string | number> = {
+  display: 'flex',
+  flexDirection: 'column',
+  alignItems: 'center',
+  width: '12px',
+  flex: '0 0 12px',
+  paddingTop: '5px',
+}
+const railDot: Record<string, string | number> = {
+  width: '9px',
+  height: '9px',
+  borderRadius: '50%',
+  border: '2px solid currentColor',
+  boxSizing: 'border-box',
+  flex: '0 0 auto',
+}
+const railSegment: Record<string, string | number> = {
+  flex: '1 1 auto',
+  borderLeft: '2px solid currentColor',
+  margin: '2px 0 -2px',
+  minHeight: '8px',
+}
+const railBody: Record<string, string | number> = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '2px',
+  flex: '1 1 auto',
+  minWidth: 0,
+  padding: '0 0 8px',
+}
+const railHead: Record<string, string | number> = {
+  display: 'flex',
+  alignItems: 'baseline',
+  gap: '6px',
+  flexWrap: 'wrap',
+}
+/** The action label: the rail's colour as an outline, so the words stay ink-dark. */
+const hopAction: Record<string, string | number> = {
+  border: '1px solid currentColor',
+  borderRadius: '999px',
+  padding: '0 6px',
+  fontSize: 'var(--dsw-font-xxxs-11, 11px)',
+  lineHeight: '15px',
+  whiteSpace: 'nowrap',
+}
+const hopActor: Record<string, string | number> = {
+  fontFamily: 'var(--dsw-font-family-mono, ui-monospace, monospace)',
+  fontSize: 'var(--dsw-font-xxxs-11, 11px)',
+}
+const hopArrow: Record<string, string | number> = { color: 'var(--dsw-alias-label-caption, #999)', fontSize: '11px' }
+/** A recipient: the short id, quiet, one per chip. */
+const hopTarget: Record<string, string | number> = {
+  border: '1px solid var(--dsw-alias-border-l1, rgba(0,0,0,0.08))',
+  borderRadius: '4px',
+  padding: '0 5px',
+  fontFamily: 'var(--dsw-font-family-mono, ui-monospace, monospace)',
+  fontSize: 'var(--dsw-font-xxxs-11, 11px)',
+  whiteSpace: 'nowrap',
+}
+const hopNote: Record<string, string | number> = {
+  ...time,
+  whiteSpace: 'normal',
+  overflowWrap: 'anywhere',
+  fontStyle: 'italic',
 }
 
 /** A docked panel's share: a column that owns its height and scrolls inside it. */
@@ -187,16 +290,46 @@ export function ReportDetailView(props: ReportDetailViewProps): ReactElement {
         <>
           <div style={{ marginBottom: '6px' }}><strong>{t('view.detail.route')}</strong></div>
           {detail.hops.length === 0 ? <div style={time}>{t('view.detail.routeEmpty')}</div> : (
-            <div style={{ display: 'grid', gridTemplateColumns: 'auto auto auto 1fr', gap: '2px 10px', marginBottom: '8px' }}>
-              {detail.hops.map((hop, hopIndex) => (
-                <Fragment key={`h-${hopIndex}`}>
-                  <span style={time}>{stamp(hop.at)}</span>
-                  <span><strong>{t(HOP_LABEL[hop.action])}</strong></span>
-                  <span style={wrap}><Tooltip label={idHint(hop.actor)} side="bottom" delayMs={400}><span>{hop.actor}</span></Tooltip></span>
-                  <span style={wrap}>{hop.to.length === 0 ? (hop.note ?? '') : `→ ${hop.to.join(', ')}${hop.note === undefined ? '' : ` (${hop.note})`}`}</span>
-                </Fragment>
-              ))}
-            </div>
+            <ol style={rail}>
+              {detail.hops.map((hop, hopIndex) => {
+                const tone = HOP_TONE[hop.action]
+                const last = hopIndex === detail.hops.length - 1
+                return (
+                  <li key={`h-${hopIndex}`} style={railItem}>
+                    {/* The rail: a dot per hop and a segment toward the next one. The
+                        segment carries the hop's dash, so a passive hop (cc, read) reads
+                        as interrupted even in grayscale. */}
+                    <span aria-hidden="true" style={{ ...railSpine, color: tone.colour }}>
+                      <span style={{ ...railDot, backgroundColor: tone.dash === 'solid' ? tone.colour : 'transparent' }} />
+                      {last ? null : (
+                        <span style={{ ...railSegment, borderLeftStyle: tone.dash }} />
+                      )}
+                    </span>
+                    <span style={railBody}>
+                      <span style={railHead}>
+                        <span style={hopAction}>{t(HOP_LABEL[hop.action])}</span>
+                        <Tooltip label={idHint(hop.actor)} side="bottom" delayMs={400}>
+                          <strong style={hopActor}>{shortId(hop.actor)}</strong>
+                        </Tooltip>
+                        {hop.to.length === 0 ? null : (
+                          <>
+                            <span aria-hidden="true" style={hopArrow}>→</span>
+                            {hop.to.map((target) => (
+                              <Tooltip key={target} label={idHint(target)} side="bottom" delayMs={400}>
+                                <span style={hopTarget}>{shortId(target)}</span>
+                              </Tooltip>
+                            ))}
+                          </>
+                        )}
+                        <span style={{ flex: '1 1 auto' }} />
+                        <span style={time}>{stamp(hop.at)}</span>
+                      </span>
+                      {hop.note === undefined ? null : <span style={hopNote}>{hop.note}</span>}
+                    </span>
+                  </li>
+                )
+              })}
+            </ol>
           )}
           {/* "Still owed" is a state, so it gets the shell's state dot instead of a
               colour mixed by hand. */}

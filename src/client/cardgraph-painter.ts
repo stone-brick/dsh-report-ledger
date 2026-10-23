@@ -100,6 +100,16 @@ export interface PaintTheme {
   readonly tertiary: string
   /** Accent for the focused or open card. */
   readonly accent: string
+  /**
+   * The pointer's colour: what a hovered card, frame and path are drawn in.
+   *
+   * Deliberately not {@link accent}: the accent follows the shell's brand ink,
+   * which is near-black in the light theme and therefore reads as "selected"
+   * rather than "the pointer is here". A hover is a transient, lightweight
+   * question — "which one is this?" — so it gets the light blue the GUI already
+   * uses for interactive emphasis, and the open report keeps the ink accent.
+   */
+  readonly hover: string
   /** Lifecycle tones, matching the tab's `Tag` tones. */
   readonly warning: string
   readonly success: string
@@ -131,6 +141,7 @@ export const FALLBACK_THEME: PaintTheme = {
   caption: '#70757d',
   tertiary: '#9aa0a8',
   accent: '#2f6fed',
+  hover: '#7aaaff',
   warning: '#c77700',
   success: '#1f9254',
   error: '#d33a2c',
@@ -156,6 +167,7 @@ const TOKENS: readonly (readonly [keyof Omit<PaintTheme, 'fonts'>, string, strin
   ['caption', '--dsw-alias-label-caption', FALLBACK_THEME.caption],
   ['tertiary', '--dsw-alias-label-tertiary', FALLBACK_THEME.tertiary],
   ['accent', '--dsw-alias-brand-primary', FALLBACK_THEME.accent],
+  ['hover', '--dsw-alias-button-info-hover', FALLBACK_THEME.hover],
   ['warning', '--dsw-alias-state-warn-primary', FALLBACK_THEME.warning],
   ['success', '--dsw-alias-state-success-primary', FALLBACK_THEME.success],
   ['error', '--dsw-alias-state-error-primary', FALLBACK_THEME.error],
@@ -540,7 +552,7 @@ export function createCanvasPainter(canvas: HTMLCanvasElement): CardgraphPainter
   const drawFrameOutline = (frame: CardgraphFrame, scene: PaintScene): void => {
     ctx.globalAlpha = 1
     pathRoundRect(ctx, frame.bounds, FRAME_RADIUS)
-    ctx.strokeStyle = scene.theme.accent
+    ctx.strokeStyle = scene.theme.hover
     ctx.lineWidth = 1.6
     ctx.stroke()
   }
@@ -603,12 +615,22 @@ export function createCanvasPainter(canvas: HTMLCanvasElement): CardgraphPainter
     }
   }
 
-  const drawWire = (edge: CardgraphEdge, scene: PaintScene, alpha: number): void => {
+  /**
+   * Draw one wire.
+   * @param edge - the wire.
+   * @param scene - theme and layout.
+   * @param alpha - overall opacity.
+   * @param colour - overrides the wire's own colour (the interaction layer draws
+   *   the focused path in the pointer colour while keeping each kind's dash and
+   *   weight, so the four kinds stay readable without four hues under a scrim).
+   */
+  const drawWire = (edge: CardgraphEdge, scene: PaintScene, alpha: number, colour?: string): void => {
     const { theme } = scene
     const style = wireStyle(edge.kind, theme)
+    const stroke = colour ?? style.stroke
     const points = wirePoints(edge)
     ctx.globalAlpha = alpha
-    ctx.strokeStyle = style.stroke
+    ctx.strokeStyle = stroke
     ctx.lineWidth = style.width
     ctx.setLineDash(style.dash)
     ctx.beginPath()
@@ -627,7 +649,7 @@ export function createCanvasPainter(canvas: HTMLCanvasElement): CardgraphPainter
     const back = { x: end.x - Math.cos(angle) * ARROW_LENGTH, y: end.y - Math.sin(angle) * ARROW_LENGTH }
     const side = { x: -Math.sin(angle) * ARROW_HALF, y: Math.cos(angle) * ARROW_HALF }
     ctx.setLineDash([])
-    ctx.fillStyle = style.stroke
+    ctx.fillStyle = stroke
     ctx.beginPath()
     ctx.moveTo(end.x, end.y)
     ctx.lineTo(back.x + side.x, back.y + side.y)
@@ -636,7 +658,16 @@ export function createCanvasPainter(canvas: HTMLCanvasElement): CardgraphPainter
     ctx.fill()
   }
 
-  const drawCard = (card: CardgraphCard, scene: PaintScene, accent: boolean): void => {
+  /**
+   * Draw one card.
+   * @param card - the card.
+   * @param scene - theme and labels.
+   * @param highlight - why this card is loud: `selected` is the open report (the
+   *   ink accent, and its id in that ink); `hover` is the pointer (the light blue
+   *   ring, with the id at full text weight rather than blue — a blue id on a
+   *   white card is the one thing a hover must not do); `none` is ordinary.
+   */
+  const drawCard = (card: CardgraphCard, scene: PaintScene, highlight: 'none' | 'selected' | 'hover'): void => {
     const { theme } = scene
     const box = card.bounds
     ctx.globalAlpha = 1
@@ -645,8 +676,9 @@ export function createCanvasPainter(canvas: HTMLCanvasElement): CardgraphPainter
     ctx.fill()
     if (card.lod === 'chip') return
 
-    ctx.strokeStyle = accent ? theme.accent : theme.border
-    ctx.lineWidth = accent ? 1.6 : 1
+    const ring = highlight === 'selected' ? theme.accent : highlight === 'hover' ? theme.hover : theme.border
+    ctx.strokeStyle = ring
+    ctx.lineWidth = highlight === 'none' ? 1 : 1.6
     ctx.stroke()
 
     // Status stripe, in the tone the tab's Tag uses for the same status.
@@ -663,7 +695,7 @@ export function createCanvasPainter(canvas: HTMLCanvasElement): CardgraphPainter
     ctx.textBaseline = 'top'
 
     ctx.font = fontString(theme.fonts.id)
-    ctx.fillStyle = accent ? theme.accent : theme.secondary
+    ctx.fillStyle = highlight === 'selected' ? theme.accent : highlight === 'hover' ? theme.text : theme.secondary
     if (card.lod === 'compact') {
       // One line: the id, then as much subject as is left of the card. Each half is
       // measured in the font it is drawn in — folding the subject against the
@@ -746,7 +778,7 @@ export function createCanvasPainter(canvas: HTMLCanvasElement): CardgraphPainter
       }
       for (const card of layout.cards) {
         if (!visible(card.bounds)) continue
-        drawCard(card, scene, card.report === scene.focus?.selected)
+        drawCard(card, scene, card.report === scene.focus?.selected ? 'selected' : 'none')
       }
       ctx.globalAlpha = 1
       ctx.restore()
@@ -793,10 +825,10 @@ export function createCanvasPainter(canvas: HTMLCanvasElement): CardgraphPainter
         if (touched.has(frame.index)) drawFrameOutline(frame, scene)
       }
       for (const edge of edges) {
-        if (intersects(edge.bounds, world)) drawWire(edge, scene, 1)
+        if (intersects(edge.bounds, world)) drawWire(edge, scene, 1, theme.hover)
       }
       for (const card of layout.cards) {
-        if (card.report === report) drawCard(card, scene, true)
+        if (card.report === report) drawCard(card, scene, 'hover')
       }
       ctx.restore()
     },
