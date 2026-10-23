@@ -236,19 +236,13 @@ export interface CardgraphEdge {
   /** Whether either end is the out-of-tree frame. */
   readonly external: boolean
   /**
-   * The x a thread runs down between columns.
+   * The orthogonal route, which every wire now has.
    *
-   * Only thread wires have one. A thread spans frames, and drawing it straight
-   * would cross whatever sits in between; routing it down a **column gutter**
-   * keeps it in the margin band, where only other wires are.
-   */
-  readonly viaX?: number
-  /**
-   * The orthogonal route, when the wire has one.
-   *
-   * Left/right wires are routed through the layout's own empty channels (column
-   * gutters and the gaps between frames) instead of cutting across frames and
-   * their titles. Top/bottom wires (threads) keep the single-gutter `viaX` shape.
+   * Wires are routed through the layout's own empty channels (column gutters and
+   * the gaps between frames) instead of cutting across frames: a stub out of the
+   * port, a run to the column's gutter, a vertical run to a road, a crossing to the
+   * target gutter, and a run back into the target. Threads are routed the same way;
+   * their stub is vertical because their ports are on a card's top or bottom edge.
    * The first and last points are the ports themselves.
    */
   readonly points?: readonly { readonly x: number; readonly y: number }[]
@@ -431,7 +425,6 @@ interface PendingEdge {
   from: PendingEnd
   to: PendingEnd
   external: boolean
-  viaX?: number
   points?: { x: number; y: number }[]
 }
 
@@ -700,10 +693,6 @@ function buildOne(
    * column, where that would run along the outside of the drawing.
    */
   const gutterSide = (column: number): CardgraphSide => (column < columns.length - 1 ? 'right' : 'left')
-  const gutterX = (column: number, side: CardgraphSide): number => {
-    const box = columns[column]?.bounds ?? { x: 0, y: 0, width: 0, height: 0 }
-    return side === 'right' ? box.x + box.width + opts.columnGap / 2 : box.x - opts.columnGap / 2
-  }
 
   // Wires are walked in **card order**, not in the order the caller passed the
   // reports: the drawing is then a function of the set of reports rather than of
@@ -737,7 +726,6 @@ function buildOne(
           from: cardEnd(cardIndex, side),
           to: frameEnd(target, sameColumn ? side : side === 'right' ? 'left' : 'right'),
           external: externalBetween(ownFrame, target),
-          ...(sameColumn ? { viaX: gutterX(ownColumn, side) } : {}),
         })
       }
     }
@@ -759,7 +747,6 @@ function buildOne(
         from: frameEnd(source, side),
         to: cardEnd(cardIndex, sameColumn ? side : side === 'right' ? 'left' : 'right'),
         external: externalBetween(source, ownFrame),
-        ...(sameColumn ? { viaX: gutterX(ownColumn, side) } : {}),
       })
     }
 
@@ -784,7 +771,6 @@ function buildOne(
         from,
         to,
         external: externalBetween(parentCard.frame, ownFrame),
-        viaX: gutterX(column, side),
       })
     }
   }
@@ -844,8 +830,8 @@ function buildOne(
   // the target's gutter along a **road** — a y no frame occupies between the two
   // gutters — and enters the target from its own gutter. Nothing crosses a frame
   // body or a title bar except the two endpoint frames the wire must enter and
-  // leave. Top/bottom ends (threads) keep the single-gutter `viaX` shape: their
-  // geometry is vertical, and a road would only make them wander.
+  // leave. Threads are routed the same way: their vertical stub only leaves the
+  // card and its frame's padding, and the gutter does the travelling.
   // -------------------------------------------------------------------------
   const tallest = heights.reduce((max, height) => Math.max(max, height), 0)
   const obstacles = fixed.map((box) => grow(box, CLEAR))
@@ -898,13 +884,15 @@ function buildOne(
     end.kind === 'card' ? (cards[end.index]?.column ?? 0) : (frames[end.index]?.column ?? 0)
   const clampTo = (value: number, low: number, high: number): number => Math.min(high, Math.max(low, value))
   /**
-   * Lane allocation.
+   * Lane allocation, ordered by the port each wire comes from.
    *
-   * Two wires in the same gutter or the same road used to run *on* each other: same
-   * x for the vertical run, same y for the crossing. A channel now hands out 9px
-   * lanes, centred on it, in allocation order (which is card order, so the drawing
-   * stays a function of the data). Full channels wrap — the only place overlap can
-   * still happen, and only past ~12 wires through one gutter.
+   * Two wires in the same gutter or the same road would otherwise run *on* each
+   * other (same x, same y), and allocating in card order also makes them cross at
+   * the gutter when their ports arrive in a different order. The lanes are therefore
+   * handed out by **port y**: the wire whose port is higher takes the higher lane, so
+   * the short horizontal runs from the ports to the gutters do not cross. Full
+   * channels wrap — the only place overlap can still happen, and only past ~5 wires
+   * through one gutter.
    */
   const laneCounters = new Map<string, number>()
   const nextLane = (key: string, capacity: number): number => {
@@ -912,14 +900,71 @@ function buildOne(
     laneCounters.set(key, used + 1)
     return ((used % capacity) - (capacity - 1) / 2) * LANE_STEP
   }
-  const laneX = (column: number, side: CardgraphSide): number => {
+  /** One gutter's usable band, and the x a lane's offset starts from. */
+  const gutterBand = (column: number, side: CardgraphSide): { low: number; high: number; base: number } => {
     const box = columns[column]?.bounds ?? { x: 0, y: 0, width: 0, height: 0 }
-    const low = side === 'right' ? box.x + box.width + LANE_CLEAR : box.x - opts.columnGap + LANE_CLEAR
-    const high = side === 'right' ? box.x + box.width + opts.columnGap - LANE_CLEAR : box.x - LANE_CLEAR
-    const capacity = Math.max(1, Math.floor((high - low) / LANE_STEP) + 1)
-    const key = `gutter:${column}:${side}`
-    demand.gutters.set(key, (demand.gutters.get(key) ?? 0) + 1)
-    return clampTo(gutterAt(column, side) + nextLane(key, capacity), low, high)
+    return {
+      low: side === 'right' ? box.x + box.width + LANE_CLEAR : box.x - opts.columnGap + LANE_CLEAR,
+      high: side === 'right' ? box.x + box.width + opts.columnGap - LANE_CLEAR : box.x - LANE_CLEAR,
+      base: gutterAt(column, side),
+    }
+  }
+  /**
+   * Which gutter a wire uses, and at which port y.
+   *
+   * Left/right ends use their own side; a top/bottom end (a thread) leaves through
+   * the column's gutter, because that is where it can travel without crossing cards.
+   */
+  const gutterUse = (edge: PendingEdge): { from: { column: number; side: CardgraphSide; portY: number }; to?: { column: number; side: CardgraphSide; portY: number } } => {
+    const fromColumn = columnOf(edge.from)
+    const toColumn = columnOf(edge.to)
+    const horizontal = (side: CardgraphSide): boolean => side === 'left' || side === 'right'
+    const from = {
+      column: fromColumn,
+      side: horizontal(edge.from.side) ? edge.from.side : gutterSide(fromColumn),
+      portY: edge.from.y,
+    }
+    if (fromColumn === toColumn) return { from }
+    return {
+      from,
+      to: {
+        column: toColumn,
+        side: horizontal(edge.to.side) ? edge.to.side : gutterSide(toColumn),
+        portY: edge.to.y,
+      },
+    }
+  }
+  /** The lane x each wire takes at each end, decided before any route is built. */
+  const lanePlan = new Map<PendingEdge, { fromX?: number; toX?: number }>()
+  {
+    const uses = new Map<string, { edge: PendingEdge; end: 'from' | 'to'; portY: number; column: number; side: CardgraphSide }[]>()
+    for (const edge of pending) {
+      const use = gutterUse(edge)
+      for (const end of ['from', 'to'] as const) {
+        const part = end === 'from' ? use.from : use.to
+        if (part === undefined) continue
+        const key = `gutter:${part.column}:${part.side}`
+        const list = uses.get(key) ?? []
+        list.push({ edge, end, portY: part.portY, column: part.column, side: part.side })
+        uses.set(key, list)
+      }
+    }
+    for (const [key, list] of uses) {
+      const first = list[0]
+      if (first === undefined) continue
+      const band = gutterBand(first.column, first.side)
+      const capacity = Math.max(1, Math.floor((band.high - band.low) / LANE_STEP) + 1)
+      list.sort((a, b) => a.portY - b.portY || (a.edge.report < b.edge.report ? -1 : a.edge.report > b.edge.report ? 1 : 0))
+      list.forEach((use, index) => {
+        const offset = ((index % capacity) - (capacity - 1) / 2) * LANE_STEP
+        const x = clampTo(band.base + offset, band.low, band.high)
+        const plan = lanePlan.get(use.edge) ?? {}
+        if (use.end === 'from') plan.fromX = x
+        else plan.toX = x
+        lanePlan.set(use.edge, plan)
+      })
+      demand.gutters.set(key, list.length)
+    }
   }
   /** Drop repeated points and merge collinear ones, so a route has no stutter. */
   const tidy = (input: { x: number; y: number }[]): { x: number; y: number }[] => {
@@ -937,24 +982,46 @@ function buildOne(
     }
     return out
   }
-  const route = (edge: PendingEdge): { x: number; y: number }[] | undefined => {
+  /**
+   * Route one wire through the layout's channels.
+   *
+   * All four sides come through here now. Left/right wires leave their port
+   * horizontally; top/bottom wires (threads) leave vertically into the gap above or
+   * below their card — which is empty by construction: cards are stacked with a
+   * `cardGap`, and the first/last card has the frame's padding above/below it. From
+   * there every wire takes the same shape: a stub, a horizontal run to the
+   * column's gutter, a vertical run to a road, a horizontal crossing to the target
+   * gutter, a vertical run to the target's y, and a stub into the target.
+   * @param edge - the wire, with its ports already spread.
+   * @returns the orthogonal route, ports included.
+   */
+  const route = (edge: PendingEdge): { x: number; y: number }[] => {
     const { from, to } = edge
-    if (from.side === 'top' || from.side === 'bottom' || to.side === 'top' || to.side === 'bottom') return undefined
-    const outward = (side: CardgraphSide): number => (side === 'right' ? 1 : -1)
-    const start = { x: from.x + outward(from.side) * STUB, y: from.y }
-    const end = { x: to.x + outward(to.side) * STUB, y: to.y }
+    const horizontal = (side: CardgraphSide): boolean => side === 'left' || side === 'right'
+    const outward = (side: CardgraphSide): number => (side === 'right' || side === 'bottom' ? 1 : -1)
+    const start = horizontal(from.side)
+      ? { x: from.x + outward(from.side) * STUB, y: from.y }
+      : { x: from.x, y: from.y + outward(from.side) * STUB }
+    const end = horizontal(to.side)
+      ? { x: to.x + outward(to.side) * STUB, y: to.y }
+      : { x: to.x, y: to.y + outward(to.side) * STUB }
     const fromColumn = columnOf(from)
     const toColumn = columnOf(to)
-    const fromX = laneX(fromColumn, from.side)
+    const plan = lanePlan.get(edge)
+    const fromX = plan?.fromX ?? gutterAt(fromColumn, horizontal(from.side) ? from.side : gutterSide(fromColumn))
     if (fromColumn === toColumn) {
       return tidy([from, start, { x: fromX, y: start.y }, { x: fromX, y: end.y }, end, to])
     }
-    const toX = laneX(toColumn, to.side)
+    const toX = plan?.toX ?? gutterAt(toColumn, horizontal(to.side) ? to.side : gutterSide(toColumn))
     const middle = (start.y + end.y) / 2
     const road = roadCandidates
       .filter((candidate) => freeRoad(fromX, toX, candidate.y))
       .sort((a, b) => Math.abs(a.y - middle) - Math.abs(b.y - middle) || a.y - b.y)[0]
-    if (road === undefined) return undefined
+    if (road === undefined) {
+      // No free crossing: a straight line is still better than no wire, and it only
+      // happens when a frame spans the whole gap between two columns.
+      return tidy([from, start, end, to])
+    }
     const capacity = Math.max(1, Math.floor((road.high - road.low) / LANE_STEP) + 1)
     const roadKey = `road:${road.key}`
     demand.roads.set(roadKey, (demand.roads.get(roadKey) ?? 0) + 1)
@@ -969,15 +1036,12 @@ function buildOne(
     ])
   }
   for (const edge of pending) {
-    const points = route(edge)
-    if (points !== undefined) edge.points = points
+    edge.points = route(edge)
   }
 
   const edges: CardgraphEdge[] = pending.map((edge) => {
     const points = edge.points
-    const xs = points === undefined
-      ? [edge.from.x, edge.to.x, ...(edge.viaX === undefined ? [] : [edge.viaX])]
-      : points.map((point) => point.x)
+    const xs = points === undefined ? [edge.from.x, edge.to.x] : points.map((point) => point.x)
     const ys = points === undefined
       ? [edge.from.y, edge.to.y]
       : points.map((point) => point.y)
@@ -989,7 +1053,6 @@ function buildOne(
       from: { ...edge.from },
       to: { ...edge.to },
       external: edge.external,
-      ...(edge.viaX === undefined ? {} : { viaX: edge.viaX }),
       ...(points === undefined ? {} : { points }),
       bounds: {
         x: minX,

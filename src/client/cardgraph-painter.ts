@@ -516,13 +516,10 @@ function wireStyle(kind: CardgraphEdgeKind, theme: PaintTheme): { stroke: string
  * @returns between two and four points, first to last.
  */
 export function wirePoints(edge: CardgraphEdge): readonly { readonly x: number; readonly y: number }[] {
-  // A routed wire already carries its polyline (through the layout's channels);
-  // the two shapes below are for thread wires and for anything unrouted.
+  // Every wire the layout produces carries its routed polyline; the straight pair
+  // is the fallback for a synthetic edge that has not been routed.
   if (edge.points !== undefined) return edge.points
-  const from = { x: edge.from.x, y: edge.from.y }
-  const to = { x: edge.to.x, y: edge.to.y }
-  if (edge.viaX === undefined) return [from, to]
-  return [from, { x: edge.viaX, y: from.y }, { x: edge.viaX, y: to.y }, to]
+  return [{ x: edge.from.x, y: edge.from.y }, { x: edge.to.x, y: edge.to.y }]
 }
 
 /** Shortest wire that earns a midpoint marker, in drawing units. */

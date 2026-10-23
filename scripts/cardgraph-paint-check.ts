@@ -474,13 +474,19 @@ check('a routed wire is a polyline that starts and ends at its ports', (() => {
     && points[points.length - 1]?.x === delivery?.to.x && points[points.length - 1]?.y === delivery?.to.y
 })())
 const bent = wirePoints(threadEdge as never)
-check('a wire with a gutter is four points', bent.length === 4)
-check('the bend runs down the gutter between the second and third points',
-  bent[1]?.x === threadEdge?.viaX && bent[2]?.x === threadEdge?.viaX)
-check('a bent wire leaves its start horizontally', bent[1]?.y === bent[0]?.y)
-check('a bent wire arrives horizontally', bent[2]?.y === bent[3]?.y)
-check('a wire starts at its from end', bent[0]?.x === threadEdge?.from.x && bent[0]?.y === threadEdge?.from.y)
-check('a wire ends at its to end', bent[3]?.x === threadEdge?.to.x && bent[3]?.y === threadEdge?.to.y)
+check('a thread is routed like any other wire: ports first and last', (() => {
+  return bent.length >= 6
+    && bent[0]?.x === threadEdge?.from.x && bent[0]?.y === threadEdge?.from.y
+    && bent[bent.length - 1]?.x === threadEdge?.to.x && bent[bent.length - 1]?.y === threadEdge?.to.y
+})())
+check('a thread leaves the parent card vertically', (() => {
+  const second = bent[1]
+  return second !== undefined && second.x === bent[0]?.x && (second.y ?? 0) > (bent[0]?.y ?? 0)
+})())
+check('a thread arrives at the child card vertically', (() => {
+  const last = bent[bent.length - 2]
+  return last !== undefined && last.x === bent[bent.length - 1]?.x && (last.y ?? 0) < (bent[bent.length - 1]?.y ?? 0)
+})())
 
 const dashOf = (kind: string): string => {
   const edge = layout.edges.find((candidate) => candidate.kind === kind)

@@ -230,20 +230,39 @@ check('a wire between two frames inside the tree is not marked', layout.edges.ev
 // Two sibling frames share a column, so a straight left-to-right wire from one to
 // the other would run back across the recipient's own box — reading as a wire
 // that belongs to the frame it merely passes. Those wires take the gutter.
+/** The x of every interior vertical run (the first/last segments are port stubs). */
+const verticalXs = (edge: { points?: readonly { readonly x: number; readonly y: number }[] }): number[] => {
+  const points = edge.points ?? []
+  const xs: number[] = []
+  for (let index = 2; index < points.length - 1; index++) {
+    const a = points[index - 1]
+    const b = points[index]
+    if (a !== undefined && b !== undefined && a.x === b.x) xs.push(a.x)
+  }
+  return xs
+}
+/** Whether every x sits in the gutter on side of column column. */
+const inGutter = (xs: readonly number[], column: number, side: 'left' | 'right'): boolean => {
+  const box = layout.columns[column]?.bounds
+  if (box === undefined) return false
+  return xs.length > 0 && xs.every((x) => side === 'right'
+    ? x > box.x + box.width && x < box.x + box.width + 48
+    : x < box.x && x > box.x - 48)
+}
 const sibling = layout.edges.find((edge) => edge.report === 'R-0004' && edge.kind === 'cc')
 check('a delivery between two sessions in one column bends through the gutter',
-  sibling?.viaX === (layout.columns[1]?.bounds.x ?? 0) + layout.frameWidth + 24)
+  sibling !== undefined && inGutter(verticalXs(sibling), 1, 'right'))
 check('a same-column wire leaves and lands on the same side',
   sibling?.from.side === 'right' && sibling?.to.side === 'right')
 check('a same-column wire only crosses the gutter on its way in',
-  sibling !== undefined && sibling.viaX !== undefined && Math.abs(sibling.to.x - sibling.viaX) <= 24)
+  sibling !== undefined && inGutter(verticalXs(sibling), 1, 'right'))
 
 const siblingAuthor = buildCardgraph(payload, [
   report('R-0110', { from: 'session-child', authors: ['session-child', 'session-peer'] }),
 ])
 const sideways = siblingAuthor.edges.find((edge) => edge.kind === 'author')
 check('a co-author in a sibling frame also comes in through the gutter',
-  sideways?.viaX === (siblingAuthor.columns[1]?.bounds.x ?? 0) + siblingAuthor.frameWidth + 24
+  sideways !== undefined && inGutter(verticalXs(sideways), 1, 'right')
     && sideways?.from.side === 'right' && sideways?.to.side === 'right')
 
 // Two wires sharing one frame edge must not land on the same pixel, and their
@@ -312,15 +331,15 @@ check('a thread with an unplotted parent is not drawn',
 check('a report cannot thread to itself',
   buildCardgraph(payload, [report('R-0081', { parent: 'R-0081' })]).edges.every((edge) => edge.kind !== 'thread'))
 check('a thread bends down the gutter beside its parent\'s column',
-  thread?.viaX === (layout.columns[0]?.bounds.x ?? 0) + layout.frameWidth + 24)
-check('the gutter is never inside a frame',
-  layout.edges.filter((edge) => edge.viaX !== undefined).every((edge) =>
-    layout.frames.every((frame) => !((edge.viaX as number) >= frame.bounds.x && (edge.viaX as number) <= frame.bounds.x + frame.bounds.width))))
-check('a wire\'s box contains the gutter it bends through',
-  thread !== undefined && thread.viaX !== undefined
-    && thread.bounds.x <= thread.viaX && thread.viaX <= thread.bounds.x + thread.bounds.width)
-check('every gutter is inside the drawing',
-  layout.edges.every((edge) => edge.viaX === undefined || (edge.viaX > 0 && edge.viaX < layout.width)))
+  thread !== undefined && verticalXs(thread).some((x) => inGutter([x], 0, 'right')))
+check('no vertical run goes through a frame',
+  layout.edges.every((edge) => verticalXs(edge).every((x) => layout.frames.every((frame) =>
+    !(x > frame.bounds.x && x < frame.bounds.x + frame.bounds.width)))))
+check('a wire\'s box contains its gutter run',
+  thread !== undefined
+    && verticalXs(thread).every((x) => x >= thread.bounds.x && x <= thread.bounds.x + thread.bounds.width))
+check('every gutter run is inside the drawing',
+  layout.edges.every((edge) => verticalXs(edge).every((x) => x > 0 && x < layout.width)))
 
 const sameColumn = buildCardgraph(payload, [
   report('R-0090', { from: 'session-peer', created: at(5) }),
@@ -328,7 +347,7 @@ const sameColumn = buildCardgraph(payload, [
 ])
 const loop = sameColumn.edges.find((edge) => edge.kind === 'thread')
 check('a thread inside one column loops out to the right',
-  loop?.viaX === (sameColumn.columns[1]?.bounds.x ?? 0) + sameColumn.frameWidth + 24)
+  loop !== undefined && inGutter(verticalXs(loop), 1, 'right'))
 
 const lastPayload = {
   ...payload,
@@ -341,9 +360,13 @@ const lastColumn = buildCardgraph(lastPayload, [
   report('R-0100', { from: 'session-grand', created: at(5) }),
   report('R-0101', { from: 'session-grand2', parent: 'R-0100', created: at(6) }),
 ])
-check('a thread in the last column loops out to the left instead',
-  lastColumn.edges.find((edge) => edge.kind === 'thread')?.viaX
-    === (lastColumn.columns[2]?.bounds.x ?? 0) - 24)
+check('a thread in the last column loops out to the left instead', (() => {
+  const edge = lastColumn.edges.find((candidate) => candidate.kind === 'thread')
+  const column = lastColumn.columns[2]?.bounds
+  return edge !== undefined && column !== undefined
+    && verticalXs(edge).length > 0
+    && verticalXs(edge).every((x) => x < column.x && x > column.x - 48)
+})())
 
 // ---------------------------------------------------------------------------
 // Culling, viewport and picking
@@ -672,7 +695,7 @@ const frameOfCard = (report: string | undefined): number =>
 const endFrame = (end: { readonly kind: 'card' | 'frame'; readonly index: number; readonly id?: string }): number =>
   end.kind === 'frame' ? end.index : frameOfCard(end.id)
 const routed = layout.edges.filter((edge) => edge.points !== undefined)
-check('left/right wires are routed', routed.length > 0 && routed.length === layout.edges.filter((edge) => edge.from.side !== 'top' && edge.to.side !== 'top').length)
+check('every wire is routed', routed.length === layout.edges.length && routed.length > 0)
 check('every routed segment is orthogonal', routed.every((edge) => segmentsOf(edge.points ?? []).every(({ a, b }) => a.x === b.x || a.y === b.y)))
 check('a routed wire only touches the frames it enters and leaves', routed.every((edge) => {
   const source = endFrame(edge.from)
@@ -689,6 +712,56 @@ check('no routed segment crosses a title bar', routed.every((edge) => segmentsOf
   })))))
 check('a routed wire stays inside the drawing', routed.every((edge) => (edge.points ?? []).every((point) =>
   point.x >= 0 && point.x <= layout.width && point.y >= 0 && point.y <= layout.height)))
+// Lanes are handed out by port y, not by card order, so the short runs from the
+// ports to the gutters never cross. Read back: inside one gutter, ascending port y
+// must give ascending lane x.
+check('lanes in a gutter follow the order of their ports', (() => {
+  // Built with fitChannels on: this is the drawing the view actually shows, where
+  // the gaps grew to fit the lanes, so no channel overflows and the order is on
+  // display rather than hidden behind a wrap.
+  const laneLayout = buildCardgraph(payload, plotted, { fitChannels: true })
+  const columnOfEnd = (end: { readonly kind: 'card' | 'frame'; readonly index: number; readonly id?: string }): number =>
+    end.kind === 'frame'
+      ? laneLayout.frames[end.index]?.column ?? 0
+      : laneLayout.cards.find((card) => card.report === end.id)?.column ?? 0
+  const uses = new Map<string, { portY: number; x: number }[]>()
+  for (const edge of laneLayout.edges) {
+    const xs = verticalXs(edge)
+    const fromColumn = columnOfEnd(edge.from)
+    const fromSide = edge.from.side === 'left' || edge.from.side === 'right'
+      ? edge.from.side
+      : (fromColumn < laneLayout.columns.length - 1 ? 'right' : 'left')
+    const fromX = xs[0]
+    if (fromX !== undefined) {
+      const key = `${fromColumn}:${fromSide}`
+      const list = uses.get(key) ?? []
+      list.push({ portY: edge.from.y, x: fromX })
+      uses.set(key, list)
+    }
+    const toColumn = columnOfEnd(edge.to)
+    if (toColumn === fromColumn) continue
+    const toSide = edge.to.side === 'left' || edge.to.side === 'right'
+      ? edge.to.side
+      : (toColumn < laneLayout.columns.length - 1 ? 'right' : 'left')
+    const toX = xs[xs.length - 1]
+    if (toX !== undefined) {
+      const key = `${toColumn}:${toSide}`
+      const list = uses.get(key) ?? []
+      list.push({ portY: edge.to.y, x: toX })
+      uses.set(key, list)
+    }
+  }
+  return [...uses.values()].every((list) => {
+    const sorted = [...list].sort((a, b) => a.portY - b.portY)
+    for (let index = 1; index < sorted.length; index++) {
+      const previous = sorted[index - 1]
+      const current = sorted[index]
+      if (previous === undefined || current === undefined) continue
+      if (current.x < previous.x - 1e-9) return false
+    }
+    return true
+  })
+})())
 check('two routed wires never run on top of each other', (() => {
   // Interior segments only: the first and last are the port stubs, which sit on
   // their own card/frame edge. Channel lanes are 2.5px apart, so collinear overlap
