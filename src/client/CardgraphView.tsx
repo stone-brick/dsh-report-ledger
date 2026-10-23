@@ -805,7 +805,15 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
             type="button"
             aria-label={`${card.report} · ${card.subject}`}
             title={idHint(card.report)}
-            onClick={() => { onOpen(card.report) }}
+            onClick={(event) => {
+              onOpen(card.report)
+              // A mouse click focuses the button, and focus is also a hover path
+              // (that is how a keyboard reader lights a card). Left alone, the
+              // click would leave the path lit after the pointer moved on: the
+              // pointer is gone but the button still has focus. Keyboard
+              // activation reports `detail === 0`, and keeps its focus on purpose.
+              if (event.detail > 0) event.currentTarget.blur()
+            }}
             onFocus={() => { setHover({ report: card.report }); selection.hover(card.report, 'canvas') }}
             onBlur={() => { setHover({}); selection.clearHover('canvas') }}
             style={{
