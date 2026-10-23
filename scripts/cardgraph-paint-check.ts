@@ -488,8 +488,8 @@ const dashOf = (kind: string): string => {
   return (stroke?.dash ?? ['?']).join(' ')
 }
 check('a delivery is solid', dashOf('to') === '', dashOf('to'))
-check('a copy is dotted', dashOf('cc') === '3 4', dashOf('cc'))
-check('a co-author wire is finely dashed', dashOf('author') === '1 4', dashOf('author'))
+check('a copy is dashed with a short gap', dashOf('cc') === '4 2', dashOf('cc'))
+check('a co-author wire is finely dotted', dashOf('author') === '2 2', dashOf('author'))
 check('a thread is solid', dashOf('thread') === '', dashOf('thread'))
 check('a delivery is drawn heavier than a copy', (() => {
   const to = wireStrokes(whole.recorder).find((stroke) => near(stroke.box, layout.edges.find((edge) => edge.kind === 'to')?.bounds as Box, 5))

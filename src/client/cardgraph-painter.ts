@@ -469,8 +469,8 @@ export const WIRE_TOKENS: Readonly<Record<CardgraphEdgeKind, {
   readonly width: number
 }>> = {
   to: { colour: '--dsw-alias-state-business-primary', dash: [], width: 1.8 },
-  cc: { colour: '--dsw-alias-label-caption', dash: [3, 4], width: 1.3 },
-  author: { colour: '--dsw-alias-state-success-primary', dash: [1, 4], width: 1.3 },
+  cc: { colour: '--dsw-alias-label-caption', dash: [4, 2], width: 1.3 },
+  author: { colour: '--dsw-alias-state-success-primary', dash: [2, 2], width: 1.3 },
   thread: { colour: '--dsw-alias-label-primary', dash: [], width: 1.5 },
 }
 
