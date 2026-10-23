@@ -65,6 +65,14 @@ export interface CardgraphOptions {
    * lets the legend toggle without moving anything or re-fitting the view.
    */
   readonly hiddenKinds?: readonly CardgraphEdgeKind[]
+  /**
+   * Grow the gaps between frames (and the column gutters) to fit the wires.
+   *
+   * Two-pass and opt-in because it changes the drawing's extent and therefore the
+   * fit: a caller that measured a box once wants a stable width, and a test that
+   * pins a gap wants that gap. The view turns it on; nothing else has to.
+   */
+  readonly fitChannels?: boolean
   /** Zoom at or above which reports are drawn as full cards. */
   readonly cardMinZoom: number
   /** Zoom at or above which reports are drawn as compact cards. */
@@ -427,6 +435,19 @@ interface PendingEdge {
   points?: { x: number; y: number }[]
 }
 
+/** Lane geometry: how far a lane keeps from the edge of its channel, and how far apart lanes are. */
+const LANE_CLEAR = 10
+const LANE_STEP = 2.5
+/** The stub each wire leaves its port with, and the clearance it keeps from a frame. */
+const STUB = 6
+const CLEAR = 4
+
+/** How many lanes one build actually used per channel. */
+interface ChannelDemand {
+  readonly gutters: Map<string, number>
+  readonly roads: Map<string, number>
+}
+
 /**
  * Build the card graph.
  *
@@ -437,6 +458,13 @@ interface PendingEdge {
  * timeline; the reader who wants one timeline across all sessions has the list
  * below. Only the reports handed in are drawn, so this is a filtered view rather
  * than a second source of truth.
+ *
+ * With `fitChannels`, the drawing is built **twice**: the first pass measures how
+ * many lanes its wires actually need in each gutter and each crossing gap, the
+ * second pass grows those gaps to fit them. A busy drawing therefore gets wide
+ * gaps instead of squeezing every wire into the 24px the default gap happens to
+ * leave — the layout reserves the room the wires need, rather than the wires
+ * fitting whatever room the layout left behind.
  * @param payload - the endpoint payload, for the session frames.
  * @param reports - the reports to plot; any order, since each frame sorts its own.
  * @param options - geometry and tier overrides.
@@ -446,6 +474,32 @@ export function buildCardgraph(
   payload: TimelinePayload,
   reports: readonly ReportFrontMatter[],
   options: Partial<CardgraphOptions> = {},
+): CardgraphLayout {
+  const demand: ChannelDemand = { gutters: new Map(), roads: new Map() }
+  const first = buildOne(payload, reports, options, demand)
+  if (options.fitChannels !== true) return first
+  const opts: CardgraphOptions = { ...DEFAULT_CARDGRAPH_OPTIONS, ...options }
+  const gutterLanes = Math.max(0, ...demand.gutters.values())
+  const roadLanes = Math.max(0, ...demand.roads.values())
+  const columnGap = Math.max(opts.columnGap, gutterLanes * LANE_STEP + 2 * LANE_CLEAR + 4)
+  const frameGap = Math.max(opts.frameGap, roadLanes * LANE_STEP + 2 * CLEAR + 4)
+  if (columnGap === opts.columnGap && frameGap === opts.frameGap) return first
+  return buildOne(payload, reports, { ...options, columnGap, frameGap }, { gutters: new Map(), roads: new Map() })
+}
+
+/**
+ * One build. The wrapper above calls this twice when channels need measuring.
+ * @param payload - the endpoint payload, for the session frames.
+ * @param reports - the reports to plot.
+ * @param options - geometry and tier overrides.
+ * @param demand - receives how many lanes each channel used, for the growth pass.
+ * @returns the layout as measured against the options given.
+ */
+function buildOne(
+  payload: TimelinePayload,
+  reports: readonly ReportFrontMatter[],
+  options: Partial<CardgraphOptions>,
+  demand: ChannelDemand,
 ): CardgraphLayout {
   const opts: CardgraphOptions = { ...DEFAULT_CARDGRAPH_OPTIONS, ...options }
   const size = opts.sizes[opts.lod]
@@ -793,12 +847,6 @@ export function buildCardgraph(
   // leave. Top/bottom ends (threads) keep the single-gutter `viaX` shape: their
   // geometry is vertical, and a road would only make them wander.
   // -------------------------------------------------------------------------
-  const STUB = 6
-  const CLEAR = 4
-  /** A lane keeps this far from the gutter's own edges. */
-  const LANE_CLEAR = 10
-  /** Spacing between two parallel lanes in one channel. */
-  const LANE_STEP = 2.5
   const tallest = heights.reduce((max, height) => Math.max(max, height), 0)
   const obstacles = fixed.map((box) => grow(box, CLEAR))
   /** A horizontal crossing band: where a road runs, and the space lanes may use. */
@@ -869,7 +917,9 @@ export function buildCardgraph(
     const low = side === 'right' ? box.x + box.width + LANE_CLEAR : box.x - opts.columnGap + LANE_CLEAR
     const high = side === 'right' ? box.x + box.width + opts.columnGap - LANE_CLEAR : box.x - LANE_CLEAR
     const capacity = Math.max(1, Math.floor((high - low) / LANE_STEP) + 1)
-    return clampTo(gutterAt(column, side) + nextLane(`gutter:${column}:${side}`, capacity), low, high)
+    const key = `gutter:${column}:${side}`
+    demand.gutters.set(key, (demand.gutters.get(key) ?? 0) + 1)
+    return clampTo(gutterAt(column, side) + nextLane(key, capacity), low, high)
   }
   /** Drop repeated points and merge collinear ones, so a route has no stutter. */
   const tidy = (input: { x: number; y: number }[]): { x: number; y: number }[] => {
@@ -906,7 +956,9 @@ export function buildCardgraph(
       .sort((a, b) => Math.abs(a.y - middle) - Math.abs(b.y - middle) || a.y - b.y)[0]
     if (road === undefined) return undefined
     const capacity = Math.max(1, Math.floor((road.high - road.low) / LANE_STEP) + 1)
-    const roadY = clampTo(road.y + nextLane(`road:${road.key}`, capacity), road.low, road.high)
+    const roadKey = `road:${road.key}`
+    demand.roads.set(roadKey, (demand.roads.get(roadKey) ?? 0) + 1)
+    const roadY = clampTo(road.y + nextLane(roadKey, capacity), road.low, road.high)
     return tidy([
       from, start,
       { x: fromX, y: start.y },
@@ -1027,6 +1079,19 @@ export function fitTransform(
   // The drawing already carries a margin on both sides, so the fit leaves one of
   // them as breathing room on the right instead of filling edge to edge.
   const available = Math.max(0, boxWidth - opts.margin)
+  // A pinned tier means the caller does not want the drawing to change shape with
+  // the zoom: fit that one tier and let the scale be whatever fills the box.
+  if (options.lod !== undefined) {
+    const drawing = buildCardgraph(payload, reports, options)
+    if (drawing.width <= 0) return undefined
+    const scale = Math.min(Math.max(available / drawing.width, MIN_ZOOM), MAX_FIT_ZOOM)
+    return {
+      lod: options.lod,
+      scale,
+      offsetX: Math.max(FIT_LEFT_MIN, (boxWidth - drawing.width * scale) / 2),
+      offsetY: FIT_TOP,
+    }
+  }
   const bands: Readonly<Record<CardgraphLod, { readonly min: number; readonly max: number }>> = {
     card: { min: opts.cardMinZoom, max: MAX_FIT_ZOOM },
     compact: { min: opts.compactMinZoom, max: opts.cardMinZoom },

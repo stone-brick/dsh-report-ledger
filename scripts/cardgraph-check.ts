@@ -504,6 +504,26 @@ check('a fit never magnifies past the box it was asked to fill', (() => {
   return fitted !== undefined && drawing.width * fitted.scale <= 420 - 24 + 1e-9
 })())
 
+// A pinned tier: the view draws one presentation at every zoom, so the fit must
+// accept a tier instead of probing for one. The scale then fills the box at that
+// tier, whatever zoom that lands on (never past the fit ceiling).
+check('a pinned fit uses the tier it was given', (() => {
+  const { payload: tree, cards } = chain(2)
+  const drawing = buildCardgraph(tree, cards, { lod: 'card' })
+  const fitted = fitTransform(tree, cards, 575, { lod: 'card' })
+  return fitted !== undefined && fitted.lod === 'card'
+    && Math.abs(fitted.scale - Math.min(MAX_FIT_ZOOM, (575 - 24) / drawing.width)) < 1e-12
+})())
+// The layout reserves room for wires: with enough deliveries through one gutter,
+// the gutter grows instead of packing the lanes tighter than the gap.
+check('a busy gutter widens the drawing to fit its lanes', (() => {
+  const many = Array.from({ length: 12 }, (_, index) =>
+    report(`R-08${String(index).padStart(2, '0')}`, { from: 'session-root', to: ['session-child'], created: at(index) }))
+  const base = buildCardgraph(payload, many)
+  const grown = buildCardgraph(payload, many, { fitChannels: true })
+  return grown.width > base.width
+})())
+
 check('the layout carries the title-bar height, so the painter need not know it',
   DEFAULT_CARDGRAPH_OPTIONS.frameHeaderHeight === 26 && layout.frameHeaderHeight === 26)
 check('the title-bar height is an option the layout reports',

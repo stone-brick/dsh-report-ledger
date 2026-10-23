@@ -33,9 +33,9 @@ import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, 
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ReportFrontMatter, TimelinePayload } from '../shared/wire.ts'
 import {
-  buildCardgraph, cullByBounds, fitTransform, hitTest, lodFor, MAX_ZOOM, MIN_ZOOM, scopeInput, ZOOM_STEP,
+  buildCardgraph, cullByBounds, fitTransform, hitTest, MAX_ZOOM, MIN_ZOOM, scopeInput, ZOOM_STEP,
 } from './cardgraph-model.ts'
-import type { CardgraphEdgeKind, CardgraphViewport, Rect } from './cardgraph-model.ts'
+import type { CardgraphEdgeKind, CardgraphLod, CardgraphViewport, Rect } from './cardgraph-model.ts'
 import {
   FALLBACK_THEME, WIRE_TOKENS, createCanvasPainter, createThemeReader,
 } from './cardgraph-painter.ts'
@@ -291,10 +291,12 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
    */
   const scope = useMemo(() => scopeInput(payload, reports, drill), [payload, reports, drill])
   const scopeKey = scope.trail.join('/')
-  const lod = lodFor(zoom)
+  // One presentation at every zoom: the tier is pinned, so panning and
+  // zooming never rebuild the layout — and therefore never recompute the wires.
+  const lod: CardgraphLod = 'card'
   const layout = useMemo(
-    () => buildCardgraph(scope.payload, scope.reports, { lod, hiddenKinds: mutedKinds }),
-    [scope, lod, mutedKinds],
+    () => buildCardgraph(scope.payload, scope.reports, { lod, hiddenKinds: mutedKinds, fitChannels: true }),
+    [scope, mutedKinds],
   )
   /** The drawing as of this render, for that same listener: it needs its extent. */
   const layoutRef = useRef(layout)
@@ -477,7 +479,7 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
   const fit = useCallback(() => {
     const box = boxRef.current
     if (box === null) return
-    const next = fitTransform(scope.payload, scope.reports, box.clientWidth)
+    const next = fitTransform(scope.payload, scope.reports, box.clientWidth, { lod, fitChannels: true })
     if (next === undefined) return
     // The transform is the fit's own again, so it follows the box again.
     fittedTransform.current = true
