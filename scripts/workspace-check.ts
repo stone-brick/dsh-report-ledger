@@ -403,9 +403,23 @@ check('a creation window without the unpublished session is reported, not silent
 type RouteHandler = (request: never, response: never) => Promise<void> | void
 
 interface WiringOptions {
-  readonly liveAgents?: readonly { id: string; steer(message: unknown): void; inject(message: unknown): void }[]
+  readonly liveAgents?: readonly { id: string; session?: unknown; steer(message: unknown): void; inject(message: unknown): void }[]
   readonly listSessions?: () => Promise<readonly unknown[]>
-  readonly readTitleSnapshots?: (ids: readonly string[]) => Promise<readonly unknown[]>
+  readonly readTitleSnapshots?: (ids: readonly string[], signal?: AbortSignal) => Promise<readonly unknown[]>
+  /**
+   * The persisted projection cache, in the two faces this plugin reads.
+   *
+   * A fixture rather than the real service because what is being pinned is the
+   * ROUTE a title takes, not the cache: the assertion is that the timeline asks
+   * this face at all, which is the difference between an in-memory answer and
+   * decoding every session log on every poll.
+   */
+  readonly projectionCache?: {
+    snapshot?: (header: unknown, keys?: readonly string[]) => { readonly values?: Record<string, unknown> } | undefined
+    predecessor?: (header: unknown) => { readonly values?: Record<string, unknown> } | undefined
+  }
+  /** The live title service, so the resident-session route can be isolated too. */
+  readonly titleService?: { get(session: unknown): { readonly title?: unknown } | undefined }
   readonly failRoute?: string
 }
 
@@ -434,6 +448,13 @@ const wiring = (options: WiringOptions = {}) => {
     listSessions: options.listSessions ?? (async () => []),
     readTitleSnapshots: options.readTitleSnapshots ?? (async () => []),
   }
+  const projectionCache = options.projectionCache === undefined
+    ? undefined
+    : {
+        cachedSnapshot: options.projectionCache.snapshot,
+        cachedPredecessorTitle: options.projectionCache.predecessor,
+      }
+  const titleService = options.titleService
   const effect = (fn: () => (() => void)): (() => void) => {
     const undo = fn()
     effects.push(undo)
@@ -450,7 +471,12 @@ const wiring = (options: WiringOptions = {}) => {
       list: () => liveAgents,
       create: async () => { throw new Error('fixture: no agent is created here') },
     },
-    get: (name: string) => (name === 'sessionQuery' ? sessionQuery : undefined),
+    get: (name: string) => {
+      if (name === 'sessionQuery') return sessionQuery
+      if (name === 'sessionProjectionCache') return projectionCache
+      if (name === 'sessionTitle') return titleService
+      return undefined
+    },
     logger: { warn: (message: string) => { warnings.push(message) } },
     tools: { register: (definition: { name: string }) => { tools.push(definition.name); return () => {} } },
     systemPrompt: { section: (section: { name: string }) => { sections.push(section.name); return () => {} } },
@@ -572,11 +598,11 @@ shared.mount()
 const timelineRoute = shared.routes.get(TIMELINE_PATH)
 if (timelineRoute === undefined) throw new Error('fixture: the timeline route was not registered')
 
-const browserRequest = (): never => ({
+const browserRequest = (root = 'session-root'): never => ({
   socket: { remoteAddress: '127.0.0.1' },
   headers: { host: '127.0.0.1:3080' },
   method: 'GET',
-  url: '/api/report-ledger/timeline?root=session-root',
+  url: `/api/report-ledger/timeline?root=${root}`,
 } as never)
 const browserResponse = (): { captured: { status: number; headers: Record<string, unknown>; body: string }; response: never } => {
   const captured = { status: 0, headers: {} as Record<string, unknown>, body: '' }
@@ -617,6 +643,143 @@ check('the pump listener answers synchronously with undefined', pumpResult === u
 const fourthRead = browserResponse()
 await timelineRoute(browserRequest(), fourthRead.response)
 check('a newly resident session drops the cached corpus listing', listing.calls === 2, String(listing.calls))
+
+// ---------------------------------------------------------------------------
+// 10. titles: the cheap rung answers, and the expensive rung is bounded
+// ---------------------------------------------------------------------------
+// This is the half of a timeline read that made the tab unloadable. Folding a
+// title for a session this process is not holding costs the harness a decode of
+// that session's COMPLETE stored log — measured on a real 195-session corpus at
+// 389 ms to 1.3 s per session and 5.1 s for one thirteen-session tree offline,
+// 18.3 s through the live endpoint — and the old read path did it for every
+// session of every poll. Each check below pins one rung of the ladder that
+// replaced it: a resident session answers from the live title service, a stored
+// session answers from the projection cache, a session neither can serve is
+// remembered, and what is left is capped and time-bounded.
+const coldTree = (count: number): readonly unknown[] => Array.from({ length: count }, (_, index) => ({
+  header: {
+    id: index === 0 ? 'session-cold-root' : `session-cold-${index}`,
+    ...(index === 0 ? {} : { parentSession: 'session-cold-root' }),
+    createdAt: index,
+    cwd: 'D:\\Projects\\example',
+    isSeeded: false,
+    version: 5,
+  },
+  live: false,
+}))
+const titlesOfColdTree = (ids: readonly string[]): readonly unknown[] =>
+  ids.map((sessionId) => ({ status: 'fulfilled', sessionId, value: { title: { title: `title of ${sessionId}` } } }))
+
+// (a) a projected session costs no log decode
+const projectedCalls = { calls: 0, ids: 0 }
+const projected = wiring({
+  listSessions: async () => coldTree(3),
+  readTitleSnapshots: async (ids) => {
+    projectedCalls.calls += 1
+    projectedCalls.ids += ids.length
+    return titlesOfColdTree(ids)
+  },
+  projectionCache: {
+    snapshot: (header) => ({ values: { title: `projected ${(header as { id?: string }).id ?? ''}` } }),
+  },
+})
+apply(projected.ctx as never, {})
+projected.mount()
+const projectedRoute = projected.routes.get(TIMELINE_PATH)
+if (projectedRoute === undefined) throw new Error('fixture: the timeline route was not registered')
+const projectedRead = browserResponse()
+await projectedRoute(browserRequest('session-cold-root'), projectedRead.response)
+check('the projection cache answers a stored session without decoding its log',
+  projectedCalls.calls === 0, `${projectedCalls.calls} calls, ${projectedCalls.ids} ids`)
+check('the projected titles are in the payload the tab renders',
+  projectedRead.captured.body.includes('projected session-cold-root')
+  && projectedRead.captured.body.includes('projected session-cold-1'),
+  projectedRead.captured.body.slice(0, 200))
+
+// (b) a resident session costs no log decode either
+const liveTitleCalls = { ids: [] as string[] }
+const liveTitled = wiring({
+  listSessions: async () => coldTree(2),
+  readTitleSnapshots: async (ids) => { liveTitleCalls.ids.push(...ids); return titlesOfColdTree(ids) },
+  liveAgents: [{
+    id: 'session-cold-root',
+    session: { header: { id: 'session-cold-root' } },
+    steer: () => {},
+    inject: () => {},
+  }],
+  titleService: { get: () => ({ title: 'the live title' }) },
+})
+apply(liveTitled.ctx as never, {})
+liveTitled.mount()
+const liveRoute = liveTitled.routes.get(TIMELINE_PATH)
+if (liveRoute === undefined) throw new Error('fixture: the timeline route was not registered')
+const liveRead = browserResponse()
+await liveRoute(browserRequest('session-cold-root'), liveRead.response)
+check('a resident session takes its title from the live title service, not the query',
+  !liveTitleCalls.ids.includes('session-cold-root') && liveRead.captured.body.includes('the live title'),
+  liveTitleCalls.ids.join(','))
+check('the non-resident child of that tree still resolves its title through the query',
+  liveRead.captured.body.includes('title of session-cold-1'), liveRead.captured.body.slice(0, 200))
+
+// (c) what neither cheap face can serve is remembered, found or not
+const unserved = { calls: 0, ids: [] as string[] }
+const unservedFixture = wiring({
+  listSessions: async () => coldTree(3),
+  readTitleSnapshots: async (ids) => {
+    unserved.calls += 1
+    unserved.ids.push(...ids)
+    return titlesOfColdTree(ids)
+  },
+})
+apply(unservedFixture.ctx as never, {})
+unservedFixture.mount()
+const unservedRoute = unservedFixture.routes.get(TIMELINE_PATH)
+if (unservedRoute === undefined) throw new Error('fixture: the timeline route was not registered')
+await unservedRoute(browserRequest('session-cold-root'), browserResponse().response)
+const afterFirst = { calls: unserved.calls, ids: unserved.ids.length }
+await unservedRoute(browserRequest('session-cold-root'), browserResponse().response)
+check('the expensive title path runs once, not once per poll',
+  afterFirst.calls === 1 && unserved.calls === afterFirst.calls,
+  `${afterFirst.calls} then ${unserved.calls}`)
+
+// (d) it is capped per request instead of handed the whole tree
+const capped = { batchSizes: [] as number[], ids: [] as string[] }
+const cappedFixture = wiring({
+  listSessions: async () => coldTree(21),
+  readTitleSnapshots: async (ids) => {
+    capped.batchSizes.push(ids.length)
+    capped.ids.push(...ids)
+    return titlesOfColdTree(ids)
+  },
+})
+apply(cappedFixture.ctx as never, {})
+cappedFixture.mount()
+const cappedRoute = cappedFixture.routes.get(TIMELINE_PATH)
+if (cappedRoute === undefined) throw new Error('fixture: the timeline route was not registered')
+await cappedRoute(browserRequest('session-cold-root'), browserResponse().response)
+await cappedRoute(browserRequest('session-cold-root'), browserResponse().response)
+const firstBatch = capped.ids.slice(0, 8)
+const secondBatch = capped.ids.slice(8, 16)
+check('one request sends at most eight sessions down the expensive title path',
+  capped.batchSizes[0] === 8, JSON.stringify(capped.batchSizes))
+check('the next request advances instead of retrying the same sessions',
+  secondBatch.length > 0 && secondBatch.every((id) => !firstBatch.includes(id)),
+  `${firstBatch.join(',')} -> ${secondBatch.join(',')}`)
+
+// (e) a failing title service costs the titles, never the view
+const brokenTitles = wiring({
+  listSessions: async () => coldTree(2),
+  readTitleSnapshots: async () => { throw new Error('fixture: the title store is unreadable') },
+})
+apply(brokenTitles.ctx as never, {})
+brokenTitles.mount()
+const brokenRoute = brokenTitles.routes.get(TIMELINE_PATH)
+if (brokenRoute === undefined) throw new Error('fixture: the timeline route was not registered')
+const brokenRead = browserResponse()
+await brokenRoute(browserRequest('session-cold-root'), brokenRead.response)
+check('an unreadable title store still answers the timeline',
+  brokenRead.captured.status === 200 && brokenRead.captured.body.includes('session-cold-1'),
+  `${brokenRead.captured.status} ${brokenRead.captured.body.slice(0, 120)}`)
 
 let failures = 0
 for (const [label, ok, detail] of checks) {

@@ -107,7 +107,62 @@ export const inject = ['tools', 'systemPrompt', 'agents']
 /** Structural face of the optional session-query service. */
 interface SessionQueryLike {
   listSessions?(): Promise<readonly unknown[]>
-  readTitleSnapshots?(ids: readonly string[]): Promise<readonly unknown[]>
+  /**
+   * Fold titles for a set of sessions.
+   *
+   * The cost is NOT uniform across ids and the difference is the whole reason the
+   * title path below has the shape it has: a resident session folds in memory,
+   * while a session this process is not holding is resolved by reading its
+   * COMPLETE stored log — tens of thousands of Zstandard frames for a long
+   * session — because the harness's projection cache does not serve this call. On
+   * the largest collaboration on this machine that is 389 ms per session and 5 s
+   * for one tree, measured; through the request path it is 18 s.
+   * @param ids - sessions to fold titles for.
+   * @param signal - cancellation, and the only way to put a ceiling on the cost.
+   * @returns one settled result per requested id.
+   */
+  readTitleSnapshots?(ids: readonly string[], signal?: AbortSignal): Promise<readonly unknown[]>
+}
+
+/** One projection block, as far as a title read cares about it. */
+interface ProjectionBlockLike {
+  /** Projection values by key; `title` is the plain string this plugin reads. */
+  readonly values?: Record<string, unknown>
+}
+
+/**
+ * Structural face of the persisted projection cache (`ctx.sessionProjectionCache`).
+ *
+ * Optional, and worth reaching for because of one property the docs state and the
+ * measurements confirm: a read is served from the domain's in-memory tables, so it
+ * costs no I/O and no log decoding. Its rows are a checkpoint of each session's
+ * projections — possibly stale by a checkpoint, never wrong, and identified by the
+ * session's lifecycle — which is exactly the trade a display title wants.
+ */
+interface SessionProjectionCacheLike {
+  /**
+   * Whole values viewed straight from the stored rows.
+   * @param meta - the listed session's header (identity witness, no log read).
+   * @param keys - projection keys the caller needs.
+   * @returns the block, or `undefined` when no usable row exists.
+   */
+  cachedSnapshot?(meta: never, keys?: readonly string[]): ProjectionBlockLike | undefined
+  /**
+   * A predecessor checkpoint's title, for rows that lag their log.
+   * @param meta - the authoritative listed header.
+   * @returns a title-only block, or `undefined`.
+   */
+  cachedPredecessorTitle?(meta: never): ProjectionBlockLike | undefined
+}
+
+/** Structural face of the live title service (`ctx.sessionTitle`). */
+interface SessionTitleFaceLike {
+  /**
+   * The current title of a resident session.
+   * @param session - the live session.
+   * @returns the snapshot, or `undefined` before a title exists.
+   */
+  get(session: never): { readonly title?: unknown } | undefined
 }
 
 /** Structural face of the optional web-server service. */
@@ -610,12 +665,56 @@ function settledWithin(agent: { whenIdle(): Promise<void> }, timeoutMs: number):
 /**
  * How long one session-corpus listing is reused before it is read again.
  *
- * Short enough that a tree a human is watching does not look stale, long enough
- * that a burst of polls (the tab refreshes every ten seconds, and a slow answer
- * overlaps the next) costs a single walk. Invalidation on `agent/created` is
- * what covers the one case where freshness is not negotiable.
+ * Long enough to cover the browser's poll interval (ten seconds, see
+ * `POLL_INTERVAL_MS` in the client half), because a window shorter than the
+ * cadence it is meant to serve can never hit: every poll would pay a full
+ * directory walk plus a frame read per session log, which is what the tab was
+ * doing. Freshness does not come from this number — `agent/created` invalidates
+ * outright, and everything that changes independently of the corpus (the report
+ * digests, the transfer paths, the lanes) is still read fresh on every request.
+ * A session created by ANOTHER process is the only thing that can be this late.
  */
-const SESSION_LISTING_TTL_MS = 5000
+const SESSION_LISTING_TTL_MS = 15_000
+
+/**
+ * How long a title answered by the expensive path is reused, found or not.
+ *
+ * The cheap faces answer most reads, so this only bounds the deployments and the
+ * sessions the projection cache cannot serve — and there the difference between
+ * remembering and not remembering is a full log decode per poll. Negative answers
+ * are cached for the same reason: a session with no title is otherwise the worst
+ * case, not the best one.
+ */
+const TITLE_FALLBACK_TTL_MS = 60_000
+
+/**
+ * Wall-clock budget one request may spend decoding logs to find titles.
+ *
+ * The titles are decoration; the tree, the digests and the lanes are the view. A
+ * request that spends whole seconds on decoration is a view that never arrives,
+ * so the expensive path is bounded rather than trusted to be fast.
+ */
+const TITLE_FALLBACK_DEADLINE_MS = 2_000
+
+/**
+ * How many sessions one request may send down the expensive title path.
+ *
+ * A count cap on top of the deadline because the deadline is enforced per call:
+ * without this, a tree of fifty titles the projection cache cannot serve would
+ * still issue one batch of fifty.
+ */
+const TITLE_FALLBACK_MAX_IDS = 8
+
+/** How many fallback title answers are remembered before the oldest is dropped. */
+const TITLE_FALLBACK_ENTRIES = 2048
+
+/** One remembered expensive title answer; `title` is absent when there was none. */
+interface TitleMemo {
+  /** When the answer was recorded, for the reuse window. */
+  readonly at: number
+  /** The title, when the answer was one. */
+  readonly title?: string
+}
 
 /**
  * Build every host capability this plugin consumes.
@@ -629,6 +728,12 @@ const SESSION_LISTING_TTL_MS = 5000
  */
 function buildHost(ctx: Context): HostBundle {
   const sessionQuery = (): SessionQueryLike | undefined => ctx.get('sessionQuery') as SessionQueryLike | undefined
+  // Both zero-I/O title faces are optional services, and neither is on the
+  // plugin's `inject` list: a deployment that composes neither still gets titles,
+  // they just come from the bounded expensive path below.
+  const titleFace = (): SessionTitleFaceLike | undefined => ctx.get('sessionTitle') as SessionTitleFaceLike | undefined
+  const projectionCache = (): SessionProjectionCacheLike | undefined =>
+    ctx.get('sessionProjectionCache') as SessionProjectionCacheLike | undefined
 
   // The corpus listing, reused briefly and never run twice at once.
   //
@@ -639,15 +744,20 @@ function buildHost(ctx: Context): HostBundle {
   // repeatedly. Two rules fix that without inventing a second source of truth:
   //
   //  - **in-flight dedupe** — concurrent readers join the one running listing;
-  //  - **short reuse window** — a listing is reused for SESSION_LISTING_TTL_MS
-  //    so a poll burst costs one walk. Five seconds keeps the tab's "I switched
-  //    back, show me now" honest for everything that changes independently of
-  //    the corpus (the report digests and the lanes are still read fresh on every
-  //    request), and `agent/created` drops the cache outright, so a session that
-  //    just appeared can never be missing from its own timeline.
+  //  - **reuse window longer than the poll cadence** — a listing is reused for
+  //    SESSION_LISTING_TTL_MS so a poll burst costs one walk. The report digests
+  //    and the lanes are still read fresh on every request, and `agent/created`
+  //    drops the cache outright, so a session that just appeared can never be
+  //    missing from its own timeline.
+  //
+  // The raw headers ride along because they are already in hand here and they are
+  // the identity witness the projection cache wants for a zero-I/O title read:
+  // that cache matches a row by lifecycle (format version, creation time, working
+  // directory, seeded flag), so a reduced record cannot be used in its place.
   let listingCache: { readonly at: number; readonly records: readonly SessionRecordLike[] } | undefined
   let listingPending: Promise<readonly SessionRecordLike[]> | undefined
   let listingGeneration = 0
+  let headerById = new Map<string, unknown>()
 
   const readListing = async (): Promise<SessionRecordLike[]> => {
     const query = sessionQuery()
@@ -662,13 +772,20 @@ function buildHost(ctx: Context): HostBundle {
       try {
         const raw = await list()
         const records: SessionRecordLike[] = []
+        const headers = new Map<string, unknown>()
         for (const entry of raw) {
           const record = toSessionRecord(entry)
-          if (record !== undefined) records.push(record)
+          if (record === undefined) continue
+          records.push(record)
+          const header = (entry as { readonly header?: unknown } | null | undefined)?.header
+          if (header !== undefined && header !== null) headers.set(record.header.id, header)
         }
         // A listing that started before an invalidation must not repopulate the
         // cache: its snapshot can predate the session that invalidated it.
-        if (generation === listingGeneration) listingCache = { at: Date.now(), records }
+        if (generation === listingGeneration) {
+          listingCache = { at: Date.now(), records }
+          headerById = headers
+        }
         return records
       } finally {
         if (generation === listingGeneration) listingPending = undefined
@@ -678,12 +795,149 @@ function buildHost(ctx: Context): HostBundle {
     return [...await started]
   }
 
+  /**
+   * Ask the projection cache for one session's title.
+   *
+   * `undefined` means the cache could not answer — no row for this lifecycle, no
+   * cache at all — and the caller has to fall back. An empty object means it did
+   * answer, and the answer is "this session has no title yet": that is a real
+   * fact worth having, because the alternative is decoding a log to learn it.
+   * @param cache - the projection cache service.
+   * @param header - the listed session's raw header.
+   * @returns the answer, when there was one.
+   */
+  const cachedTitle = (cache: SessionProjectionCacheLike, header: unknown): { readonly title?: string } | undefined => {
+    let block: ProjectionBlockLike | undefined
+    try {
+      block = cache.cachedSnapshot?.(header as never, ['title'])
+    } catch {
+      block = undefined
+    }
+    if (block?.values === undefined) {
+      try {
+        block = cache.cachedPredecessorTitle?.(header as never)
+      } catch {
+        block = undefined
+      }
+    }
+    if (block?.values === undefined) return undefined
+    const value = block.values['title']
+    return typeof value === 'string' && value !== '' ? { title: value } : {}
+  }
+
+  /** Titles answered by {@link readTitleSnapshots}, both found and not. */
+  const titleMemo = new Map<string, TitleMemo>()
+
+  /** Remember one expensive answer, keeping the map inside its budget. */
+  const rememberTitle = (id: string, title?: string): void => {
+    titleMemo.delete(id)
+    titleMemo.set(id, title === undefined ? { at: Date.now() } : { at: Date.now(), title })
+    for (const key of titleMemo.keys()) {
+      if (titleMemo.size <= TITLE_FALLBACK_ENTRIES) break
+      titleMemo.delete(key)
+    }
+  }
+
+  /**
+   * Read display titles for a set of sessions.
+   *
+   * The order of the four attempts below is the whole of this function, and it is
+   * a cost order, not a preference order:
+   *
+   *  1. **A resident session** answers from `sessionTitle` — a synchronous fold of
+   *     the live projection state. Never worth decoding a log for.
+   *  2. **`sessionProjectionCache`** answers from its in-memory tables using the
+   *     header the listing just returned. Zero I/O, and the row is a checkpoint of
+   *     this very session's `title` projection, so it is possibly stale by a
+   *     checkpoint and never wrong — the same answer the product's own session
+   *     list shows for that row.
+   *  3. **A remembered answer** from the last time the expensive path ran, inside
+   *     {@link TITLE_FALLBACK_TTL_MS}. Negative answers count: without them the
+   *     sessions the cache cannot serve are re-decoded on every poll.
+   *  4. **`readTitleSnapshots`** for what is left, capped in count, bounded in
+   *     wall-clock, and remembered whatever it returns.
+   *
+   * Measured on this machine, step 4 is the difference between a timeline request
+   * that answers in a fraction of a second and one that answers in eighteen: the
+   * harness resolves a non-resident session for that call by decoding its complete
+   * stored log, which is 389 ms to 1.3 s per session and was 5.1 s for one
+   * thirteen-session tree offline. It is what the previous version of this
+   * function did for every session on every poll, which is why the tab took longer
+   * to load than the browser's own timeout patience.
+   * @param ids - session ids to resolve.
+   * @returns a title per session that has one.
+   */
   const readTitles = async (ids: readonly string[]): Promise<Map<string, string>> => {
     const titles = new Map<string, string>()
+    const wanted = [...new Set(ids)]
+    if (wanted.length === 0) return titles
+    const live = titleFace()
+    const cache = projectionCache()
+    const pending: string[] = []
+    const needHeader: string[] = []
+    for (const id of wanted) {
+      const session = ctx.agents.get(id as never)?.session
+      if (session !== undefined && live !== undefined) {
+        // A resident session that has no title YET is not a miss to chase: the next
+        // poll re-reads this in microseconds, and the title appears on its own.
+        try {
+          const snapshot = live.get(session as never)
+          const title = snapshot === undefined ? undefined : snapshot.title
+          if (typeof title === 'string' && title !== '') titles.set(id, title)
+        } catch {
+          // A cosmetic read must never be the reason a view fails.
+        }
+        continue
+      }
+      needHeader.push(id)
+    }
+    if (needHeader.length > 0 && cache !== undefined) {
+      // The listing is shared with the timeline that is asking, so this is free on
+      // the request path; on the tool path it is one walk per reuse window, which
+      // is still an order of magnitude cheaper than one log decode. It is only
+      // reached when a title is actually wanted for a session that is NOT resident,
+      // so the hot "describe the agent that is calling me" path never pays it.
+      try {
+        await readListing()
+      } catch {
+        // The header map is a cache of a listing the timeline already needed; a
+        // failing walk costs the titles, and must not cost the view.
+      }
+      for (const id of needHeader) {
+        const header = headerById.get(id)
+        const answered = header === undefined ? undefined : cachedTitle(cache, header)
+        if (answered === undefined) {
+          pending.push(id)
+          continue
+        }
+        if (answered.title !== undefined) titles.set(id, answered.title)
+      }
+    } else {
+      pending.push(...needHeader)
+    }
+
+    const now = Date.now()
+    const expired: string[] = []
+    for (const id of pending) {
+      const memo = titleMemo.get(id)
+      if (memo !== undefined && now - memo.at < TITLE_FALLBACK_TTL_MS) {
+        if (memo.title !== undefined) titles.set(id, memo.title)
+        continue
+      }
+      expired.push(id)
+    }
     const query = sessionQuery()
-    if (query?.readTitleSnapshots === undefined || ids.length === 0) return titles
+    if (expired.length === 0 || query?.readTitleSnapshots === undefined) return titles
+    const batch = expired.slice(0, TITLE_FALLBACK_MAX_IDS)
     try {
-      const results = await query.readTitleSnapshots(ids)
+      // `AbortSignal.timeout` is what makes the ceiling real: the harness checks
+      // the signal between frames, so an expired one ends the decode instead of
+      // returning it late to nobody.
+      const signal = typeof AbortSignal.timeout === 'function'
+        ? AbortSignal.timeout(TITLE_FALLBACK_DEADLINE_MS)
+        : undefined
+      const results = await query.readTitleSnapshots(batch, signal)
+      const answered = new Set<string>()
       for (const result of results) {
         if (result === null || typeof result !== 'object') continue
         const entry = result as Record<string, unknown>
@@ -691,10 +945,19 @@ function buildHost(ctx: Context): HostBundle {
         const value = entry.value as Record<string, unknown> | undefined
         const snapshot = value?.title as Record<string, unknown> | undefined
         const title = snapshot === undefined ? undefined : str(snapshot, 'title')
+        answered.add(entry.sessionId)
         if (title !== undefined) titles.set(entry.sessionId, title)
+        rememberTitle(entry.sessionId, title)
       }
+      // A session the harness never answered is remembered as titleless: the next
+      // poll must not spend its budget on the same ids, or a tree the projection
+      // cache cannot serve would never get past its first few titles.
+      for (const id of batch) if (!answered.has(id)) rememberTitle(id)
     } catch {
-      // Titles are cosmetic: a failing title service must not break the view.
+      // A deadline, a failing title service, a store the harness cannot decode:
+      // none of them are reasons to break the view, and all of them are worth
+      // remembering so the next poll does not pay for them again.
+      for (const id of batch) rememberTitle(id)
     }
     return titles
   }
@@ -722,6 +985,9 @@ function buildHost(ctx: Context): HostBundle {
       listingGeneration += 1
       listingCache = undefined
       listingPending = undefined
+      // The headers belong to that listing, so they go with it: a recreated session
+      // id must never be paired with a header from its previous lifecycle.
+      headerById = new Map()
     },
   }
 }
