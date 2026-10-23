@@ -375,6 +375,25 @@ const loop = sameColumn.edges.find((edge) => edge.kind === 'thread')
 // The arrowhead needs vertical room, not just the line: its tip stops short of the
 // card's top edge and its base sits further back, so the last horizontal run must be
 // at least `THREAD_ARROW_CLEAR` above that edge.
+// A frame's side edge is shared by every arrow landing on it. A short frame with
+// many arrivals would crowd them, so the layout grows that frame's height: each
+// port gets PORT_SPACING along the edge.
+check('a crowded frame edge grows to space its arrows', (() => {
+  const reports = Array.from({ length: 6 }, (_, index) =>
+    report(`R-021${index}`, { from: 'session-root', to: ['tree-outside'], created: at(index) }))
+  const base = buildCardgraph(payload, reports)
+  const fit = buildCardgraph(payload, reports, { fitChannels: true })
+  const outside = (layout: typeof base) => layout.frames.find((frame) => frame.id === undefined)
+  const plain = outside(base)
+  const grown = outside(fit)
+  if (plain === undefined || grown === undefined) return false
+  const ports = fit.edges
+    .filter((edge) => edge.to.kind === 'frame' && edge.to.id === undefined)
+    .map((edge) => edge.to.y)
+    .sort((a, b) => a - b)
+  const gaps = ports.slice(1).map((y, index) => y - (ports[index] ?? 0))
+  return grown.bounds.height > plain.bounds.height && gaps.every((gap) => gap >= 13)
+})())
 check('a downward thread arrow gets room above its card', (() => {
   const thread = fanOut.edges.find((edge) => edge.kind === 'thread')
   const points = thread?.points ?? []

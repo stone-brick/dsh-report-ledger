@@ -436,6 +436,8 @@ const STUB = 6
 const CLEAR = 4
 /** Vertical spacing between two thread runs leaving the same card. */
 const THREAD_ROW_STEP = 5
+/** The spacing a frame's edge gives each port, enough for an arrowhead. */
+const PORT_SPACING = 14
 /** The gap a card needs below it before its first thread run. */
 const THREAD_ROW_CLEAR = 6
 /** Vertical room a downward arrow needs above the card it lands on. */
@@ -451,6 +453,8 @@ interface ChannelDemand {
   threadArrows: boolean
   /** Whether some co-author wire lands on a card's side (same, horizontally). */
   cardSideArrows: boolean
+  /** How many ports each frame edge must hold: ${frameIndex}:. */
+  framePorts: Map<string, number>
 }
 
 /**
@@ -480,7 +484,7 @@ export function buildCardgraph(
   reports: readonly ReportFrontMatter[],
   options: Partial<CardgraphOptions> = {},
 ): CardgraphLayout {
-  const demand: ChannelDemand = { gutters: new Map(), roads: new Map(), threadRows: 0, threadArrows: false, cardSideArrows: false }
+  const demand: ChannelDemand = { gutters: new Map(), roads: new Map(), threadRows: 0, threadArrows: false, cardSideArrows: false, framePorts: new Map() }
   const first = buildOne(payload, reports, options, demand)
   if (options.fitChannels !== true) return first
   const opts: CardgraphOptions = { ...DEFAULT_CARDGRAPH_OPTIONS, ...options }
@@ -494,11 +498,24 @@ export function buildCardgraph(
   const cardGap = Math.max(opts.cardGap, demand.threadRows * THREAD_ROW_STEP + THREAD_ROW_CLEAR, demand.threadArrows ? THREAD_ARROW_CLEAR + 4 : 0)
   const framePaddingTop = Math.max(opts.framePaddingTop, demand.threadArrows ? THREAD_ARROW_CLEAR + 4 : 0)
   const framePaddingX = Math.max(opts.framePaddingX, demand.cardSideArrows ? THREAD_ARROW_CLEAR + 2 : 0)
+  // A frame's side edge is shared by every wire landing on it: too many arrows on a
+  // short frame and they crowd into each other. Give each port `PORT_SPACING` along
+  // the edge by growing the frame that needs it.
+  const frameExtra = new Map<number, number>()
+  for (const [key, count] of demand.framePorts) {
+    const frameIndex = Number(key.split(':')[0])
+    const frame = first.frames[frameIndex]
+    if (frame === undefined) continue
+    const needed = opts.frameHeaderHeight + opts.framePaddingTop + (count + 1) * PORT_SPACING + opts.framePaddingBottom
+    const extra = Math.max(0, needed - frame.bounds.height)
+    if (extra > 0) frameExtra.set(frameIndex, extra)
+  }
   if (columnGap === opts.columnGap && frameGap === opts.frameGap && cardGap === opts.cardGap
-    && framePaddingTop === opts.framePaddingTop && framePaddingX === opts.framePaddingX) return first
+    && framePaddingTop === opts.framePaddingTop && framePaddingX === opts.framePaddingX
+    && frameExtra.size === 0) return first
   return buildOne(payload, reports, {
     ...options, columnGap, frameGap, cardGap, framePaddingTop, framePaddingX,
-  }, { gutters: new Map(), roads: new Map(), threadRows: 0, threadArrows: false, cardSideArrows: false })
+  }, { gutters: new Map(), roads: new Map(), threadRows: 0, threadArrows: false, cardSideArrows: false, framePorts: new Map() }, frameExtra)
 }
 
 /**
@@ -507,6 +524,8 @@ export function buildCardgraph(
  * @param reports - the reports to plot.
  * @param options - geometry and tier overrides.
  * @param demand - receives how many lanes each channel used, for the growth pass.
+ * @param frameExtra - extra height per frame index, for frames whose edge must hold
+ *   more ports than their cards give it room for.
  * @returns the layout as measured against the options given.
  */
 function buildOne(
@@ -514,6 +533,7 @@ function buildOne(
   reports: readonly ReportFrontMatter[],
   options: Partial<CardgraphOptions>,
   demand: ChannelDemand,
+  frameExtra: ReadonlyMap<number, number> = new Map(),
 ): CardgraphLayout {
   const opts: CardgraphOptions = { ...DEFAULT_CARDGRAPH_OPTIONS, ...options }
   const size = opts.sizes[opts.lod]
@@ -592,11 +612,11 @@ function buildOne(
   // Frame geometry
   // -------------------------------------------------------------------------
   const columnX = (column: number): number => opts.margin + column * (frameWidth + opts.columnGap)
-  const frameHeight = (count: number): number => Math.max(
+  const frameHeight = (count: number, extra = 0): number => Math.max(
     opts.minFrameHeight,
     opts.frameHeaderHeight + opts.framePaddingTop + opts.framePaddingBottom
       + count * size.height + Math.max(0, count - 1) * opts.cardGap,
-  )
+  ) + extra
 
   // The counts have to land before the boxes do: a frame's height is a function of
   // how many cards it holds, and a height that disagreed with the stacking would
@@ -604,8 +624,8 @@ function buildOne(
   frames.forEach((frame, index) => { frame.cards = buckets[index]?.length ?? 0 })
 
   const cursor = new Map<number, number>()
-  const fixed: Rect[] = frames.map((frame) => {
-    const height = frameHeight(frame.cards)
+  const fixed: Rect[] = frames.map((frame, index) => {
+    const height = frameHeight(frame.cards, frameExtra.get(index) ?? 0)
     const y = cursor.get(frame.column) ?? opts.margin
     cursor.set(frame.column, y + height + opts.frameGap)
     return { x: columnX(frame.column), y, width: frameWidth, height }
@@ -797,6 +817,14 @@ function buildOne(
   }
 
   // -------------------------------------------------------------------------
+  // How many ports each frame edge must hold (for the wrapper's growth pass).
+  for (const edge of pending) {
+    for (const end of [edge.from, edge.to]) {
+      if (end.kind !== 'frame') continue
+      const key = `${end.index}:${end.side}`
+      demand.framePorts.set(key, (demand.framePorts.get(key) ?? 0) + 1)
+    }
+  }
   // Ports: spread every wire that shares an edge, in the order of the far end
   //
   // Frames and cards alike: a card's side is as shared as a frame's, and without
