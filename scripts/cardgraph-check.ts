@@ -19,6 +19,7 @@ const {
   buildCardgraph, lodFor, cardSize, CARDGRAPH_LODS,
   intersects, contains, grow, cullByBounds, hitTest, worldViewport, fitTransform,
   DEFAULT_CARDGRAPH_OPTIONS, MAX_FIT_ZOOM, MAX_ZOOM, MIN_ZOOM, ZOOM_STEP,
+  scopeInput,
 } = await import('../src/client/cardgraph-model.ts')
 
 /** One report digest, as the layout consumes it. */
@@ -490,6 +491,100 @@ check('the layout carries the title-bar height, so the painter need not know it'
   DEFAULT_CARDGRAPH_OPTIONS.frameHeaderHeight === 26 && layout.frameHeaderHeight === 26)
 check('the title-bar height is an option the layout reports',
   buildCardgraph(payload, plotted, { frameHeaderHeight: 40 }).frameHeaderHeight === 40)
+
+// ---------------------------------------------------------------------------
+// Drill-in scope
+//
+// The scope is what makes "enter a session" a change of input rather than a
+// change of transform, so everything here is about membership: which sessions
+// survive, which reports are admitted, and what the outside frame holds.
+// ---------------------------------------------------------------------------
+const drillReports = [
+  report('r-child-out', { from: 'session-child', to: ['session-peer'], created: at(20) }),
+  report('r-child-in', { from: 'session-child', to: ['session-grand'], created: at(21) }),
+  report('r-child-plain', { from: 'session-child', created: at(22) }),
+  report('r-inbound', { from: 'session-peer', to: ['session-child'], created: at(23) }),
+  report('r-root-unrelated', { from: 'session-root', created: at(24) }),
+  report('r-peer-unrelated', { from: 'session-peer', to: ['session-root'], created: at(25) }),
+]
+const scoped = scopeInput(payload, drillReports, 'session-child')
+const scopedIds = scoped.payload.sessions.map((session) => session.id)
+
+check('no scope plots the caller\'s input untouched', (() => {
+  const whole = scopeInput(payload, drillReports)
+  return whole.payload === payload && whole.reports === drillReports && whole.trail.length === 0
+})())
+check('scoping to the payload\'s own root is the same drawing as no scope', (() => {
+  const whole = scopeInput(payload, drillReports, 'session-root')
+  return whole.payload === payload && whole.trail.length === 0
+})())
+check('a scope keeps exactly the subtree', (() => {
+  // The independent derivation: walk parentId down from the scoped session.
+  const byParent = new Set(['session-child'])
+  for (const session of payload.sessions) {
+    if (session.parentId !== undefined && byParent.has(session.parentId)) byParent.add(session.id)
+  }
+  return scopedIds.join(',') === [...byParent].join(',')
+})(), scopedIds.join(','))
+check('a scope admits its own reports and its one-hop neighbours', (() => {
+  const ids = scoped.reports.map((front) => front.report).sort().join(',')
+  return ids === 'r-child-in,r-child-out,r-child-plain,r-inbound'
+})(), scoped.reports.map((front) => front.report).sort().join(','))
+check('a scope drops a report that neither starts in it nor touches it', (() => {
+  const ids = new Set(scoped.reports.map((front) => front.report))
+  return !ids.has('r-root-unrelated') && !ids.has('r-peer-unrelated')
+})())
+check('a leaf scope is one frame and its own cards', (() => {
+  const leaf = scopeInput(payload, [report('r-grand', { from: 'session-grand' })], 'session-grand')
+  const drawing = buildCardgraph(leaf.payload, leaf.reports, { lod: 'card' })
+  return leaf.payload.sessions.length === 1 && drawing.frames.length === 1
+    && !drawing.frames.some((frame) => frame.external)
+    && drawing.cards.length === 1 && drawing.edges.length === 0
+})())
+check('a scope keeps the payload\'s depths, so columns still come from depths', (() => {
+  const drawing = buildCardgraph(scoped.payload, scoped.reports, { lod: 'card' })
+  const depths = new Set(scopedIds.map((id) => payload.sessions.find((session) => session.id === id)?.depth))
+  return drawing.columns.length === depths.size + 1
+})())
+check('the outside frame holds a report authored outside the scope', (() => {
+  const drawing = buildCardgraph(scoped.payload, scoped.reports, { lod: 'card' })
+  const inbound = drawing.cards.find((card) => card.report === 'r-inbound')
+  return inbound !== undefined && drawing.frames[inbound.frame]?.external === true
+})())
+check('a scope with no wire leaving it draws no outside frame', (() => {
+  const inner = scopeInput(payload, [report('r-plain', { from: 'session-child' })], 'session-child')
+  const drawing = buildCardgraph(inner.payload, inner.reports, { lod: 'card' })
+  return drawing.frames.length === inner.payload.sessions.length
+    && drawing.frames.every((frame) => !frame.external)
+})())
+check('the trail runs root-down and stops above the payload root', (() => {
+  const deep = scopeInput(payload, drillReports, 'session-grand')
+  const shallow = scopeInput(payload, drillReports, 'session-child')
+  return deep.trail.join(',') === 'session-child,session-grand'
+    && shallow.trail.join(',') === 'session-child'
+})())
+check('an unknown root degrades to the whole tree', (() => {
+  const stale = scopeInput(payload, drillReports, 'session-gone')
+  return stale.payload === payload && stale.trail.length === 0
+})())
+check('a scope builds the same drawing twice', (() => {
+  const once = JSON.stringify(buildCardgraph(scoped.payload, scoped.reports, { lod: 'card' }))
+  return once === JSON.stringify(buildCardgraph(scoped.payload, scoped.reports, { lod: 'card' }))
+})())
+check('a fit inside a scope stays finite and on its own tier', (() => {
+  for (const width of [240, 375, 575, 800, 1200]) {
+    const fitted = fitTransform(scoped.payload, scoped.reports, width)
+    if (fitted === undefined) return false
+    if (lodFor(fitted.scale) !== fitted.lod) return false
+    if (fitted.scale < MIN_ZOOM || fitted.scale > MAX_FIT_ZOOM) return false
+    if (!Number.isFinite(fitted.offsetX) || !Number.isFinite(fitted.offsetY)) return false
+  }
+  return true
+})())
+check('a fit inside a scope is idempotent', (() => {
+  const once = JSON.stringify(fitTransform(scoped.payload, scoped.reports, 620))
+  return once === JSON.stringify(fitTransform(scoped.payload, scoped.reports, 620))
+})())
 
 let failed = 0
 for (const [label, ok, detail] of checks) {

@@ -874,3 +874,117 @@ export function fitTransform(
     offsetY: FIT_TOP,
   }
 }
+
+/** What one drill-in level hands to the layout: the whole tree, limited to a subtree. */
+export interface CardgraphScope {
+  /** The payload with the subtree's sessions; every other field is the caller's. */
+  readonly payload: TimelinePayload
+  /**
+   * The reports this scope may plot, in the caller's order.
+   *
+   * Membership is deliberately **one hop wide**: a report whose author is inside
+   * the subtree, or whose delivery or co-authorship touches it. The first half
+   * keeps the subtree's own work; the second is what lets the boundary frame show
+   * what came in from outside — a scope that admitted only authors would draw
+   * every outgoing delivery and silently omit every incoming one.
+   */
+  readonly reports: readonly ReportFrontMatter[]
+  /**
+   * Session ids from the payload's root (**exclusive**) down to this scope's
+   * session (**inclusive**), so an empty trail is the whole tree and scoping to
+   * the payload's own root is the same drawing as no scope at all.
+   */
+  readonly trail: readonly string[]
+}
+
+/**
+ * Limit the drawing's input to one session's subtree.
+ *
+ * Drilling in is a **change of scope**, not a zoom: the layout is rebuilt from the
+ * subtree alone, so the frames outside it stop existing rather than being panned
+ * out of sight, and their wires land on the shared outside frame instead of
+ * crossing the drawing. That is the same move a subgraph editor makes when it
+ * swaps the visible graph — the frames outside are not a frozen copy of what was
+ * on screen.
+ *
+ * The subtree is found two ways on purpose: as a contiguous DFS pre-order slice
+ * (the payload's own order, which is the order the list indents by) and by
+ * walking `parentId` down from the root. The two agreeing is an invariant of the
+ * payload; when they disagree the ancestry wins, because membership by ancestry
+ * cannot be wrong the way a slice can, and a payload built another way still
+ * drills correctly.
+ *
+ * Depth is carried over **unnormalized**: a column is a distinct depth value, so
+ * a subtree whose shallowest session sits at depth 2 still lays out from column
+ * zero, and `buildCardgraph` needs no second code path for scoped input.
+ * @param payload - the endpoint payload.
+ * @param reports - the reports the caller would plot unscoped.
+ * @param root - the session id to scope to; absent, empty or unknown means the
+ *   whole tree (a stale breadcrumb must degrade to "everything", never to an
+ *   empty drawing).
+ * @returns the scoped input, plus the trail a breadcrumb reads.
+ */
+export function scopeInput(
+  payload: TimelinePayload,
+  reports: readonly ReportFrontMatter[],
+  root?: string,
+): CardgraphScope {
+  if (root === undefined || root === '' || root === payload.root) return { payload, reports, trail: [] }
+  const sessions = payload.sessions
+  const index = sessions.findIndex((session) => session.id === root)
+  if (index < 0) return { payload, reports, trail: [] }
+  const depth = sessions[index]?.depth ?? 0
+
+  // Slice by the payload's own order...
+  let end = sessions.length
+  for (let cursor = index + 1; cursor < sessions.length; cursor++) {
+    if ((sessions[cursor]?.depth ?? 0) <= depth) {
+      end = cursor
+      break
+    }
+  }
+  const slice = sessions.slice(index, end)
+
+  // ...and by ancestry, independently.
+  const children = new Map<string, string[]>()
+  const parentOf = new Map<string, string | undefined>()
+  for (const session of sessions) {
+    parentOf.set(session.id, session.parentId)
+    if (session.parentId === undefined) continue
+    const bucket = children.get(session.parentId) ?? []
+    bucket.push(session.id)
+    children.set(session.parentId, bucket)
+  }
+  const inScope = new Set<string>([root])
+  const frontier = [root]
+  while (frontier.length > 0) {
+    const id = frontier.pop()
+    if (id === undefined) break
+    for (const child of children.get(id) ?? []) {
+      if (inScope.has(child)) continue
+      inScope.add(child)
+      frontier.push(child)
+    }
+  }
+  const sliced = new Set(slice.map((session) => session.id))
+  const agrees = sliced.size === inScope.size && [...inScope].every((id) => sliced.has(id))
+  // A payload whose order is not the pre-order this module assumes still drills:
+  // ancestry is the definition, and the slice is the fast path.
+  const kept = agrees ? slice : sessions.filter((session) => inScope.has(session.id))
+
+  // The trail stops before the payload's own root: scoping to it *is* the whole
+  // tree, so the breadcrumb starts one level above the root frame.
+  const up: string[] = []
+  let cursor: string | undefined = root
+  while (cursor !== undefined && cursor !== payload.root) {
+    up.push(cursor)
+    cursor = parentOf.get(cursor)
+  }
+  const trail = up.reverse()
+
+  const touches = (id: string | undefined): boolean => id !== undefined && inScope.has(id)
+  const admitted = reports.filter((front) => touches(front.from)
+    || front.to.some(touches) || front.cc.some(touches) || front.authors.some(touches))
+
+  return { payload: { ...payload, sessions: kept }, reports: admitted, trail }
+}
