@@ -341,13 +341,33 @@ check('a wire\'s box contains its gutter run',
 check('every gutter run is inside the drawing',
   layout.edges.every((edge) => verticalXs(edge).every((x) => x > 0 && x < layout.width)))
 
+// Adjacent cards in one frame: the thread is a short S in the 8px gap, not a detour
+// out to the gutter and back.
 const sameColumn = buildCardgraph(payload, [
   report('R-0090', { from: 'session-peer', created: at(5) }),
   report('R-0091', { from: 'session-peer', parent: 'R-0090', created: at(6) }),
 ])
 const loop = sameColumn.edges.find((edge) => edge.kind === 'thread')
-check('a thread inside one column loops out to the right',
-  loop !== undefined && inGutter(verticalXs(loop), 1, 'right'))
+check('a thread between adjacent cards stays in the gap between them', (() => {
+  if (loop === undefined) return false
+  const parent = sameColumn.cards.find((card) => card.report === 'R-0090')?.bounds
+  const child = sameColumn.cards.find((card) => card.report === 'R-0091')?.bounds
+  if (parent === undefined || child === undefined) return false
+  const xs = (loop.points ?? []).map((point) => point.x)
+  const ys = (loop.points ?? []).map((point) => point.y)
+  return xs.every((x) => x >= parent.x - 1 && x <= parent.x + parent.width + 1)
+    && ys.every((y) => y >= parent.y + parent.height - 1 && y <= child.y + 1)
+})())
+// Not adjacent: the two cards have a card between them, and the only way past it is
+// out through the column's gutter and back.
+const skipped = buildCardgraph(payload, [
+  report('R-0092', { from: 'session-peer', created: at(5) }),
+  report('R-0093', { from: 'session-peer', created: at(6) }),
+  report('R-0094', { from: 'session-peer', parent: 'R-0092', created: at(7) }),
+])
+const around = skipped.edges.find((edge) => edge.kind === 'thread')
+check('a thread past an intervening card goes out through the gutter',
+  around !== undefined && inGutter(verticalXs(around), 1, 'right'))
 
 const lastPayload = {
   ...payload,
@@ -724,6 +744,19 @@ check('lanes in a gutter follow the order of their ports', (() => {
     end.kind === 'frame'
       ? laneLayout.frames[end.index]?.column ?? 0
       : laneLayout.cards.find((card) => card.report === end.id)?.column ?? 0
+  /**
+   * A channel's identity: the same physical gutter is the right side of one column
+   * and the left side of the next, so both ends must land in one group.
+   */
+  const channelKey = (column: number, side: 'left' | 'right'): string => {
+    const box = laneLayout.columns[column]?.bounds
+    if (box === undefined) return `${column}:${side}`
+    const neighbour = side === 'right' ? laneLayout.columns[column + 1]?.bounds : laneLayout.columns[column - 1]?.bounds
+    const gap = side === 'right'
+      ? (neighbour === undefined ? 48 : neighbour.x - (box.x + box.width))
+      : (neighbour === undefined ? 48 : box.x - (neighbour.x + neighbour.width))
+    return String(Math.round(side === 'right' ? box.x + box.width + gap / 2 : box.x - gap / 2))
+  }
   const uses = new Map<string, { portY: number; x: number }[]>()
   for (const edge of laneLayout.edges) {
     const xs = verticalXs(edge)
@@ -733,19 +766,19 @@ check('lanes in a gutter follow the order of their ports', (() => {
       : (fromColumn < laneLayout.columns.length - 1 ? 'right' : 'left')
     const fromX = xs[0]
     if (fromX !== undefined) {
-      const key = `${fromColumn}:${fromSide}`
+      const key = channelKey(fromColumn, fromSide)
       const list = uses.get(key) ?? []
       list.push({ portY: edge.from.y, x: fromX })
       uses.set(key, list)
     }
     const toColumn = columnOfEnd(edge.to)
-    if (toColumn === fromColumn) continue
     const toSide = edge.to.side === 'left' || edge.to.side === 'right'
       ? edge.to.side
       : (toColumn < laneLayout.columns.length - 1 ? 'right' : 'left')
+    if (channelKey(toColumn, toSide) === channelKey(fromColumn, fromSide)) continue
     const toX = xs[xs.length - 1]
     if (toX !== undefined) {
-      const key = `${toColumn}:${toSide}`
+      const key = channelKey(toColumn, toSide)
       const list = uses.get(key) ?? []
       list.push({ portY: edge.to.y, x: toX })
       uses.set(key, list)

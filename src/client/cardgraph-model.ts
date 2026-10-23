@@ -924,16 +924,18 @@ function buildOne(
       side: horizontal(edge.from.side) ? edge.from.side : gutterSide(fromColumn),
       portY: edge.from.y,
     }
-    if (fromColumn === toColumn) return { from }
-    return {
-      from,
-      to: {
-        column: toColumn,
-        side: horizontal(edge.to.side) ? edge.to.side : gutterSide(toColumn),
-        portY: edge.to.y,
-      },
+    const to = {
+      column: toColumn,
+      side: horizontal(edge.to.side) ? edge.to.side : gutterSide(toColumn),
+      portY: edge.to.y,
     }
+    // The same physical gutter is the right side of one column and the left side of
+    // the next; that is one channel, so one lane, not two.
+    if (Math.abs(gutterAt(from.column, from.side) - gutterAt(to.column, to.side)) < 0.5) return { from }
+    return { from, to }
   }
+  /** A channel's identity: which physical gutter it is, by its centre line. */
+  const gutterKeyOf = (column: number, side: CardgraphSide): string => `gutter:${Math.round(gutterAt(column, side))}`
   /** The lane x each wire takes at each end, decided before any route is built. */
   const lanePlan = new Map<PendingEdge, { fromX?: number; toX?: number }>()
   {
@@ -943,7 +945,7 @@ function buildOne(
       for (const end of ['from', 'to'] as const) {
         const part = end === 'from' ? use.from : use.to
         if (part === undefined) continue
-        const key = `gutter:${part.column}:${part.side}`
+        const key = gutterKeyOf(part.column, part.side)
         const list = uses.get(key) ?? []
         list.push({ edge, end, portY: part.portY, column: part.column, side: part.side })
         uses.set(key, list)
@@ -999,6 +1001,19 @@ function buildOne(
     const { from, to } = edge
     const horizontal = (side: CardgraphSide): boolean => side === 'left' || side === 'right'
     const outward = (side: CardgraphSide): number => (side === 'right' || side === 'bottom' ? 1 : -1)
+    if (!horizontal(from.side) && !horizontal(to.side) && from.kind === 'card' && to.kind === 'card') {
+      const fromCard = cards[from.index]
+      const toCard = cards[to.index]
+      // Two adjacent cards in one frame: the gap between them is 8px of empty
+      // space, so the thread is a short S — down into the gap, across, down into the
+      // child. Taking it out to the column gutter and back would draw a long detour
+      // beside the cards, which reads as a wire that has nothing to do with them.
+      if (fromCard !== undefined && toCard !== undefined && fromCard.frame === toCard.frame
+        && Math.abs(toCard.slot - fromCard.slot) === 1) {
+        const middle = (from.y + to.y) / 2
+        return tidy([from, { x: from.x, y: middle }, { x: to.x, y: middle }, to])
+      }
+    }
     const start = horizontal(from.side)
       ? { x: from.x + outward(from.side) * STUB, y: from.y }
       : { x: from.x, y: from.y + outward(from.side) * STUB }
@@ -1007,12 +1022,19 @@ function buildOne(
       : { x: to.x, y: to.y + outward(to.side) * STUB }
     const fromColumn = columnOf(from)
     const toColumn = columnOf(to)
+    const fromSide = horizontal(from.side) ? from.side : gutterSide(fromColumn)
+    const toSide = horizontal(to.side) ? to.side : gutterSide(toColumn)
     const plan = lanePlan.get(edge)
-    const fromX = plan?.fromX ?? gutterAt(fromColumn, horizontal(from.side) ? from.side : gutterSide(fromColumn))
-    if (fromColumn === toColumn) {
+    const fromX = plan?.fromX ?? gutterAt(fromColumn, fromSide)
+    // The same physical gutter can be the *right* side of one column and the *left*
+    // side of the next; two lanes' worth of bookkeeping must not turn that into a
+    // crossing. When both ends face the same channel, the wire is a plain Z: no road
+    // (the nearest road is the top or bottom margin, which is why this used to draw a
+    // loop above the drawing).
+    if (Math.abs(gutterAt(fromColumn, fromSide) - gutterAt(toColumn, toSide)) < 0.5) {
       return tidy([from, start, { x: fromX, y: start.y }, { x: fromX, y: end.y }, end, to])
     }
-    const toX = plan?.toX ?? gutterAt(toColumn, horizontal(to.side) ? to.side : gutterSide(toColumn))
+    const toX = plan?.toX ?? gutterAt(toColumn, toSide)
     const middle = (start.y + end.y) / 2
     const road = roadCandidates
       .filter((candidate) => freeRoad(fromX, toX, candidate.y))
