@@ -111,27 +111,30 @@ const rowBox: Record<string, string | number> = {
  * The four wire kinds on the canvas already own a colour semantics, so the path
  * reuses it rather than inventing a second one: a delivery is the business blue,
  * participation and acknowledgement are the success green, addressing (cc, copy)
- * is the quiet caption grey and dashed, and state changes take the warning ink.
- * Every hop keeps its **dash** as well as its colour, because the path must stay
- * readable printed in grayscale or read by a colour-blind reader.
+ * is the quiet caption grey, and state changes take the warning ink.
+ *
+ * The dot's fill is the one non-colour cue: a **filled** dot is a hop that moved
+ * or changed the report, a **hollow** one is addressing, observation or checkout
+ * bookkeeping. Read in grayscale, the timeline still separates "what happened to
+ * it" from "who merely saw it".
  */
-const HOP_TONE: Readonly<Record<HopAction, { readonly colour: string; readonly dash: 'solid' | 'dashed' | 'dotted' }>> = {
-  authored: { colour: 'var(--dsw-alias-state-business-primary, #4176e6)', dash: 'solid' },
-  contributed: { colour: 'var(--dsw-alias-state-success-primary, #1f9254)', dash: 'solid' },
-  sent: { colour: 'var(--dsw-alias-state-business-primary, #4176e6)', dash: 'solid' },
-  delivered: { colour: 'var(--dsw-alias-state-success-primary, #1f9254)', dash: 'solid' },
-  cc: { colour: 'var(--dsw-alias-label-caption, #70757d)', dash: 'dashed' },
-  forwarded: { colour: 'var(--dsw-alias-state-business-primary, #4176e6)', dash: 'dashed' },
-  copied: { colour: 'var(--dsw-alias-label-caption, #70757d)', dash: 'dashed' },
-  read: { colour: 'var(--dsw-alias-label-caption, #70757d)', dash: 'dotted' },
-  acked: { colour: 'var(--dsw-alias-state-success-primary, #1f9254)', dash: 'solid' },
-  leased: { colour: 'var(--dsw-alias-label-tertiary, #9aa0a8)', dash: 'dotted' },
-  released: { colour: 'var(--dsw-alias-label-tertiary, #9aa0a8)', dash: 'dotted' },
-  reclaimed: { colour: 'var(--dsw-alias-label-tertiary, #9aa0a8)', dash: 'dotted' },
-  amended: { colour: 'var(--dsw-alias-state-warn-primary, #c77700)', dash: 'dotted' },
-  closed: { colour: 'var(--dsw-alias-label-caption, #70757d)', dash: 'solid' },
-  reopened: { colour: 'var(--dsw-alias-state-warn-primary, #c77700)', dash: 'solid' },
-  transferred: { colour: 'var(--dsw-alias-state-business-primary, #4176e6)', dash: 'dashed' },
+const HOP_TONE: Readonly<Record<HopAction, { readonly colour: string; readonly emphasis: 'filled' | 'hollow' }>> = {
+  authored: { colour: 'var(--dsw-alias-state-business-primary, #4176e6)', emphasis: 'filled' },
+  contributed: { colour: 'var(--dsw-alias-state-success-primary, #1f9254)', emphasis: 'filled' },
+  sent: { colour: 'var(--dsw-alias-state-business-primary, #4176e6)', emphasis: 'filled' },
+  delivered: { colour: 'var(--dsw-alias-state-success-primary, #1f9254)', emphasis: 'hollow' },
+  cc: { colour: 'var(--dsw-alias-label-caption, #70757d)', emphasis: 'hollow' },
+  forwarded: { colour: 'var(--dsw-alias-state-business-primary, #4176e6)', emphasis: 'filled' },
+  copied: { colour: 'var(--dsw-alias-label-caption, #70757d)', emphasis: 'hollow' },
+  read: { colour: 'var(--dsw-alias-label-caption, #70757d)', emphasis: 'hollow' },
+  acked: { colour: 'var(--dsw-alias-state-success-primary, #1f9254)', emphasis: 'filled' },
+  leased: { colour: 'var(--dsw-alias-label-tertiary, #9aa0a8)', emphasis: 'hollow' },
+  released: { colour: 'var(--dsw-alias-label-tertiary, #9aa0a8)', emphasis: 'hollow' },
+  reclaimed: { colour: 'var(--dsw-alias-label-tertiary, #9aa0a8)', emphasis: 'hollow' },
+  amended: { colour: 'var(--dsw-alias-state-warn-primary, #c77700)', emphasis: 'filled' },
+  closed: { colour: 'var(--dsw-alias-label-caption, #70757d)', emphasis: 'filled' },
+  reopened: { colour: 'var(--dsw-alias-state-warn-primary, #c77700)', emphasis: 'filled' },
+  transferred: { colour: 'var(--dsw-alias-state-business-primary, #4176e6)', emphasis: 'filled' },
 }
 
 /** The rail: a list, because the hops are a sequence and a screen reader should hear one. */
@@ -141,26 +144,29 @@ const rail: Record<string, string | number> = {
   padding: 0,
 }
 const railItem: Record<string, string | number> = { display: 'flex', gap: '8px', alignItems: 'stretch' }
-/** The dot-and-line column; `align-self: stretch` keeps the line reaching the next row. */
+/** The dot-and-line column; `stretch` keeps the connector reaching the next row. */
 const railSpine: Record<string, string | number> = {
   display: 'flex',
   flexDirection: 'column',
   alignItems: 'center',
   width: '12px',
   flex: '0 0 12px',
-  paddingTop: '5px',
+  paddingTop: '4px',
 }
+/** A GitHub-style marker: a token-coloured ring; filled when the hop moved something. */
 const railDot: Record<string, string | number> = {
-  width: '9px',
-  height: '9px',
+  width: '10px',
+  height: '10px',
   borderRadius: '50%',
   border: '2px solid currentColor',
+  background: 'var(--dsw-alias-bg-layer-2, #fff)',
   boxSizing: 'border-box',
   flex: '0 0 auto',
 }
+/** The connector is always the neutral border, whatever the hop's colour is. */
 const railSegment: Record<string, string | number> = {
   flex: '1 1 auto',
-  borderLeft: '2px solid currentColor',
+  borderLeft: '2px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.12))',
   margin: '2px 0 -2px',
   minHeight: '8px',
 }
@@ -178,34 +184,40 @@ const railHead: Record<string, string | number> = {
   gap: '6px',
   flexWrap: 'wrap',
 }
-/** The action label: the rail's colour as an outline, so the words stay ink-dark. */
+/** The action label: a tinted chip — the colour lives in the fill, not in a border. */
 const hopAction: Record<string, string | number> = {
-  border: '1px solid currentColor',
-  borderRadius: '999px',
+  borderRadius: '4px',
   padding: '0 6px',
   fontSize: 'var(--dsw-font-xxxs-11, 11px)',
-  lineHeight: '15px',
+  fontWeight: 500,
+  lineHeight: '16px',
   whiteSpace: 'nowrap',
 }
-const hopActor: Record<string, string | number> = {
-  fontFamily: 'var(--dsw-font-family-mono, ui-monospace, monospace)',
-  fontSize: 'var(--dsw-font-xxxs-11, 11px)',
-}
-const hopArrow: Record<string, string | number> = { color: 'var(--dsw-alias-label-caption, #999)', fontSize: '11px' }
-/** A recipient: the short id, quiet, one per chip. */
-const hopTarget: Record<string, string | number> = {
-  border: '1px solid var(--dsw-alias-border-l1, rgba(0,0,0,0.08))',
+/**
+ * One session reference.
+ *
+ * The actor and every recipient share this exact chip. That is the point: an
+ * arrow with plain text on one side and a boxed id on the other reads as if the
+ * two ends were different kinds of thing, and they are not — both are sessions.
+ */
+const hopRef: Record<string, string | number> = {
+  background: 'var(--dsw-alias-bg-layer-3, rgba(0,0,0,0.04))',
   borderRadius: '4px',
   padding: '0 5px',
   fontFamily: 'var(--dsw-font-family-mono, ui-monospace, monospace)',
   fontSize: 'var(--dsw-font-xxxs-11, 11px)',
+  lineHeight: '16px',
   whiteSpace: 'nowrap',
+}
+const hopArrow: Record<string, string | number> = {
+  color: 'var(--dsw-alias-label-tertiary, #aaa)',
+  fontSize: '11px',
+  margin: '0 -2px',
 }
 const hopNote: Record<string, string | number> = {
   ...time,
   whiteSpace: 'normal',
   overflowWrap: 'anywhere',
-  fontStyle: 'italic',
 }
 
 /** A docked panel's share: a column that owns its height and scrolls inside it. */
@@ -300,23 +312,30 @@ export function ReportDetailView(props: ReportDetailViewProps): ReactElement {
                         segment carries the hop's dash, so a passive hop (cc, read) reads
                         as interrupted even in grayscale. */}
                     <span aria-hidden="true" style={{ ...railSpine, color: tone.colour }}>
-                      <span style={{ ...railDot, backgroundColor: tone.dash === 'solid' ? tone.colour : 'transparent' }} />
-                      {last ? null : (
-                        <span style={{ ...railSegment, borderLeftStyle: tone.dash }} />
-                      )}
+                      <span style={{
+                        ...railDot,
+                        background: tone.emphasis === 'filled' ? tone.colour : 'var(--dsw-alias-bg-layer-2, #fff)',
+                      }} />
+                      {last ? null : <span style={railSegment} />}
                     </span>
                     <span style={railBody}>
                       <span style={railHead}>
-                        <span style={hopAction}>{t(HOP_LABEL[hop.action])}</span>
+                        <span style={{
+                          ...hopAction,
+                          color: tone.colour,
+                          background: `color-mix(in srgb, ${tone.colour} 13%, transparent)`,
+                        }}>
+                          {t(HOP_LABEL[hop.action])}
+                        </span>
                         <Tooltip label={idHint(hop.actor)} side="bottom" delayMs={400}>
-                          <strong style={hopActor}>{shortId(hop.actor)}</strong>
+                          <span style={hopRef}>{shortId(hop.actor)}</span>
                         </Tooltip>
                         {hop.to.length === 0 ? null : (
                           <>
                             <span aria-hidden="true" style={hopArrow}>→</span>
                             {hop.to.map((target) => (
                               <Tooltip key={target} label={idHint(target)} side="bottom" delayMs={400}>
-                                <span style={hopTarget}>{shortId(target)}</span>
+                                <span style={hopRef}>{shortId(target)}</span>
                               </Tooltip>
                             ))}
                           </>
