@@ -785,7 +785,11 @@ export function createCanvasPainter(canvas: HTMLCanvasElement): CardgraphPainter
     },
     paintPath(scene: PaintScene): void {
       const { layout, theme, viewport } = scene
-      const report = scene.focus?.report ?? scene.focus?.selected
+      // **Hover only.** The open report is the base layer's accent (its ring and
+      // its id ink); letting it fall back into the scrim here would dim the whole
+      // drawing for as long as a report stays open — and since a card click now
+      // opens the report in the list, that would be permanently.
+      const report = scene.focus?.report
       const frameIndex = scene.focus?.frame
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
       ctx.globalAlpha = 1

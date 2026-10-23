@@ -484,6 +484,13 @@ check('with nothing focused the interaction layer draws nothing', (() => {
   const blank = overlay()
   return blank.fills.length === 0 && blank.strokes.length === 0 && blank.texts.length === 0
 })())
+// A selection is not a hover: the base layer accents the open card, but the scrim
+// belongs to the pointer. Since a click now opens a report, a selected-only overlay
+// would dim the drawing for as long as that report stays open.
+check('a selection alone does not dim the drawing', (() => {
+  const selected = overlay({ focus: { selected: 'R-0001' } })
+  return selected.fills.length === 0 && selected.strokes.length === 0 && selected.texts.length === 0
+})())
 check('the base layer is drawn at full strength whatever is focused',
   paint({ focus: { report: 'R-0001' } }).recorder.strokes.every((stroke) => stroke.alpha === 1))
 check('focusing a report lays a scrim over the visible world', (() => {
