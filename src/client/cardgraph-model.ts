@@ -431,14 +431,20 @@ interface PendingEdge {
 /** Lane geometry: how far a lane keeps from the edge of its channel, and how far apart lanes are. */
 const LANE_CLEAR = 10
 const LANE_STEP = 9
-/** The stub each wire leaves its port with, and the clearance it keeps from a frame. */
+/** Stub each wire leaves its port with, clearance from a frame, and thread row spacing. */
 const STUB = 6
 const CLEAR = 4
+/** Vertical spacing between two thread runs leaving the same card. */
+const THREAD_ROW_STEP = 5
+/** The gap a card needs below it before its first thread run. */
+const THREAD_ROW_CLEAR = 6
 
 /** How many lanes one build actually used per channel. */
 interface ChannelDemand {
   readonly gutters: Map<string, number>
   readonly roads: Map<string, number>
+  /** The most thread runs any one card had to fan out. */
+  threadRows: number
 }
 
 /**
@@ -468,7 +474,7 @@ export function buildCardgraph(
   reports: readonly ReportFrontMatter[],
   options: Partial<CardgraphOptions> = {},
 ): CardgraphLayout {
-  const demand: ChannelDemand = { gutters: new Map(), roads: new Map() }
+  const demand: ChannelDemand = { gutters: new Map(), roads: new Map(), threadRows: 0 }
   const first = buildOne(payload, reports, options, demand)
   if (options.fitChannels !== true) return first
   const opts: CardgraphOptions = { ...DEFAULT_CARDGRAPH_OPTIONS, ...options }
@@ -476,8 +482,12 @@ export function buildCardgraph(
   const roadLanes = Math.max(0, ...demand.roads.values())
   const columnGap = Math.max(opts.columnGap, gutterLanes * LANE_STEP + 2 * LANE_CLEAR + 4)
   const frameGap = Math.max(opts.frameGap, roadLanes * LANE_STEP + 2 * CLEAR + 4)
-  if (columnGap === opts.columnGap && frameGap === opts.frameGap) return first
-  return buildOne(payload, reports, { ...options, columnGap, frameGap }, { gutters: new Map(), roads: new Map() })
+  // Inside a frame, a card that fans several threads out needs room *below it* for
+  // their horizontal runs: they leave the same bottom edge and all run to the
+  // gutter, so without distinct rows they draw on top of one another.
+  const cardGap = Math.max(opts.cardGap, demand.threadRows * THREAD_ROW_STEP + THREAD_ROW_CLEAR)
+  if (columnGap === opts.columnGap && frameGap === opts.frameGap && cardGap === opts.cardGap) return first
+  return buildOne(payload, reports, { ...options, columnGap, frameGap, cardGap }, { gutters: new Map(), roads: new Map(), threadRows: 0 })
 }
 
 /**
@@ -936,6 +946,10 @@ function buildOne(
   }
   /** A channel's identity: which physical gutter it is, by its centre line. */
   const gutterKeyOf = (column: number, side: CardgraphSide): string => `gutter:${Math.round(gutterAt(column, side))}`
+  /** The drawing's width, needed to keep lanes inside the canvas while the plan is built. */
+  const drawingWidth = columns.length === 0
+    ? 0
+    : opts.margin * 2 + columns.length * frameWidth + (columns.length - 1) * opts.columnGap
   /** The lane x each wire takes at each end, decided before any route is built. */
   const lanePlan = new Map<PendingEdge, { fromX?: number; toX?: number }>()
   {
@@ -959,7 +973,9 @@ function buildOne(
       list.sort((a, b) => a.portY - b.portY || (a.edge.report < b.edge.report ? -1 : a.edge.report > b.edge.report ? 1 : 0))
       list.forEach((use, index) => {
         const offset = ((index % capacity) - (capacity - 1) / 2) * LANE_STEP
-        const x = clampTo(band.base + offset, band.low, band.high)
+        // Keep the lane inside the canvas: in a single-column drawing the last column's
+        // gutter sits on the drawing's edge, and an unclamped lane would hang off it.
+        const x = clampTo(band.base + offset, Math.max(4, band.low), Math.min(drawingWidth - 4, band.high))
         const plan = lanePlan.get(use.edge) ?? {}
         if (use.end === 'from') plan.fromX = x
         else plan.toX = x
@@ -968,8 +984,36 @@ function buildOne(
       demand.gutters.set(key, list.length)
     }
   }
-  /** Drop repeated points and merge collinear ones, so a route has no stutter. */
-  const tidy = (input: { x: number; y: number }[]): { x: number; y: number }[] => {
+  /**
+   * Thread run rows.
+   *
+   * Threads leaving one card all start on its bottom edge and run to the same
+   * gutter, so without distinct rows they draw on top of each other inside the
+   * frame. Every channel-routed thread of a card gets a row, spaced
+   * `THREAD_ROW_STEP` down (and up on the target side); the wrapper grows the
+   * frame's `cardGap` to hold the rows it measured.
+   */
+  const threadRow = new Map<PendingEdge, number>()
+  {
+    const byParent = new Map<number, PendingEdge[]>()
+    for (const edge of pending) {
+      if (edge.kind !== 'thread') continue
+      const fromCard = edge.from.kind === 'card' ? cards[edge.from.index] : undefined
+      const toCard = edge.to.kind === 'card' ? cards[edge.to.index] : undefined
+      const adjacent = fromCard !== undefined && toCard !== undefined && fromCard.frame === toCard.frame
+        && Math.abs(toCard.slot - fromCard.slot) === 1
+      if (adjacent) continue
+      const list = byParent.get(edge.from.index) ?? []
+      list.push(edge)
+      byParent.set(edge.from.index, list)
+    }
+    for (const list of byParent.values()) {
+      list.sort((a, b) => a.to.y - b.to.y || (a.report < b.report ? -1 : 1))
+      list.forEach((edge, index) => threadRow.set(edge, index))
+      demand.threadRows = Math.max(demand.threadRows, list.length)
+    }
+  }
+  /** Drop repeated points and merge collinear ones, so a route has no stutter. */  const tidy = (input: { x: number; y: number }[]): { x: number; y: number }[] => {
     const out: { x: number; y: number }[] = []
     for (const point of input) {
       const last = out[out.length - 1]
@@ -1020,6 +1064,14 @@ function buildOne(
     const end = horizontal(to.side)
       ? { x: to.x + outward(to.side) * STUB, y: to.y }
       : { x: to.x, y: to.y + outward(to.side) * STUB }
+    // Threads leaving one card run to the same gutter: give each its own row below
+    // the parent (and above the child) so they do not stack on the card's edge.
+    const row = threadRow.get(edge)
+    if (row !== undefined) {
+      const offset = THREAD_ROW_CLEAR + row * THREAD_ROW_STEP
+      start.y = from.y + offset
+      end.y = to.y - offset
+    }
     const fromColumn = columnOf(from)
     const toColumn = columnOf(to)
     const fromSide = horizontal(from.side) ? from.side : gutterSide(fromColumn)

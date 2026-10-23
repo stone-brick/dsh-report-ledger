@@ -341,7 +341,30 @@ check('a wire\'s box contains its gutter run',
 check('every gutter run is inside the drawing',
   layout.edges.every((edge) => verticalXs(edge).every((x) => x > 0 && x < layout.width)))
 
-// Adjacent cards in one frame: the thread is a short S in the 8px gap, not a detour
+// A card with several channel threads gives each its own row below the card, and
+// the frame grows to hold those rows: otherwise the runs stack on the card's edge.
+const fanOut = buildCardgraph(payload, [
+  report('R-0200', { from: 'session-peer', created: at(5) }),
+  report('R-0201', { from: 'session-peer', created: at(6) }),
+  report('R-0202', { from: 'session-peer', parent: 'R-0200', created: at(7) }),
+  report('R-0203', { from: 'session-peer', parent: 'R-0200', created: at(8) }),
+], { fitChannels: true })
+check('two threads leaving one card get different rows', (() => {
+  const threads = fanOut.edges.filter((edge) => edge.kind === 'thread')
+  const rows = threads.map((edge) => (edge.points ?? [])[1]?.y ?? -1)
+  return threads.length === 2 && rows[0] !== rows[1]
+})())
+check('the frame is taller to hold those rows', (() => {
+  const base = buildCardgraph(payload, [
+    report('R-0200', { from: 'session-peer', created: at(5) }),
+    report('R-0201', { from: 'session-peer', created: at(6) }),
+    report('R-0202', { from: 'session-peer', parent: 'R-0200', created: at(7) }),
+    report('R-0203', { from: 'session-peer', parent: 'R-0200', created: at(8) }),
+  ])
+  const grown = fanOut.frames.find((frame) => frame.id === 'session-peer')?.bounds.height ?? 0
+  const plain = base.frames.find((frame) => frame.id === 'session-peer')?.bounds.height ?? 0
+  return grown > plain
+})())// Adjacent cards in one frame: the thread is a short S in the 8px gap, not a detour
 // out to the gutter and back.
 const sameColumn = buildCardgraph(payload, [
   report('R-0090', { from: 'session-peer', created: at(5) }),
