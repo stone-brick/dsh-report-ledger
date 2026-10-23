@@ -607,6 +607,23 @@ check('only the focused report\'s wires are drawn over the scrim', (() => {
 })())
 check('every drawn wire over the scrim is at full strength',
   wireStrokes(overlay({ focus: { report: 'R-0001' } })).every((stroke) => stroke.alpha === 1))
+// The hover reveal: the scrim fades in, the wires draw outward, and a traveller dot
+// rides the drawing front. Phase 1 is the settled hover every other check draws.
+check('a hover in progress fades its scrim in', (() => {
+  const recorder = overlay({ focus: { report: 'R-0001' }, hoverPhase: 0.4 })
+  const scrim = recorder.rects.find((rect) => rect.style === themed.canvas)
+  // 0.55 is SCRIM_ALPHA: the settled dim, scaled by the reveal phase.
+  return scrim !== undefined && Math.abs(scrim.alpha - 0.55 * 0.4) < 1e-9
+})())
+check('a hover in progress has not drawn its arrowheads yet', (() => {
+  const recorder = overlay({ focus: { report: 'R-0001' }, hoverPhase: 0.4 })
+  return recorder.fills.filter((fill) => fill.points === 3).length === 0
+})())
+check('a hover in progress carries a traveller dot at its front', (() => {
+  const recorder = overlay({ focus: { report: 'R-0001' }, hoverPhase: 0.4 })
+  return recorder.fills.some((fill) => fill.points === 2 && fill.style === themed.hover
+    && Math.abs(fill.box.width - 2.1) < 0.01)
+})())
 check('the focused card is redrawn in the pointer colour, with an uncoloured id', (() => {
   const recorder = overlay({ focus: { report: 'R-0001' } })
   return recorder.texts.some((text) => text.text === 'R-0001' && text.style === themed.text)

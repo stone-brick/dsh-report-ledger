@@ -386,6 +386,16 @@ export interface PaintScene {
   }
   /** Extra drawing units to keep beyond the viewport, so a pan is never blank. */
   readonly overscan?: number
+  /**
+   * How far a hovered path has revealed itself, 0 to 1.
+   *
+   * The view runs this from 0 to 1 when the pointer lands on a card: the scrim
+   * fades in and each wire draws outward from its source, with a small traveller
+   * dot at the drawing end. That is what makes "these wires belong to this card"
+   * read as one gesture instead of a jump cut. Omitted means 1 — a settled hover,
+   * which is what every static assertion and every fog-of-war path draws.
+   */
+  readonly hoverPhase?: number
 }
 
 /** A surface that can draw a scene. Canvas today; an SVG implementation is a swap. */
@@ -521,6 +531,43 @@ function wireLength(points: readonly { readonly x: number; readonly y: number }[
     total += Math.hypot(b.x - a.x, b.y - a.y)
   }
   return total
+}
+
+/**
+ * The part of a polyline up to `distance` from its start.
+ *
+ * Used for the hover reveal: the wire draws outward from the hovered card, so the
+ * direction reads before the line has arrived. The returned list ends on the cut,
+ * which is where the traveller dot sits.
+ * @param points - the wire's points.
+ * @param distance - how far along the polyline to draw.
+ * @returns the partial points (never empty), and the cut point.
+ */
+function cutPolyline(
+  points: readonly { readonly x: number; readonly y: number }[],
+  distance: number,
+): { points: { x: number; y: number }[]; cut?: { x: number; y: number } } {
+  const out: { x: number; y: number }[] = []
+  let remaining = Math.max(0, distance)
+  for (let index = 0; index < points.length; index++) {
+    const point = points[index]
+    if (point === undefined) continue
+    out.push({ x: point.x, y: point.y })
+    if (index === 0) continue
+    const previous = points[index - 1]
+    if (previous === undefined) continue
+    const length = Math.hypot(point.x - previous.x, point.y - previous.y)
+    if (remaining <= length) {
+      if (length === 0) continue
+      const t = remaining / length
+      const cut = { x: previous.x + (point.x - previous.x) * t, y: previous.y + (point.y - previous.y) * t }
+      out[out.length - 1] = cut
+      return { points: out, cut }
+    }
+    remaining -= length
+  }
+  const last = out[out.length - 1]
+  return { points: out, cut: last === undefined ? undefined : { x: last.x, y: last.y } }
 }
 
 /**
@@ -683,7 +730,7 @@ export function createCanvasPainter(canvas: HTMLCanvasElement): CardgraphPainter
    *   the focused path in the pointer colour while keeping each kind's dash and
    *   weight, so the four kinds stay readable without four hues under a scrim).
    */
-  const drawWire = (edge: CardgraphEdge, scene: PaintScene, alpha: number, colour?: string): void => {
+  const drawWire = (edge: CardgraphEdge, scene: PaintScene, alpha: number, colour?: string, phase = 1): void => {
     const { theme } = scene
     const style = wireStyle(edge.kind, theme)
     const stroke = colour ?? style.stroke
@@ -695,6 +742,10 @@ export function createCanvasPainter(canvas: HTMLCanvasElement): CardgraphPainter
     const angle = last === undefined || end === undefined ? 0 : Math.atan2(end.y - last.y, end.x - last.x)
     const tip = end === undefined ? undefined : { x: end.x - Math.cos(angle) * ARROW_GAP, y: end.y - Math.sin(angle) * ARROW_GAP }
     const stroked = tip === undefined || points.length === 0 ? points : [...points.slice(0, -1), tip]
+    // A hover in progress reveals the wire from its source; a settled hover (phase 1)
+    // is the whole wire, arrowhead and midpoint marker included.
+    const reveal = Math.min(1, Math.max(0, phase))
+    const shown = reveal >= 1 ? { points: stroked, cut: undefined } : cutPolyline(stroked, wireLength(stroked) * reveal)
     ctx.globalAlpha = alpha
     ctx.strokeStyle = stroke
     ctx.lineWidth = style.width
@@ -705,10 +756,10 @@ export function createCanvasPainter(canvas: HTMLCanvasElement): CardgraphPainter
     // enough to say "this is one wire" without changing where it goes. The radius
     // is clamped to half of each adjacent segment so a short stub stays straight.
     const corner = CORNER_RADIUS
-    stroked.forEach((point, index) => {
+    shown.points.forEach((point, index) => {
       if (index === 0) { ctx.moveTo(point.x, point.y); return }
-      const previous = stroked[index - 1]
-      const next = stroked[index + 1]
+      const previous = shown.points[index - 1]
+      const next = shown.points[index + 1]
       if (previous === undefined || next === undefined) { ctx.lineTo(point.x, point.y); return }
       const inLength = Math.hypot(point.x - previous.x, point.y - previous.y)
       const outLength = Math.hypot(next.x - point.x, next.y - point.y)
@@ -722,6 +773,25 @@ export function createCanvasPainter(canvas: HTMLCanvasElement): CardgraphPainter
       ctx.arcTo(point.x, point.y, next.x, next.y, radius)
     })
     ctx.stroke()
+
+    // Before the reveal is complete, a traveller dot stands at the cut: it is the
+    // "signal" running out along the wire, and it is what makes the hover read as a
+    // direction rather than as a line appearing.
+    if (reveal < 1) {
+      const at = shown.cut
+      if (at !== undefined) {
+        ctx.setLineDash([])
+        ctx.fillStyle = theme.canvas
+        ctx.beginPath()
+        ctx.arc(at.x, at.y, MARKER_HALO, 0, Math.PI * 2)
+        ctx.fill()
+        ctx.fillStyle = stroke
+        ctx.beginPath()
+        ctx.arc(at.x, at.y, MARKER_DOT, 0, Math.PI * 2)
+        ctx.fill()
+      }
+      return
+    }
 
     // The head turns with the last segment, so a wire that arrives through a
     // gutter points into the frame rather than along the way it came.
@@ -949,9 +1019,11 @@ export function createCanvasPainter(canvas: HTMLCanvasElement): CardgraphPainter
 
       // The scrim: one rectangle over the whole visible world. Everything else
       // recedes at once, and — unlike dimming shapes one by one — it costs the same
-      // whether the drawing has ten reports or three thousand.
+      // whether the drawing has ten reports or three thousand. It fades in with the
+      // reveal, so a hover is one gesture rather than a dim and a redraw.
       const world = worldViewport(viewport, 0)
-      ctx.globalAlpha = SCRIM_ALPHA
+      const reveal = Math.min(1, Math.max(0, scene.hoverPhase ?? 1))
+      ctx.globalAlpha = SCRIM_ALPHA * reveal
       ctx.fillStyle = theme.canvas
       ctx.fillRect(world.x, world.y, world.width, world.height)
       ctx.globalAlpha = 1
@@ -968,7 +1040,7 @@ export function createCanvasPainter(canvas: HTMLCanvasElement): CardgraphPainter
         if (touched.has(frame.index)) drawFrameOutline(frame, scene)
       }
       for (const edge of edges) {
-        if (intersects(edge.bounds, world)) drawWire(edge, scene, 1, theme.hover)
+        if (intersects(edge.bounds, world)) drawWire(edge, scene, 1, theme.hover, reveal)
       }
       for (const card of layout.cards) {
         if (card.report === report) drawCard(card, scene, 'hover')

@@ -52,6 +52,9 @@ import { shortId } from './timeline-model.ts'
  * why the zoom is exponential in the delta rather than one step per event.
  */
 const WHEEL_ZOOM_RATE = Math.log(ZOOM_STEP) / 100
+
+/** How long the hovered path takes to draw itself out, in milliseconds. */
+const HOVER_REVEAL_MS = 200
 /** How close to the box's edge a wheel-pan stops, in screen pixels. */
 const EDGE_MARGIN = 12
 /** Drawing units to keep beyond the viewport, so a pan does not reveal a blank band. */
@@ -222,6 +225,38 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
    */
   const bridged = useSyncExternalStore(selection.subscribe, selection.get)
   const pointed = hover.report ?? bridged.hover
+  /**
+   * How far the hovered path has revealed itself.
+   *
+   * A hover used to be a jump cut: scrim on, wires on. Now the scrim fades and the
+   * wires draw outward from the hovered card over {@link HOVER_REVEAL_MS}, which is
+   * what makes "these wires are one report's" read as a gesture. The animation is
+   * skipped for readers who asked for reduced motion, and it only runs while a
+   * hover exists — the settled state is a plain full-strength path.
+   */
+  const [hoverPhase, setHoverPhase] = useState(1)
+  const reducedMotion = useMemo(
+    () => globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true,
+    [],
+  )
+  useEffect(() => {
+    if (pointed === undefined || reducedMotion) {
+      setHoverPhase(1)
+      return
+    }
+    let frame = 0
+    const started = performance.now()
+    setHoverPhase(0)
+    const step = (now: number): void => {
+      const progress = Math.min(1, (now - started) / HOVER_REVEAL_MS)
+      // Ease out: the reveal front slows as it arrives, so the last stretch reads as
+      // "the line has reached the recipient" instead of stopping abruptly.
+      setHoverPhase(1 - (1 - progress) ** 2)
+      if (progress < 1) frame = requestAnimationFrame(step)
+    }
+    frame = requestAnimationFrame(step)
+    return () => cancelAnimationFrame(frame)
+  }, [pointed, hover.frame, reducedMotion])
   /** The session id the drawing is scoped to; absent means the whole tree. */
   const [drill, setDrill] = useState<string | undefined>(undefined)
   /**
@@ -419,7 +454,8 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
       ...(pointed === undefined ? {} : { report: pointed }),
       ...(hover.frame === undefined ? {} : { frame: hover.frame }),
     },
-  }), [baseScene, openReport, pointed, hover.frame])
+    hoverPhase,
+  }), [baseScene, openReport, pointed, hover.frame, hoverPhase])
 
   // ---------------------------------------------------------------------------
   // Painting

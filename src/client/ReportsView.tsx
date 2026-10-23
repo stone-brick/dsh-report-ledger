@@ -558,6 +558,9 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
                 // The canvas's hover lands here: same pointer, other surface. Both
                 // sides use the same light blue — the row a tint plus a blue edge,
                 // the canvas a blue ring and path — so one hover reads as one state.
+                // The transition matches the canvas's reveal so the two surfaces
+                // light up together instead of one snapping ahead of the other.
+                transition: 'background 160ms ease-out, box-shadow 160ms ease-out',
                 ...(bridged.hover === front.report
                   ? {
                       background: 'var(--dsw-alias-state-business-tertiary, #e4edfd)',
