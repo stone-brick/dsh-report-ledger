@@ -271,10 +271,23 @@ export function withTitles(nodes: readonly SessionNode[], titles: ReadonlyMap<st
  */
 export async function buildTimeline(deps: TimelineDeps, root: string): Promise<TimelinePayload> {
   const records = await deps.listSessionRecords()
-  const bare = buildSubtree(records, root)
+  // The caller usually names the session it is looking at, not the tree it belongs
+  // to. Resolve upward first: a delegated worker's reports point at its parent and
+  // siblings, and building only the worker's own subtree would leave every wire
+  // landing on the out-of-tree frame.
+  const byId = new Map(records.map((record) => [record.header.id, record]))
+  let treeRoot = root
+  const seen = new Set<string>()
+  while (byId.has(treeRoot) && !seen.has(treeRoot)) {
+    seen.add(treeRoot)
+    const parent = byId.get(treeRoot)?.header.parentSession
+    if (parent === undefined || parent === treeRoot || !byId.has(parent)) break
+    treeRoot = parent
+  }
+  const bare = buildSubtree(records, treeRoot)
   const titles = bare.length === 0 ? new Map<string, string>() : await deps.readTitles(bare.map((node) => node.id))
   const sessions = withTitles(bare, titles)
   const reports = reportsForSubtree(await deps.listReports(), sessions)
   const worktrees = await worktreeLanes(reports, deps.readHops)
-  return { root, generatedAt: Date.now(), sessions, reports, worktrees }
+  return { root: treeRoot, generatedAt: Date.now(), sessions, reports, worktrees }
 }

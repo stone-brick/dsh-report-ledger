@@ -355,6 +355,20 @@ check('500 keeps the shared JSON headers',
   && brokenCase.captured.headers['x-content-type-options'] === 'nosniff',
   JSON.stringify(brokenCase.captured.headers))
 
+// A delegated worker names its own session when it opens the view. The payload must
+// resolve upward to the tree's root, or the worker's reports — which point at its
+// parent and siblings — have no frames to land on and every wire ends up "tree out".
+// (Placed last: this build reads hops, and the hop-count assertions above must not
+// see those reads.)
+const fromChild = await buildTimeline({
+  listSessionRecords: async () => records,
+  readTitles: async () => new Map(),
+  listReports: async () => allReports,
+  readHops: async () => [],
+}, 'session-g')
+check('a child session resolves to the tree root', fromChild.root === 'session-root'
+  && fromChild.sessions.length === 4)
+
 let failed = 0
 for (const [label, ok, detail] of checks) {
   if (!ok) failed++
