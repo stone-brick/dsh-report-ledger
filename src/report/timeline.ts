@@ -284,10 +284,39 @@ export async function buildTimeline(deps: TimelineDeps, root: string): Promise<T
     if (parent === undefined || parent === treeRoot || !byId.has(parent)) break
     treeRoot = parent
   }
-  const bare = buildSubtree(records, treeRoot)
+  const base = buildSubtree(records, treeRoot)
+  const allReports = await deps.listReports()
+  // One hop out: a report in this tree often addresses sessions in *another* tree of
+  // the same workspace (a peer the user started separately). They are real sessions,
+  // so give them frames instead of piling every wire onto the out-of-tree frame; the
+  // reports that touch them come along, which is what makes the drawing coherent.
+  const known = new Set(base.map((node) => node.id))
+  const mentioned = new Set<string>()
+  for (const front of reportsForSubtree(allReports, base)) {
+    for (const id of [front.from, ...front.to, ...front.cc, ...front.authors]) {
+      if (id !== undefined && !known.has(id) && byId.has(id)) mentioned.add(id)
+    }
+  }
+  const extra: SessionNode[] = [...mentioned].sort().flatMap((id) => {
+    const record = byId.get(id)
+    if (record === undefined) return []
+    const header = record.header
+    return [{
+      id,
+      depth: header.delegationDepth ?? 0,
+      delegated: header.origin === 'subagent' || (header.delegationDepth ?? 0) > 0,
+      live: record.live === true,
+      ...(typeof header.parentSession === 'string' && header.parentSession !== ''
+        ? { parentId: header.parentSession }
+        : {}),
+      ...(typeof header.agentPreset === 'string' ? { agentPreset: header.agentPreset } : {}),
+      ...(typeof header.createdAt === 'number' ? { createdAt: header.createdAt } : {}),
+    }]
+  })
+  const bare = [...base, ...extra]
   const titles = bare.length === 0 ? new Map<string, string>() : await deps.readTitles(bare.map((node) => node.id))
   const sessions = withTitles(bare, titles)
-  const reports = reportsForSubtree(await deps.listReports(), sessions)
+  const reports = reportsForSubtree(allReports, sessions)
   const worktrees = await worktreeLanes(reports, deps.readHops)
   return { root: treeRoot, generatedAt: Date.now(), sessions, reports, worktrees }
 }

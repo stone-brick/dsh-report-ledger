@@ -368,6 +368,18 @@ const fromChild = await buildTimeline({
 }, 'session-g')
 check('a child session resolves to the tree root', fromChild.root === 'session-root'
   && fromChild.sessions.length === 4)
+// One hop out: a report may address a session that lives in another tree of the same
+// workspace. It is a real session, so it gets a frame instead of every wire piling
+// onto the out-of-tree frame.
+const widened = await buildTimeline({
+  listSessionRecords: async () => records,
+  readTitles: async () => new Map(),
+  listReports: async () => [...allReports, report('R-0099', {
+    from: 'session-root', to: ['session-other'], created: at(9), updated: at(9),
+  })],
+  readHops: async () => [],
+}, 'session-root')
+check('a report to a known outside session brings its frame', widened.sessions.some((node) => node.id === 'session-other'))
 
 let failed = 0
 for (const [label, ok, detail] of checks) {
