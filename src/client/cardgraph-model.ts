@@ -687,13 +687,20 @@ function buildOne(
   frames.forEach((frame, index) => { frame.cards = buckets[index]?.length ?? 0 })
 
   const cursor = new Map<number, number>()
+  /** A frame's own width: only as many card columns as it actually uses. */
+  const ownWidth = (index: number): number => Math.max(
+    opts.minFrameWidth,
+    (frameCardColumns[index] ?? 1) * size.width
+      + Math.max(0, (frameCardColumns[index] ?? 1) - 1) * (opts.cardColumnGap ?? CARD_COLUMN_GAP)
+      + opts.framePaddingX * 2,
+  )
   const fixed: Rect[] = frames.map((frame, index) => {
     // The height follows the tallest card column, not the card count: columns fill
     // side by side, so a frame with a fork is wider, not taller.
     const height = frameHeight(frameRowCount[index] ?? 0, frameExtra.get(index) ?? 0)
     const y = cursor.get(frame.column) ?? opts.margin
     cursor.set(frame.column, y + height + opts.frameGap)
-    return { x: columnX(frame.column), y, width: frameWidth, height }
+    return { x: columnX(frame.column), y, width: ownWidth(index), height }
   })
 
   const columnCount = depths.length + (needsExternal ? 1 : 0)
