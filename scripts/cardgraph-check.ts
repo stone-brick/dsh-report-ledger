@@ -931,6 +931,36 @@ check('two routed wires never run on top of each other', (() => {
   return true
 })())
 
+// Frame-internal crossing: a left-column card's right-going wire must cross the next
+// card column at a row gap, never through its cards (cards paint above the wires).
+const crossed = buildCardgraph(payload, [
+  report('R-0330', { from: 'session-root', to: ['session-peer'], created: at(1) }),
+  report('R-0331', { from: 'session-root', parent: 'R-0330', created: at(2) }),
+  report('R-0332', { from: 'session-root', parent: 'R-0330', created: at(3) }),
+])
+check('a right-going wire from the left column crosses at a row gap', (() => {
+  const edge = crossed.edges.find((candidate) => candidate.kind === 'to')
+  const leftmost = crossed.cards[0]?.bounds.x ?? 0
+  const rightColumn = crossed.cards.filter((card) => card.bounds.x > leftmost + 1)
+  if (edge === undefined || rightColumn.length === 0) return false
+  return segmentsOf(edge.points ?? []).every(({ a, b }) =>
+    rightColumn.every((card) => !crosses(a, b, card.bounds)))
+})())
+// Cross-column threads share the gap between the two card columns, and each gets its
+// own lane inside it.
+const gapFork = buildCardgraph(payload, [
+  report('R-0340', { from: 'session-root', created: at(1) }),
+  report('R-0341', { from: 'session-root', parent: 'R-0340', created: at(2) }),
+  report('R-0342', { from: 'session-root', parent: 'R-0340', created: at(3) }),
+])
+check('a cross-column thread runs down the gap between the columns', (() => {
+  const thread = gapFork.edges.find((candidate) => candidate.kind === 'thread' && candidate.to.id === 'R-0342')
+  const parent = gapFork.cards.find((card) => card.report === 'R-0340')?.bounds
+  const child = gapFork.cards.find((card) => card.report === 'R-0342')?.bounds
+  if (thread === undefined || parent === undefined || child === undefined) return false
+  const xs = verticalXs(thread)
+  return xs.length > 0 && xs.every((x) => x > parent.x + parent.width && x < child.x)
+})())
 let failed = 0
 for (const [label, ok, detail] of checks) {
   if (!ok) failed++
