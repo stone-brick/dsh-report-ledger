@@ -154,6 +154,8 @@ export const MAX_FIT_ZOOM = ZOOM_STEP
 
 /** Inset from a card's corner to the band its own ports may occupy. */
 const CARD_PORT_INSET = 10
+/** Horizontal gap between two card columns inside one frame. */
+const CARD_COLUMN_GAP = 12
 
 /** One session's frame. */
 export interface CardgraphFrame {
@@ -540,7 +542,6 @@ function buildOne(
 ): CardgraphLayout {
   const opts: CardgraphOptions = { ...DEFAULT_CARDGRAPH_OPTIONS, ...options }
   const size = opts.sizes[opts.lod]
-  const frameWidth = Math.max(opts.minFrameWidth, size.width + opts.framePaddingX * 2)
   /** Kinds the reader muted in the legend; they take no ports either. */
   const hidden = new Set(opts.hiddenKinds ?? [])
 
@@ -612,6 +613,47 @@ function buildOne(
   }
 
   // -------------------------------------------------------------------------
+  // Intra-frame columns
+  //
+  // Cards used to be one column per frame however the reports branched. Now the
+  // frame's own parent links decide: a parent's **first child** inherits the parent's
+  // column (a chain stays vertical), while the parent's **other children** share a
+  // column one to the right. Siblings from different parents may land in the same
+  // column — that is the "same level, same column" rule.
+  // -------------------------------------------------------------------------
+  const cardPlace = new Map<string, { column: number; row: number }>()
+  const frameRowCount: number[] = []
+  let maxCardColumns = 1
+  for (const bucket of buckets) {
+    const columnOfReport = new Map<string, number>()
+    const childrenSeen = new Map<string, number>()
+    const rows: number[] = []
+    for (const front of bucket) {
+      const parent = front.parent !== undefined && front.parent !== front.report
+        && bucket.some((candidate) => candidate.report === front.parent)
+        ? front.parent
+        : undefined
+      let column = 0
+      if (parent !== undefined) {
+        const parentColumn = columnOfReport.get(parent) ?? 0
+        const seen = childrenSeen.get(parent) ?? 0
+        childrenSeen.set(parent, seen + 1)
+        column = seen === 0 ? parentColumn : parentColumn + 1
+      }
+      columnOfReport.set(front.report, column)
+      const row = rows[column] ?? 0
+      rows[column] = row + 1
+      cardPlace.set(front.report, { column, row })
+      maxCardColumns = Math.max(maxCardColumns, column + 1)
+    }
+    frameRowCount.push(rows.reduce((max, count) => Math.max(max, count), 0))
+  }
+  const frameWidth = Math.max(
+    opts.minFrameWidth,
+    maxCardColumns * size.width + (maxCardColumns - 1) * CARD_COLUMN_GAP + opts.framePaddingX * 2,
+  )
+
+  // -------------------------------------------------------------------------
   // Frame geometry
   // -------------------------------------------------------------------------
   const columnX = (column: number): number => opts.margin + column * (frameWidth + opts.columnGap)
@@ -628,7 +670,9 @@ function buildOne(
 
   const cursor = new Map<number, number>()
   const fixed: Rect[] = frames.map((frame, index) => {
-    const height = frameHeight(frame.cards, frameExtra.get(index) ?? 0)
+    // The height follows the tallest card column, not the card count: columns fill
+    // side by side, so a frame with a fork is wider, not taller.
+    const height = frameHeight(frameRowCount[index] ?? 0, frameExtra.get(index) ?? 0)
     const y = cursor.get(frame.column) ?? opts.margin
     cursor.set(frame.column, y + height + opts.frameGap)
     return { x: columnX(frame.column), y, width: frameWidth, height }
@@ -673,7 +717,8 @@ function buildOne(
   const cardIndexOf = new Map<string, number>()
   layoutFrames.forEach((frame) => {
     const bucket = buckets[frame.index] ?? []
-    bucket.forEach((front, slot) => {
+    bucket.forEach((front) => {
+      const place = cardPlace.get(front.report) ?? { column: 0, row: 0 }
       cardIndexOf.set(front.report, cards.length)
       cards.push({
         report: front.report,
@@ -682,11 +727,11 @@ function buildOne(
         ...(front.task === undefined ? {} : { task: front.task }),
         frame: frame.index,
         column: frame.column,
-        slot,
+        slot: place.row,
         lod: opts.lod,
         bounds: {
-          x: frame.bounds.x + opts.framePaddingX,
-          y: frame.bounds.y + opts.frameHeaderHeight + opts.framePaddingTop + slot * (size.height + opts.cardGap),
+          x: frame.bounds.x + opts.framePaddingX + place.column * (size.width + CARD_COLUMN_GAP),
+          y: frame.bounds.y + opts.frameHeaderHeight + opts.framePaddingTop + place.row * (size.height + opts.cardGap),
           width: size.width,
           height: size.height,
         },

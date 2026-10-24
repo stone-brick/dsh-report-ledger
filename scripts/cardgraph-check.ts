@@ -292,6 +292,33 @@ const cardPorts = buildCardgraph(payload, [
 const leaving = cardPorts.edges.filter((edge) => edge.from.kind === 'card')
 check('two wires leaving one card get different ports', leaving.length === 2
   && leaving[0]?.from.y !== leaving[1]?.from.y, JSON.stringify(leaving.map((edge) => edge.from)))
+// Intra-frame columns: a chain stays in one column, a fork opens one more; the
+// parent's first child inherits its column, the other siblings share the next.
+check('a chain stays in one column and a fork opens the next', (() => {
+  const chain = buildCardgraph(payload, [
+    report('R-0300', { from: 'session-root', created: at(1) }),
+    report('R-0301', { from: 'session-root', parent: 'R-0300', created: at(2) }),
+    report('R-0302', { from: 'session-root', parent: 'R-0301', created: at(3) }),
+  ])
+  const chained = chain.cards.every((card) => card.bounds.x === chain.cards[0]?.bounds.x)
+  const fork = buildCardgraph(payload, [
+    report('R-0310', { from: 'session-root', created: at(1) }),
+    report('R-0311', { from: 'session-root', parent: 'R-0310', created: at(2) }),
+    report('R-0312', { from: 'session-root', parent: 'R-0310', created: at(3) }),
+    report('R-0313', { from: 'session-root', parent: 'R-0310', created: at(4) }),
+  ])
+  const byReport = new Map(fork.cards.map((card) => [card.report, card.bounds]))
+  const first = byReport.get('R-0310')
+  const spine = byReport.get('R-0311')
+  const branchA = byReport.get('R-0312')
+  const branchB = byReport.get('R-0313')
+  const step = (fork.cardWidth ?? 0) + 12
+  return chained
+    && first !== undefined && spine !== undefined && branchA !== undefined && branchB !== undefined
+    && spine.x === first.x
+    && branchA.x === first.x + step && branchB.x === first.x + step
+    && branchA.y !== branchB.y
+})())
 check('card ports stay inside the card edge', (() => {
   const card = cardPorts.cards.find((entry) => entry.report === 'R-0080')
   if (card === undefined) return false
