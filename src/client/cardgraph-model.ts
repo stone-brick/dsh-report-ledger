@@ -816,9 +816,17 @@ function buildOne(
         if (target < 0 || target === ownFrame) continue
         const targetColumn = frames[target]?.column ?? 0
         const sameColumn = targetColumn === ownColumn
-        const side = sameColumn
-          ? gutterSide(ownColumn)
-          : targetColumn > ownColumn ? 'right' : 'left'
+        // With several card columns inside this frame, the card's own column decides
+        // which side is free: the leftmost column leaves left, the rightmost leaves
+        // right, and a middle column has no free side (falls back to the target side).
+        // Choosing by target alone would send a left-column card's right-going wire
+        // straight under the next column's cards.
+        const inFrame = cardPlace.get(card.report)?.column ?? 0
+        const columnsInFrame = frameCardColumns[ownFrame] ?? 1
+        const free = columnsInFrame <= 1
+          ? (sameColumn ? gutterSide(ownColumn) : targetColumn > ownColumn ? 'right' : 'left')
+          : inFrame === 0 ? 'left' : inFrame + 1 >= columnsInFrame ? 'right' : (targetColumn > ownColumn ? 'right' : 'left')
+        const side = free
         pending.push({
           report: front.report,
           kind,
@@ -837,9 +845,11 @@ function buildOne(
       if (source < 0 || source === ownFrame) continue
       const sourceColumn = frames[source]?.column ?? 0
       const sameColumn = sourceColumn === ownColumn
-      const side = sameColumn
-        ? gutterSide(ownColumn)
-        : sourceColumn < ownColumn ? 'right' : 'left'
+      const inFrame = cardPlace.get(card.report)?.column ?? 0
+      const columnsInFrame = frameCardColumns[ownFrame] ?? 1
+      const side = columnsInFrame <= 1
+        ? (sameColumn ? gutterSide(ownColumn) : sourceColumn < ownColumn ? 'right' : 'left')
+        : inFrame === 0 ? 'left' : inFrame + 1 >= columnsInFrame ? 'right' : (sourceColumn < ownColumn ? 'right' : 'left')
       pending.push({
         report: front.report,
         kind: 'author',
