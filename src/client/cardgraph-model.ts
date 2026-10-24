@@ -1211,39 +1211,48 @@ function buildOne(
    * @returns the orthogonal route, ports included.
    */
   const route = (edge: PendingEdge): { x: number; y: number }[] => {
-    // Frame-internal crossing: a card in a non-last card column that leaves toward the
-    // right must cross the next column at one of **its row gaps**, not through its
-    // cards (cards are painted above the wires, so a line through them just vanishes).
-    // The route is spliced: port -> right into the inter-column gap -> up/down to the
-    // nearest row gap of the next column -> across it to the frame's right edge, and
-    // from that virtual frame port the normal channel route takes over.
-    if (edge.from.kind === 'card' && edge.from.side === 'right') {
-      const card = cards[edge.from.index]
-      const place = card === undefined ? undefined : cardPlace.get(card.report)
-      const columns = card === undefined ? 1 : (frameCardColumns[card.frame] ?? 1)
-      if (card !== undefined && place !== undefined && place.column + 1 < columns) {
-        const nextColumn = cards
+    // Frame-internal crossing: a card that leaves toward the right must cross each card
+  // column to its right at one of **that column's row gaps**. Cards paint above the
+  // wires, so a line through them vanishes; the walk crosses one column at a time and
+  // hands over to the channel router from a virtual frame port on the right edge.
+  if (edge.from.kind === 'card' && edge.from.side === 'right') {
+    const card = cards[edge.from.index]
+    const place = card === undefined ? undefined : cardPlace.get(card.report)
+    const columns = card === undefined ? 1 : (frameCardColumns[card.frame] ?? 1)
+    const frameBox = card === undefined ? undefined : fixed[card.frame]
+    if (card !== undefined && place !== undefined && frameBox !== undefined && place.column + 1 < columns) {
+      const gap = opts.cardColumnGap ?? CARD_COLUMN_GAP
+      const cardX = (column: number): number => frameBox.x + opts.framePaddingX + column * (size.width + gap)
+      const gapYFor = (column: number, wanted: number): number => {
+        const members = cards
           .filter((candidate) => candidate.frame === card.frame
-            && (cardPlace.get(candidate.report)?.column ?? 0) === place.column + 1)
+            && (cardPlace.get(candidate.report)?.column ?? 0) === column)
           .sort((left, right) => left.bounds.y - right.bounds.y)
-        const gaps: number[] = nextColumn.map((candidate) => candidate.bounds.y - opts.cardGap / 2)
-        const last = nextColumn[nextColumn.length - 1]
+        const gaps = members.map((candidate) => candidate.bounds.y - opts.cardGap / 2)
+        const last = members[members.length - 1]
         if (last !== undefined) gaps.push(last.bounds.y + last.bounds.height + opts.cardGap / 2)
-        const crossingY = gaps
-          .sort((left, right) => Math.abs(left - edge.from.y) - Math.abs(right - edge.from.y))[0]
-        const frameBox = fixed[card.frame]
-        if (crossingY !== undefined && frameBox !== undefined) {
-          const virtual: PendingEdge = {
-            ...edge,
-            from: { kind: 'frame', index: card.frame, side: 'right', x: frameBox.x + frameBox.width, y: crossingY },
-          }
-          lanePlan.set(virtual, lanePlan.get(edge) ?? {})
-          const inside = route(virtual)
-          const escapeX = card.bounds.x + card.bounds.width + STUB
-          return tidy([edge.from, { x: escapeX, y: edge.from.y }, { x: escapeX, y: crossingY }, ...inside])
-        }
+        if (gaps.length === 0) gaps.push(frameBox.y + opts.frameHeaderHeight + 8)
+        return gaps.sort((left, right) => Math.abs(left - wanted) - Math.abs(right - wanted))[0] ?? wanted
       }
+      const points: { x: number; y: number }[] = [edge.from, { x: card.bounds.x + card.bounds.width + STUB, y: edge.from.y }]
+      let x = card.bounds.x + card.bounds.width + STUB
+      let y = edge.from.y
+      for (let column = place.column + 1; column < columns; column++) {
+        const gapY = gapYFor(column, y)
+        points.push({ x, y: gapY })
+        const after = cardX(column) + size.width + gap / 2
+        points.push({ x: after, y: gapY })
+        x = after
+        y = gapY
+      }
+      const virtual: PendingEdge = {
+        ...edge,
+        from: { kind: 'frame', index: card.frame, side: 'right', x: frameBox.x + frameBox.width, y },
+      }
+      lanePlan.set(virtual, lanePlan.get(edge) ?? {})
+      return tidy([...points, ...route(virtual)])
     }
+  }
     const { from, to } = edge
     const horizontal = (side: CardgraphSide): boolean => side === 'left' || side === 'right'
     const outward = (side: CardgraphSide): number => (side === 'right' || side === 'bottom' ? 1 : -1)
