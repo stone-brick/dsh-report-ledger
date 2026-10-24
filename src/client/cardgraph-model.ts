@@ -630,6 +630,7 @@ function buildOne(
   // column — that is the "same level, same column" rule.
   // -------------------------------------------------------------------------
   const cardPlace = new Map<string, { column: number; row: number }>()
+  const frameCardColumns: number[] = []
   const frameRowCount: number[] = []
   let maxCardColumns = 1
   for (const bucket of buckets) {
@@ -655,6 +656,7 @@ function buildOne(
       maxCardColumns = Math.max(maxCardColumns, column + 1)
     }
     frameRowCount.push(rows.reduce((max, count) => Math.max(max, count), 0))
+    frameCardColumns.push(rows.length)
   }
   const frameWidth = Math.max(
     opts.minFrameWidth,
@@ -1270,7 +1272,14 @@ function buildOne(
       const card = cards[from.index]
       const frameBox = card === undefined ? undefined : fixed[card.frame]
       if (frameBox !== undefined) {
-        const laneX = frameBox.x + frameBox.width - LANE_CLEAR - lane * LANE_STEP
+        // The lane must sit in the gap **right of this column** when there is one:
+        // the frame's right padding is beyond the other columns, and a horizontal run
+        // to it would pass under their cards (cards are painted above the wires).
+        const sourceColumn = cardPlace.get(card.report)?.column ?? 0
+        const columnsInFrame = frameCardColumns[card.frame] ?? 1
+        const laneX = sourceColumn + 1 < columnsInFrame
+          ? card.bounds.x + card.bounds.width + 6 + Math.min(lane, 2) * 5
+          : frameBox.x + frameBox.width - LANE_CLEAR - lane * LANE_STEP
         return tidy([from, start, { x: laneX, y: start.y }, { x: laneX, y: end.y }, end, to])
       }
     }
