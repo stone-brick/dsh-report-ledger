@@ -961,6 +961,23 @@ check('a cross-column thread runs down the gap between the columns', (() => {
   const xs = verticalXs(thread)
   return xs.length > 0 && xs.every((x) => x > parent.x + parent.width && x < child.x)
 })())
+// Three card columns: the walk crosses each of them at its own row gap, so a
+// right-going wire never passes under a card in any of them.
+const threeColumns = buildCardgraph(payload, [
+  report('R-0350', { from: 'session-root', to: ['session-peer'], created: at(1) }),
+  report('R-0351', { from: 'session-root', parent: 'R-0350', created: at(2) }),
+  report('R-0352', { from: 'session-root', parent: 'R-0350', created: at(3) }),
+  report('R-0353', { from: 'session-root', parent: 'R-0352', created: at(4) }),
+  report('R-0354', { from: 'session-root', parent: 'R-0352', created: at(5) }),
+])
+check('a wire crossing three columns keeps to their row gaps', (() => {
+  const edge = threeColumns.edges.find((candidate) => candidate.kind === 'to')
+  const leftmost = threeColumns.cards[0]?.bounds.x ?? 0
+  const rightOf = threeColumns.cards.filter((card) => card.bounds.x > leftmost + 1)
+  if (edge === undefined || rightOf.length < 2) return false
+  return segmentsOf(edge.points ?? []).every(({ a, b }) =>
+    rightOf.every((card) => !crosses(a, b, card.bounds)))
+})())
 let failed = 0
 for (const [label, ok, detail] of checks) {
   if (!ok) failed++

@@ -918,7 +918,7 @@ DSH 的委派层拒绝非相邻通信，源码原话是"其他代理、祖先、
 
 ```sh
 pnpm build        # 产出 lib/index.js（host 半）与 lib/client.js（client 半）
-pnpm test         # 十六套确定性检查共 1111 项断言：账本内核与生命周期 135 + 提示词角色分流 64
+pnpm test         # 十六套确定性检查共 1112 项断言：账本内核与生命周期 135 + 提示词角色分流 64
                   # + 开发者名册 59 + 开发者归档 29 + 退役交接 25
                   # + 读路径（前缀读/签名缓存/单趟投递）31
                   # + 时间线装配与路由守卫 77
@@ -1004,7 +1004,7 @@ Node ≥ 20（见 `engines`）。
 提交的产物与源码是否一致，避免"改了 `src` 忘了 `build`"。
 
 ```sh
-pnpm check          # 完整门禁：类型检查 + 十六套可移植检查（1111 项）+ 工具面三套（162 项）
+pnpm check          # 完整门禁：类型检查 + 十六套可移植检查（1112 项）+ 工具面三套（162 项）
 pnpm build && pnpm pack   # lib/ 随源码提交，pack 前显式重建一次
 npm publish         # ⚠ 本机 registry 若是镜像站，必须显式 --registry=https://registry.npmjs.org
 ```
