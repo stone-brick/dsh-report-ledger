@@ -72,6 +72,7 @@ export interface CardgraphOptions {
    * fit: a caller that measured a box once wants a stable width, and a test that
    * pins a gap wants that gap. The view turns it on; nothing else has to.
    */
+  readonly cardColumnGap?: number
   readonly fitChannels?: boolean
   /** Zoom at or above which reports are drawn as full cards. */
   readonly cardMinZoom: number
@@ -130,6 +131,7 @@ export const DEFAULT_CARDGRAPH_OPTIONS: CardgraphOptions = {
   minFrameWidth: 180,
   minFrameHeight: 96,
   cardGap: 8,
+  cardColumnGap: 20,
   columnGap: 48,
   frameGap: 24,
   margin: 24,
@@ -156,6 +158,8 @@ export const MAX_FIT_ZOOM = ZOOM_STEP
 const CARD_PORT_INSET = 10
 /** Horizontal gap between two card columns inside one frame. */
 const CARD_COLUMN_GAP = 20
+/** Spacing between two cross-column lanes inside one inter-column gap. */
+const GAP_LANE_STEP = 6
 
 /** One session's frame. */
 export interface CardgraphFrame {
@@ -457,7 +461,9 @@ interface ChannelDemand {
   sameFrameLanes: number
   /** Whether some co-author wire lands on a card's side (same, horizontally). */
   cardSideArrows: boolean
-  /** How many ports each frame edge must hold: ${frameIndex}:. */
+  /** The most cross-column threads any inter-column gap had to hold. */
+  gapLanes: number
+  /** How many ports each frame edge must hold. */
   framePorts: Map<string, number>
 }
 
@@ -488,7 +494,7 @@ export function buildCardgraph(
   reports: readonly ReportFrontMatter[],
   options: Partial<CardgraphOptions> = {},
 ): CardgraphLayout {
-  const demand: ChannelDemand = { gutters: new Map(), roads: new Map(), threadRows: 0, threadArrows: false, cardSideArrows: false, sameFrameLanes: 0, framePorts: new Map() }
+  const demand: ChannelDemand = { gutters: new Map(), roads: new Map(), threadRows: 0, threadArrows: false, cardSideArrows: false, sameFrameLanes: 0, gapLanes: 0, framePorts: new Map() }
   const first = buildOne(payload, reports, options, demand)
   if (options.fitChannels !== true) return first
   const opts: CardgraphOptions = { ...DEFAULT_CARDGRAPH_OPTIONS, ...options }
@@ -501,6 +507,7 @@ export function buildCardgraph(
   // gutter, so without distinct rows they draw on top of one another.
   const cardGap = Math.max(opts.cardGap, demand.threadRows * THREAD_ROW_STEP + THREAD_ROW_CLEAR, demand.threadArrows ? THREAD_ARROW_CLEAR + 4 : 0)
   const framePaddingTop = Math.max(opts.framePaddingTop, demand.threadArrows ? THREAD_ARROW_CLEAR + 4 : 0)
+  const cardColumnGap = Math.max(opts.cardColumnGap ?? CARD_COLUMN_GAP, demand.gapLanes * GAP_LANE_STEP + 12)
   const framePaddingX = Math.max(opts.framePaddingX, demand.cardSideArrows ? THREAD_ARROW_CLEAR + 2 : 0,
     demand.sameFrameLanes > 0 ? LANE_CLEAR + demand.sameFrameLanes * LANE_STEP : 0)
   // A frame's side edge is shared by every wire landing on it: too many arrows on a
@@ -517,10 +524,11 @@ export function buildCardgraph(
   }
   if (columnGap === opts.columnGap && frameGap === opts.frameGap && cardGap === opts.cardGap
     && framePaddingTop === opts.framePaddingTop && framePaddingX === opts.framePaddingX
+    && cardColumnGap === opts.cardColumnGap
     && frameExtra.size === 0) return first
   return buildOne(payload, reports, {
-    ...options, columnGap, frameGap, cardGap, framePaddingTop, framePaddingX,
-  }, { gutters: new Map(), roads: new Map(), threadRows: 0, threadArrows: false, cardSideArrows: false, sameFrameLanes: 0, framePorts: new Map() }, frameExtra)
+    ...options, columnGap, frameGap, cardGap, framePaddingTop, framePaddingX, cardColumnGap,
+  }, { gutters: new Map(), roads: new Map(), threadRows: 0, threadArrows: false, cardSideArrows: false, sameFrameLanes: 0, gapLanes: 0, framePorts: new Map() }, frameExtra)
 }
 
 /**
@@ -650,7 +658,7 @@ function buildOne(
   }
   const frameWidth = Math.max(
     opts.minFrameWidth,
-    maxCardColumns * size.width + (maxCardColumns - 1) * CARD_COLUMN_GAP + opts.framePaddingX * 2,
+    maxCardColumns * size.width + (maxCardColumns - 1) * (opts.cardColumnGap ?? CARD_COLUMN_GAP) + opts.framePaddingX * 2,
   )
 
   // -------------------------------------------------------------------------
@@ -1129,6 +1137,7 @@ function buildOne(
     for (const list of byGap.values()) {
       list.sort((a, b) => a.from.y - b.from.y || (a.report < b.report ? -1 : 1))
       list.forEach((edge, index) => crossGapLane.set(edge, index))
+      demand.gapLanes = Math.max(demand.gapLanes, list.length)
     }
   }
   const sameFrameLane = new Map<PendingEdge, number>()
@@ -1246,7 +1255,7 @@ function buildOne(
         // One lane per thread inside the gap: without this every thread between
         // the same two columns runs down the same x and they read as one bundle.
         const lane = crossGapLane.get(edge) ?? 0
-        const inset = Math.min(CARD_COLUMN_GAP - 4, 6 + lane * 4)
+        const inset = Math.min((opts.cardColumnGap ?? CARD_COLUMN_GAP) - 4, 6 + lane * GAP_LANE_STEP)
         const gapX = target.column > source.column
           ? fromCard.bounds.x + fromCard.bounds.width + inset
           : fromCard.bounds.x - inset
