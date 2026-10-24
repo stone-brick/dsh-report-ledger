@@ -530,7 +530,7 @@ const MARKER_DOT = 2.1
 /** How many travelling dots ride one hovered wire at once. */
 const HOVER_DOT_SPACING = 90
 /** The traveller's speed along the wire, in drawing units per millisecond. */
-const HOVER_FLOW_SPEED = 0.045
+const HOVER_FLOW_SPEED = 0.0675
 
 /** Length of a polyline. */
 function wireLength(points: readonly { readonly x: number; readonly y: number }[]): number {
