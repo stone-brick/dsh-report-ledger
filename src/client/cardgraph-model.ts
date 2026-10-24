@@ -1109,6 +1109,28 @@ function buildOne(
    * comes back into the child's top. The strip holds one lane per such thread, and the
    * wrapper widens `framePaddingX` to fit them.
    */
+  /** Lane index of each cross-column thread inside its inter-column gap. */
+  const crossGapLane = new Map<PendingEdge, number>()
+  {
+    const byGap = new Map<string, PendingEdge[]>()
+    for (const edge of pending) {
+      if (edge.kind !== 'thread') continue
+      const fromCard = edge.from.kind === 'card' ? cards[edge.from.index] : undefined
+      const toCard = edge.to.kind === 'card' ? cards[edge.to.index] : undefined
+      if (fromCard === undefined || toCard === undefined || fromCard.frame !== toCard.frame) continue
+      const a = cardPlace.get(fromCard.report)?.column ?? 0
+      const b = cardPlace.get(toCard.report)?.column ?? 0
+      if (a === b) continue
+      const key = 'gap:' + fromCard.frame + ':' + Math.min(a, b)
+      const list = byGap.get(key) ?? []
+      list.push(edge)
+      byGap.set(key, list)
+    }
+    for (const list of byGap.values()) {
+      list.sort((a, b) => a.from.y - b.from.y || (a.report < b.report ? -1 : 1))
+      list.forEach((edge, index) => crossGapLane.set(edge, index))
+    }
+  }
   const sameFrameLane = new Map<PendingEdge, number>()
   {
     const byFrame = new Map<number, PendingEdge[]>()
@@ -1221,9 +1243,13 @@ function buildOne(
       const target = toCard === undefined ? undefined : cardPlace.get(toCard.report)
       if (fromCard !== undefined && toCard !== undefined && fromCard.frame === toCard.frame
         && source !== undefined && target !== undefined && source.column !== target.column) {
+        // One lane per thread inside the gap: without this every thread between
+        // the same two columns runs down the same x and they read as one bundle.
+        const lane = crossGapLane.get(edge) ?? 0
+        const inset = Math.min(CARD_COLUMN_GAP - 4, 6 + lane * 4)
         const gapX = target.column > source.column
-          ? fromCard.bounds.x + fromCard.bounds.width + CARD_COLUMN_GAP / 2
-          : fromCard.bounds.x - CARD_COLUMN_GAP / 2
+          ? fromCard.bounds.x + fromCard.bounds.width + inset
+          : fromCard.bounds.x - inset
         return tidy([from, start, { x: gapX, y: start.y }, { x: gapX, y: end.y }, end, to])
       }
     }
