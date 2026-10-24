@@ -507,7 +507,15 @@ export function buildCardgraph(
   // gutter, so without distinct rows they draw on top of one another.
   const cardGap = Math.max(opts.cardGap, demand.threadRows * THREAD_ROW_STEP + THREAD_ROW_CLEAR, demand.threadArrows ? THREAD_ARROW_CLEAR + 4 : 0)
   const framePaddingTop = Math.max(opts.framePaddingTop, demand.threadArrows ? THREAD_ARROW_CLEAR + 4 : 0)
-  const cardColumnGap = Math.max(opts.cardColumnGap ?? CARD_COLUMN_GAP, demand.gapLanes * GAP_LANE_STEP + 12)
+  // The gap between card columns carries two families of lanes: cross-column threads
+  // and same-column threads whose spine lane sits in that gap. Both need room, or the
+  // right column has to be pushed right to give the vertical bundle its own strip.
+  const laneBand = demand.sameFrameLanes > 0 ? 6 + demand.sameFrameLanes * 5 + 6 : 0
+  const cardColumnGap = Math.max(
+    opts.cardColumnGap ?? CARD_COLUMN_GAP,
+    demand.gapLanes * GAP_LANE_STEP + 12,
+    laneBand,
+  )
   const framePaddingX = Math.max(opts.framePaddingX, demand.cardSideArrows ? THREAD_ARROW_CLEAR + 2 : 0,
     demand.sameFrameLanes > 0 ? LANE_CLEAR + demand.sameFrameLanes * LANE_STEP : 0)
   // A frame's side edge is shared by every wire landing on it: too many arrows on a
