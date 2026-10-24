@@ -748,7 +748,7 @@ function buildOne(
         slot: place.row,
         lod: opts.lod,
         bounds: {
-          x: frame.bounds.x + opts.framePaddingX + place.column * (size.width + CARD_COLUMN_GAP),
+          x: frame.bounds.x + opts.framePaddingX + place.column * (size.width + (opts.cardColumnGap ?? CARD_COLUMN_GAP)),
           y: frame.bounds.y + opts.frameHeaderHeight + opts.framePaddingTop + place.row * (size.height + opts.cardGap),
           width: size.width,
           height: size.height,
