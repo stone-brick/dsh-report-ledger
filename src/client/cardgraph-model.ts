@@ -1211,6 +1211,39 @@ function buildOne(
    * @returns the orthogonal route, ports included.
    */
   const route = (edge: PendingEdge): { x: number; y: number }[] => {
+    // Frame-internal crossing: a card in a non-last card column that leaves toward the
+    // right must cross the next column at one of **its row gaps**, not through its
+    // cards (cards are painted above the wires, so a line through them just vanishes).
+    // The route is spliced: port -> right into the inter-column gap -> up/down to the
+    // nearest row gap of the next column -> across it to the frame's right edge, and
+    // from that virtual frame port the normal channel route takes over.
+    if (edge.from.kind === 'card' && edge.from.side === 'right') {
+      const card = cards[edge.from.index]
+      const place = card === undefined ? undefined : cardPlace.get(card.report)
+      const columns = card === undefined ? 1 : (frameCardColumns[card.frame] ?? 1)
+      if (card !== undefined && place !== undefined && place.column + 1 < columns) {
+        const nextColumn = cards
+          .filter((candidate) => candidate.frame === card.frame
+            && (cardPlace.get(candidate.report)?.column ?? 0) === place.column + 1)
+          .sort((left, right) => left.bounds.y - right.bounds.y)
+        const gaps: number[] = nextColumn.map((candidate) => candidate.bounds.y - opts.cardGap / 2)
+        const last = nextColumn[nextColumn.length - 1]
+        if (last !== undefined) gaps.push(last.bounds.y + last.bounds.height + opts.cardGap / 2)
+        const crossingY = gaps
+          .sort((left, right) => Math.abs(left - edge.from.y) - Math.abs(right - edge.from.y))[0]
+        const frameBox = fixed[card.frame]
+        if (crossingY !== undefined && frameBox !== undefined) {
+          const virtual: PendingEdge = {
+            ...edge,
+            from: { kind: 'frame', index: card.frame, side: 'right', x: frameBox.x + frameBox.width, y: crossingY },
+          }
+          lanePlan.set(virtual, lanePlan.get(edge) ?? {})
+          const inside = route(virtual)
+          const escapeX = card.bounds.x + card.bounds.width + STUB
+          return tidy([edge.from, { x: escapeX, y: edge.from.y }, { x: escapeX, y: crossingY }, ...inside])
+        }
+      }
+    }
     const { from, to } = edge
     const horizontal = (side: CardgraphSide): boolean => side === 'left' || side === 'right'
     const outward = (side: CardgraphSide): number => (side === 'right' || side === 'bottom' ? 1 : -1)
