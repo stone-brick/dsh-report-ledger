@@ -55,8 +55,6 @@ const WHEEL_ZOOM_RATE = Math.log(ZOOM_STEP) / 100
 
 /** How long the hovered path takes to draw itself out, in milliseconds. */
 const HOVER_REVEAL_MS = 200
-/** One loop of the travelling comet on a hovered path, in milliseconds. */
-const HOVER_FLOW_MS = 3300
 /** How close to the box's edge a wheel-pan stops, in screen pixels. */
 const EDGE_MARGIN = 12
 /** Drawing units to keep beyond the viewport, so a pan does not reveal a blank band. */
@@ -233,7 +231,7 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
    * `phase` is the entrance: the scrim fades and the wires draw outward once, over
    * {@link HOVER_REVEAL_MS}. `flow` is the **ongoing** part: while the pointer stays
    * on the card, a comet keeps running out along every wire, looping every
-   * {@link HOVER_FLOW_MS}, so the relation stays visibly alive instead of flashing
+   * {@link HOVER_FLOW_SPEED}, so the relation stays visibly alive instead of flashing
    * once. Both are plain numbers handed to the painter, which keeps the drawing
    * deterministic: static assertions draw phase 1 with no flow.
    */
@@ -257,7 +255,10 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
         // Ease out: the reveal front slows as it arrives, so the last stretch reads
         // as "the line has reached the recipient" instead of stopping abruptly.
         phase: 1 - (1 - entrance) ** 2,
-        flow: (elapsed % HOVER_FLOW_MS) / HOVER_FLOW_MS,
+        // Distance per millisecond, not a fraction of the wire: the dot's speed is
+        // the same on a short route and a long one, so a long wire simply takes
+        // longer to traverse instead of moving faster.
+        flow: elapsed,
       })
       frame = requestAnimationFrame(step)
     }

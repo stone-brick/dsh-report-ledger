@@ -655,8 +655,8 @@ check('the dots are spaced by wire length, not one per wire', (() => {
   return edges.length > 0 && expected >= 2 && dots >= expected
 })())
 check('the comet moves along the path as the flow advances', (() => {
-  const early = cometHead(overlay({ focus: { report: 'R-0001' }, hoverPhase: 1, hoverFlow: 0.2 }))
-  const late = cometHead(overlay({ focus: { report: 'R-0001' }, hoverPhase: 1, hoverFlow: 0.8 }))
+  const early = cometHead(overlay({ focus: { report: 'R-0001' }, hoverPhase: 1, hoverFlow: 300 }))
+  const late = cometHead(overlay({ focus: { report: 'R-0001' }, hoverPhase: 1, hoverFlow: 5000 }))
   if (early === undefined || late === undefined) return false
   return Math.abs(early.x - late.x) + Math.abs(early.y - late.y) > 8
 })())

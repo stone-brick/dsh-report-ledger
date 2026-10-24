@@ -529,6 +529,8 @@ const MARKER_HALO = 3.4
 const MARKER_DOT = 2.1
 /** How many travelling dots ride one hovered wire at once. */
 const HOVER_DOT_SPACING = 90
+/** The traveller's speed along the wire, in drawing units per millisecond. */
+const HOVER_FLOW_SPEED = 0.045
 
 /** Length of a polyline. */
 function wireLength(points: readonly { readonly x: number; readonly y: number }[]): number {
@@ -750,12 +752,15 @@ export function createCanvasPainter(canvas: HTMLCanvasElement): CardgraphPainter
     if (total < 12) return
     // Density is per unit of wire, not per wire: a long route gets more dots than a
     // short one, so the stream looks equally dense wherever the eye lands. The
-    // count comes from the wire's own length, which is why the layout measures it
-    // first and the painter only reads it.
+    // **speed** is per unit of time, not per wire: the head advances
+    // HOVER_FLOW_SPEED units per millisecond regardless of how long the route is,
+    // so a long wire takes longer to cross instead of moving faster.
     const count = Math.min(8, Math.max(1, Math.round(total / HOVER_DOT_SPACING)))
+    const spacing = total / count
+    const travelled = Math.max(0, flow) * HOVER_FLOW_SPEED
     for (let index = 0; index < count; index++) {
-      const position = (flow + index / count) % 1
-      const at = cutPolyline(points, total * position).cut
+      const distance = (travelled + index * spacing) % total
+      const at = cutPolyline(points, distance).cut
       if (at === undefined) continue
       ctx.globalAlpha = 1
       ctx.setLineDash([])
