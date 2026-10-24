@@ -312,7 +312,7 @@ check('a chain stays in one column and a fork opens the next', (() => {
   const spine = byReport.get('R-0311')
   const branchA = byReport.get('R-0312')
   const branchB = byReport.get('R-0313')
-  const step = (fork.cardWidth ?? 0) + 12
+  const step = (fork.cardWidth ?? 0) + 20
   return chained
     && first !== undefined && spine !== undefined && branchA !== undefined && branchB !== undefined
     && spine.x === first.x

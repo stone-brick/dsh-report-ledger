@@ -155,7 +155,7 @@ export const MAX_FIT_ZOOM = ZOOM_STEP
 /** Inset from a card's corner to the band its own ports may occupy. */
 const CARD_PORT_INSET = 10
 /** Horizontal gap between two card columns inside one frame. */
-const CARD_COLUMN_GAP = 12
+const CARD_COLUMN_GAP = 20
 
 /** One session's frame. */
 export interface CardgraphFrame {
