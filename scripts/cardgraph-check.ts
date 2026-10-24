@@ -430,8 +430,16 @@ const skipped = buildCardgraph(payload, [
   report('R-0094', { from: 'session-peer', parent: 'R-0092', created: at(7) }),
 ])
 const around = skipped.edges.find((edge) => edge.kind === 'thread')
-check('a thread past an intervening card goes out through the gutter',
-  around !== undefined && inGutter(verticalXs(around), 1, 'right'))
+// Past an intervening card the thread still stays inside the frame: it runs down the
+// inner padding (the strip right of the cards), never out through the frame border.
+check('a thread past an intervening card runs inside the frame padding', (() => {
+  if (around === undefined) return false
+  const parent = skipped.cards.find((card) => card.report === 'R-0092')?.bounds
+  const frameBox = skipped.frames.find((candidate) => candidate.id === 'session-peer')?.bounds
+  if (parent === undefined || frameBox === undefined) return false
+  return verticalXs(around).length > 0
+    && verticalXs(around).every((x) => x > parent.x + parent.width && x <= frameBox.x + frameBox.width)
+})())
 
 const lastPayload = {
   ...payload,

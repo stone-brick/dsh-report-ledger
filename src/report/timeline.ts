@@ -297,13 +297,14 @@ export async function buildTimeline(deps: TimelineDeps, root: string): Promise<T
       if (id !== undefined && !known.has(id) && byId.has(id)) mentioned.add(id)
     }
   }
+  const baseDepth = base.reduce((max, node) => Math.max(max, node.depth), 0)
   const extra: SessionNode[] = [...mentioned].sort().flatMap((id) => {
     const record = byId.get(id)
     if (record === undefined) return []
     const header = record.header
     return [{
       id,
-      depth: header.delegationDepth ?? 0,
+      depth: baseDepth + 1,
       delegated: header.origin === 'subagent' || (header.delegationDepth ?? 0) > 0,
       live: record.live === true,
       ...(typeof header.parentSession === 'string' && header.parentSession !== ''

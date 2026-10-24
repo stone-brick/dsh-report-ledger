@@ -451,6 +451,8 @@ interface ChannelDemand {
   threadRows: number
   /** Whether some thread lands on a card's top edge (so the arrow needs room). */
   threadArrows: boolean
+  /** The most same-frame thread lanes any one frame needed. */
+  sameFrameLanes: number
   /** Whether some co-author wire lands on a card's side (same, horizontally). */
   cardSideArrows: boolean
   /** How many ports each frame edge must hold: ${frameIndex}:. */
@@ -484,7 +486,7 @@ export function buildCardgraph(
   reports: readonly ReportFrontMatter[],
   options: Partial<CardgraphOptions> = {},
 ): CardgraphLayout {
-  const demand: ChannelDemand = { gutters: new Map(), roads: new Map(), threadRows: 0, threadArrows: false, cardSideArrows: false, framePorts: new Map() }
+  const demand: ChannelDemand = { gutters: new Map(), roads: new Map(), threadRows: 0, threadArrows: false, cardSideArrows: false, sameFrameLanes: 0, framePorts: new Map() }
   const first = buildOne(payload, reports, options, demand)
   if (options.fitChannels !== true) return first
   const opts: CardgraphOptions = { ...DEFAULT_CARDGRAPH_OPTIONS, ...options }
@@ -497,7 +499,8 @@ export function buildCardgraph(
   // gutter, so without distinct rows they draw on top of one another.
   const cardGap = Math.max(opts.cardGap, demand.threadRows * THREAD_ROW_STEP + THREAD_ROW_CLEAR, demand.threadArrows ? THREAD_ARROW_CLEAR + 4 : 0)
   const framePaddingTop = Math.max(opts.framePaddingTop, demand.threadArrows ? THREAD_ARROW_CLEAR + 4 : 0)
-  const framePaddingX = Math.max(opts.framePaddingX, demand.cardSideArrows ? THREAD_ARROW_CLEAR + 2 : 0)
+  const framePaddingX = Math.max(opts.framePaddingX, demand.cardSideArrows ? THREAD_ARROW_CLEAR + 2 : 0,
+    demand.sameFrameLanes > 0 ? LANE_CLEAR + demand.sameFrameLanes * LANE_STEP : 0)
   // A frame's side edge is shared by every wire landing on it: too many arrows on a
   // short frame and they crowd into each other. Give each port `PORT_SPACING` along
   // the edge by growing the frame that needs it.
@@ -515,7 +518,7 @@ export function buildCardgraph(
     && frameExtra.size === 0) return first
   return buildOne(payload, reports, {
     ...options, columnGap, frameGap, cardGap, framePaddingTop, framePaddingX,
-  }, { gutters: new Map(), roads: new Map(), threadRows: 0, threadArrows: false, cardSideArrows: false, framePorts: new Map() }, frameExtra)
+  }, { gutters: new Map(), roads: new Map(), threadRows: 0, threadArrows: false, cardSideArrows: false, sameFrameLanes: 0, framePorts: new Map() }, frameExtra)
 }
 
 /**
@@ -1052,6 +1055,35 @@ function buildOne(
       demand.threadRows = Math.max(demand.threadRows, list.length)
     }
   }
+  /**
+   * Same-frame thread lanes.
+   *
+   * A thread whose two ends are cards of the **same frame** never leaves that frame:
+   * it drops from the parent's bottom, runs down the frame's inner padding — the strip
+   * between the cards' right edge and the frame border, which no card occupies — and
+   * comes back into the child's top. The strip holds one lane per such thread, and the
+   * wrapper widens `framePaddingX` to fit them.
+   */
+  const sameFrameLane = new Map<PendingEdge, number>()
+  {
+    const byFrame = new Map<number, PendingEdge[]>()
+    for (const edge of pending) {
+      if (edge.kind !== 'thread') continue
+      const fromCard = edge.from.kind === 'card' ? cards[edge.from.index] : undefined
+      const toCard = edge.to.kind === 'card' ? cards[edge.to.index] : undefined
+      if (fromCard === undefined || toCard === undefined) continue
+      if (fromCard.frame !== toCard.frame) continue
+      if (Math.abs(toCard.slot - fromCard.slot) === 1) continue
+      const list = byFrame.get(fromCard.frame) ?? []
+      list.push(edge)
+      byFrame.set(fromCard.frame, list)
+    }
+    for (const list of byFrame.values()) {
+      list.sort((a, b) => a.from.y - b.from.y || (a.report < b.report ? -1 : 1))
+      list.forEach((edge, index) => sameFrameLane.set(edge, index))
+      demand.sameFrameLanes = Math.max(demand.sameFrameLanes, list.length)
+    }
+  }
   /** Drop repeated points and merge collinear ones, so a route has no stutter. */  const tidy = (input: { x: number; y: number }[]): { x: number; y: number }[] => {
     const out: { x: number; y: number }[] = []
     for (const point of input) {
@@ -1129,6 +1161,18 @@ function buildOne(
     }
     if (edge.kind === 'thread') demand.threadArrows = true
     if (edge.kind === 'author' && to.kind === 'card') demand.cardSideArrows = true
+    // Same frame, farther apart than neighbours: stay inside the frame and run down
+    // its inner padding, which is the one strip no card occupies. Leaving the frame
+    // for a column gutter here is what drew a bundle of lines along the frame's edge.
+    const lane = sameFrameLane.get(edge)
+    if (lane !== undefined) {
+      const card = cards[from.index]
+      const frameBox = card === undefined ? undefined : fixed[card.frame]
+      if (frameBox !== undefined) {
+        const laneX = frameBox.x + frameBox.width - LANE_CLEAR - lane * LANE_STEP
+        return tidy([from, start, { x: laneX, y: start.y }, { x: laneX, y: end.y }, end, to])
+      }
+    }
     const fromColumn = columnOf(from)
     const toColumn = columnOf(to)
     const fromSide = horizontal(from.side) ? from.side : gutterSide(fromColumn)
