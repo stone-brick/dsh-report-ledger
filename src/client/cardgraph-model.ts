@@ -1119,6 +1119,11 @@ function buildOne(
       if (fromCard === undefined || toCard === undefined) continue
       if (fromCard.frame !== toCard.frame) continue
       if (Math.abs(toCard.slot - fromCard.slot) === 1) continue
+      // A cross-column thread belongs to the inter-column gap, not the frame's
+      // right padding: its two ends are in different columns.
+      const fromColumn = cardPlace.get(fromCard.report)?.column ?? 0
+      const toColumn = cardPlace.get(toCard.report)?.column ?? 0
+      if (fromColumn !== toColumn) continue
       const list = byFrame.get(fromCard.frame) ?? []
       list.push(edge)
       byFrame.set(fromCard.frame, list)
@@ -1206,6 +1211,22 @@ function buildOne(
     }
     if (edge.kind === 'thread') demand.threadArrows = true
     if (edge.kind === 'author' && to.kind === 'card') demand.cardSideArrows = true
+    // Cross-column thread: the two cards are in different intra-frame columns, so the
+    // route runs down the gap **between** those columns — the one strip that is empty
+    // at every row — then across and into the child's top.
+    if (from.kind === 'card' && to.kind === 'card') {
+      const fromCard = cards[from.index]
+      const toCard = cards[to.index]
+      const source = fromCard === undefined ? undefined : cardPlace.get(fromCard.report)
+      const target = toCard === undefined ? undefined : cardPlace.get(toCard.report)
+      if (fromCard !== undefined && toCard !== undefined && fromCard.frame === toCard.frame
+        && source !== undefined && target !== undefined && source.column !== target.column) {
+        const gapX = target.column > source.column
+          ? fromCard.bounds.x + fromCard.bounds.width + CARD_COLUMN_GAP / 2
+          : fromCard.bounds.x - CARD_COLUMN_GAP / 2
+        return tidy([from, start, { x: gapX, y: start.y }, { x: gapX, y: end.y }, end, to])
+      }
+    }
     // Same frame, farther apart than neighbours: stay inside the frame and run down
     // its inner padding, which is the one strip no card occupies. Leaving the frame
     // for a column gutter here is what drew a bundle of lines along the frame's edge.
