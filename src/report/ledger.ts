@@ -495,7 +495,14 @@ export async function readReport(id: string): Promise<Report | undefined> {
     const raw = await readFile(reportPath(id), 'utf8')
     const parsed = parseReport(raw)
     if (parsed === undefined) return undefined
-    return { front: parsed.front, body: parsed.body }
+    // The file name is the identity, exactly as in listReports. A hand-edited or
+    // copied document can carry another report's `report:` field; letting that
+    // value escape would make delivery write the body path and the `delivered`
+    // hop against a different report.
+    return {
+      front: parsed.front.report === id ? parsed.front : { ...parsed.front, report: id },
+      body: parsed.body,
+    }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
     throw error
@@ -549,7 +556,27 @@ export async function bodyStartLine(id: string): Promise<number | undefined> {
 export async function appendHop(id: string, hop: RouteHop): Promise<void> {
   if (!isValidReportId(id)) throw new Error(`report-ledger: invalid report id ${JSON.stringify(id)}`)
   await ensureDirs()
-  await appendFile(routePath(id), `${JSON.stringify(hop)}\n`, 'utf8')
+  const path = routePath(id)
+  // A process killed mid-append can leave a partial last line without its
+  // newline. Appending straight onto it would glue the next hop to the torn JSON
+  // and lose both; start a fresh line instead.
+  let needsNewline = false
+  try {
+    const info = await stat(path)
+    if (info.size > 0) {
+      const handle = await open(path, 'r')
+      try {
+        const last = Buffer.alloc(1)
+        await handle.read(last, 0, 1, Number(info.size) - 1)
+        needsNewline = last[0] !== 0x0a
+      } finally {
+        await handle.close()
+      }
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+  }
+  await appendFile(path, `${needsNewline ? '\n' : ''}${JSON.stringify(hop)}\n`, 'utf8')
   const cached = hopCache.get(id)
   if (cached !== undefined) {
     hopCache.delete(id)

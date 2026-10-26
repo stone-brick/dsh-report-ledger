@@ -55,7 +55,7 @@ DSH 插件：把「汇报」做成代理之间的一等交互原语——可追�
 dsh plugin --profile web add ./dsh-report-ledger-${version}.tgz
 \`\`\`
 
-**2. 从 Gitee 装（安装时自动构建，约 15 秒）**
+**2. 从 Gitee 装（预构建产物，安装时不构建）**
 
 \`\`\`sh
 dsh plugin --profile web add git+https://gitee.com/stone_zhan/dsh-report-ledger.git

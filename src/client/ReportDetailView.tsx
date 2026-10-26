@@ -74,7 +74,7 @@ export interface ReportDetailViewProps {
 
 const time: Record<string, string | number> = {
   color: 'var(--dsw-alias-label-caption, #999)',
-  fontSize: 'var(--dsw-font-xxxs-11, 11)',
+  fontSize: 'var(--dsw-font-xxxs-11-font-size, 11px)',
   whiteSpace: 'nowrap',
 }
 
@@ -116,7 +116,7 @@ const digestLine: Record<string, string | number> = {
   gap: '6px',
   flexWrap: 'wrap',
   color: 'var(--dsw-alias-label-caption, #70757d)',
-  fontSize: 'var(--dsw-font-xxxs-11, 11px)',
+  fontSize: 'var(--dsw-font-xxxs-11-font-size, 11px)',
 }
 
 /** The ledger file as a delivery card: type tile, two lines, one compact control. */
@@ -151,7 +151,7 @@ const fileName: Record<string, string | number> = {
 const filePath: Record<string, string | number> = {
   display: 'block',
   color: 'var(--dsw-alias-label-caption, #70757d)',
-  fontSize: 'var(--dsw-font-xxxs-11, 11px)',
+  fontSize: 'var(--dsw-font-xxxs-11-font-size, 11px)',
   whiteSpace: 'nowrap',
   overflow: 'hidden',
   textOverflow: 'ellipsis',
@@ -269,7 +269,7 @@ const railHead: Record<string, string | number> = {
 const hopAction: Record<string, string | number> = {
   borderRadius: '4px',
   padding: '0 6px',
-  fontSize: 'var(--dsw-font-xxxs-11, 11px)',
+  fontSize: 'var(--dsw-font-xxxs-11-font-size, 11px)',
   fontWeight: 500,
   lineHeight: '16px',
   whiteSpace: 'nowrap',
@@ -285,8 +285,8 @@ const hopRef: Record<string, string | number> = {
   background: 'var(--dsw-alias-bg-layer-3, rgba(0,0,0,0.04))',
   borderRadius: '4px',
   padding: '0 5px',
-  fontFamily: 'var(--dsw-font-family-mono, ui-monospace, monospace)',
-  fontSize: 'var(--dsw-font-xxxs-11, 11px)',
+  fontFamily: 'var(--ds-font-family-code, ui-monospace, monospace)',
+  fontSize: 'var(--dsw-font-xxxs-11-font-size, 11px)',
   lineHeight: '16px',
   whiteSpace: 'nowrap',
 }

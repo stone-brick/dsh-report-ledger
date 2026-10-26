@@ -182,7 +182,7 @@ const legendItem: Record<string, string> = {
   background: 'transparent',
   cursor: 'pointer',
   font: 'inherit',
-  fontSize: 'var(--dsw-font-xxxs-11, 11px)',
+  fontSize: 'var(--dsw-font-xxxs-11-font-size, 11px)',
   color: 'var(--dsw-alias-label-caption)',
 }
 
@@ -524,7 +524,9 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
   const fit = useCallback(() => {
     const box = boxRef.current
     if (box === null) return
-    const next = fitTransform(scope.payload, scope.reports, box.clientWidth, { lod, fitChannels: true })
+    const next = fitTransform(scope.payload, scope.reports, box.clientWidth, {
+      lod, fitChannels: true, hiddenKinds: mutedKinds,
+    })
     if (next === undefined) return
     // The transform is the fit's own again, so it follows the box again.
     fittedTransform.current = true
@@ -532,7 +534,7 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
     // Anchored to the top rather than centred vertically: a frame's cards run
     // oldest first, so a drawing taller than its box is read from the top down.
     setOffset({ x: next.offsetX, y: next.offsetY })
-  }, [scope])
+  }, [mutedKinds, scope])
 
   /**
    * The `+`/`−` controls.
@@ -942,7 +944,7 @@ const controls: Record<string, string> = {
 }
 
 const percentStyle: Record<string, string> = {
-  fontSize: 'var(--dsw-font-xxxs-11, 11px)',
+  fontSize: 'var(--dsw-font-xxxs-11-font-size, 11px)',
   color: 'var(--dsw-alias-label-caption)',
   fontVariantNumeric: 'tabular-nums',
 }
@@ -965,14 +967,14 @@ const crumbButton: Record<string, string> = {
   background: 'transparent',
   cursor: 'pointer',
   font: 'inherit',
-  fontSize: 'var(--dsw-font-xxxs-11, 11px)',
+  fontSize: 'var(--dsw-font-xxxs-11-font-size, 11px)',
   color: 'var(--dsw-alias-label-caption)',
   textDecoration: 'underline',
 }
 
 const crumbCurrent: Record<string, string> = {
   padding: '0 2px',
-  fontSize: 'var(--dsw-font-xxxs-11, 11px)',
+  fontSize: 'var(--dsw-font-xxxs-11-font-size, 11px)',
   color: 'var(--dsw-alias-label-caption)',
   fontWeight: '600',
   maxWidth: '200px',
@@ -982,7 +984,7 @@ const crumbCurrent: Record<string, string> = {
 }
 
 const crumbSep: Record<string, string> = {
-  fontSize: 'var(--dsw-font-xxxs-11, 11px)',
+  fontSize: 'var(--dsw-font-xxxs-11-font-size, 11px)',
   color: 'var(--dsw-alias-label-caption)',
 }
 

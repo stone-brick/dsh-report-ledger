@@ -16,9 +16,10 @@
  * @module dsh-report-ledger/report/maintenance
  */
 
-import { existsSync } from 'node:fs'
 import { leaseState, type LeaseState } from './lease.ts'
-import { isWorktreeClean, listWorktrees, resolveRepo, samePath } from './worktree.ts'
+import {
+  inspectCheckout, isWorktreeClean, listWorktrees, resolveRepo, samePath, type CheckoutPresence,
+} from './worktree.ts'
 import type { WorktreeSettings } from './allocate.ts'
 import type { ReportFrontMatter, ReportStatus, RouteHop } from './types.ts'
 
@@ -44,7 +45,9 @@ export interface WorktreeRecord {
   readonly state: LeaseState
   /** Whether the directory is still there. */
   readonly onDisk: boolean
-  /** Whether it has uncommitted work; absent when it is not on disk. */
+  /** What git found at the path: a linked tree, nothing, or a plain directory. */
+  readonly presence: CheckoutPresence
+  /** Whether it has uncommitted work; absent unless it is a live working tree. */
   readonly clean?: boolean
   /** Whether git considers the administrative entry dangling. */
   readonly prunable: boolean
@@ -114,7 +117,10 @@ export async function buildWorktreeReport(
   for (const front of digests) {
     const binding = front.worktree
     if (binding === undefined) continue
-    const onDisk = existsSync(binding.path)
+    // Ask git, not just the filesystem: a plain directory at the recorded path is
+    // not a checkout, and calling it "dirty" is the opposite of the truth.
+    const reality = await inspectCheckout(binding.path)
+    const onDisk = reality.presence !== 'missing'
     records.push({
       report: front.report,
       subject: front.subject,
@@ -126,9 +132,9 @@ export async function buildWorktreeReport(
       allocated: binding.allocated === true,
       state: leaseState(await deps.readHops(front.report)),
       onDisk,
-      // `git status` on a directory that is not there is a wasted subprocess, so
-      // cleanliness is only asked about checkouts that exist.
-      ...(onDisk ? { clean: await isWorktreeClean(binding.path) } : {}),
+      presence: reality.presence,
+      // `git status` is only meaningful for a checkout git actually recognises.
+      ...(reality.presence === 'worktree' ? { clean: await isWorktreeClean(binding.path) } : {}),
       prunable: false,
     })
   }
@@ -194,9 +200,16 @@ export async function buildWorktreeReport(
 
   // ---- what is worth saying out loud ---------------------------------------
   const active = resolved.filter((record) => record.state === 'held').length
-  const retained = resolved.filter((record) => record.state === 'released' && record.onDisk).length
+  const retained = resolved.filter((record) => (
+    record.state === 'released' && record.onDisk && record.presence === 'worktree'
+  )).length
 
   for (const record of resolved) {
+    if (record.presence === 'not-a-worktree') {
+      warnings.push(`the directory at ${record.path} (${record.report}) is no longer a working tree; it is not counted `
+        + 'as retained and will not be reclaimed automatically. Move it back, repair it, or remove it by hand.')
+      continue
+    }
     if (record.state === 'held' && !record.onDisk) {
       warnings.push(`${record.report} holds a claim on ${record.path}, and that checkout is no longer on disk. `
         + 'Release the claim, or close the report — closing releases it.')

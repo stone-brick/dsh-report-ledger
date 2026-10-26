@@ -946,6 +946,37 @@ check('a right-going wire from the left column crosses at a row gap', (() => {
   return segmentsOf(edge.points ?? []).every(({ a, b }) =>
     rightColumn.every((card) => !crosses(a, b, card.bounds)))
 })())
+// The mirror case: a card in the right column that leaves toward the left. The
+// frame-internal walk must cross the columns between it and the frame edge at
+// their row gaps, exactly as the right-going walk does.
+const leftCrossed = buildCardgraph(payload, [
+  report('R-0333', { from: 'session-child', created: at(1), to: ['session-root'] }),
+  report('R-0334', { from: 'session-child', created: at(2), parent: 'R-0333' }),
+  report('R-0335', { from: 'session-child', created: at(3), parent: 'R-0333' }),
+  report('R-0336', { from: 'session-child', created: at(4), parent: 'R-0335' }),
+  report('R-0337', { from: 'session-child', created: at(5), parent: 'R-0335', to: ['session-root'] }),
+])
+check('a left-going wire from the right column crosses at a row gap', (() => {
+  const edge = leftCrossed.edges.find((candidate) => candidate.kind === 'to' && candidate.report === 'R-0337')
+  const rightmost = Math.max(...leftCrossed.cards.map((card) => card.bounds.x))
+  const leftColumns = leftCrossed.cards.filter((card) => card.bounds.x < rightmost - 1)
+  if (edge === undefined || leftColumns.length === 0) return false
+  return segmentsOf(edge.points ?? []).every(({ a, b }) =>
+    leftColumns.every((card) => card.report === 'R-0337' || !crosses(a, b, card.bounds)))
+})())
+
+// Muting a kind is a view filter: under fitChannels the measured channel demand
+// must ignore hidden kinds, so the frames do not move when the legend is toggled.
+const busy = Array.from({ length: 6 }, (_, index) =>
+  report(`R-0345${index}`, { from: 'session-root', to: ['session-child'], created: at(30 + index) }))
+const busyFull = buildCardgraph(payload, busy, { fitChannels: true })
+const busyMuted = buildCardgraph(payload, busy, { fitChannels: true, hiddenKinds: ['to'] })
+check('muting a kind under fitChannels does not move frames',
+  JSON.stringify(busyFull.frames.map((frame) => frame.bounds))
+  === JSON.stringify(busyMuted.frames.map((frame) => frame.bounds)))
+check('muting a kind under fitChannels does not change the drawing width',
+  busyFull.width === busyMuted.width, `${busyFull.width} vs ${busyMuted.width}`)
+
 // Cross-column threads share the gap between the two card columns, and each gets its
 // own lane inside it.
 const gapFork = buildCardgraph(payload, [

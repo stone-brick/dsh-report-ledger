@@ -20,7 +20,8 @@ export {}
  * Run: node scripts/worktree-tools-check.ts
  */
 
-import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { chmod, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { PeerHost, PeerReceipt } from '../src/report/peer.ts'
@@ -131,8 +132,10 @@ const peerHost: PeerHost = {
 }
 
 const peers = new Peers(peerHost, 8)
+/** Whether the fixture caller is resident; a handover test makes it absent briefly. */
+let meLive = true
 const service = new Service({
-  getAgent: (sessionId: string) => sessionId === ME
+  getAgent: (sessionId: string) => sessionId === ME && meLive
     ? { id: ME, steer: () => {}, inject: () => {} }
     : undefined,
   describe: async () => undefined,
@@ -375,6 +378,97 @@ check('the configured removal happened on disk',
 check('the configured removal is recorded as reclaimed',
   doomed !== undefined && leaseState(await ledger.readHops(doomed.report)) === 'reclaimed',
   doomed === undefined ? 'no digest' : leaseState(await ledger.readHops(doomed.report)))
+
+// ---- 8b. removal is authorised by the ledger, not by git clean -------------
+// A checkout built by hand is clean but not ours to delete, and a checkout a
+// second live report holds is not ours to delete either. Both are refused with
+// an actionable sentence, and the directory stays on disk.
+const humanPath = join(scratch, 'human-made-checkout')
+const humanBase = await w.headOf(repo)
+const humanMade = humanBase === undefined
+  ? { ok: false, stderr: 'no HEAD in fixture' }
+  : await w.addWorktree({ repo: located, path: humanPath, branch: 'human-audit', base: humanBase })
+if (!humanMade.ok) throw new Error(`fixture human worktree failed: ${humanMade.stderr}`)
+const humanReport = await call('report_author', { subject: 'adopts a human checkout', body: 'b' })
+const humanDigest = (await ledger.listReports()).find((front) => front.subject === 'adopts a human checkout')
+await call('report_lease', { report: humanDigest?.report ?? '', path: humanPath })
+check('a human checkout can be adopted', humanDigest?.worktree?.allocated !== true,
+  String(humanDigest?.worktree?.allocated))
+const humanClose = await call('report_close', {
+  report: humanDigest?.report ?? '', note: 'done', worktree: 'remove-if-clean',
+})
+check('close refuses to remove a checkout the ledger did not allocate',
+  humanClose.includes('NOT removed') && humanClose.includes('not allocated'), humanClose)
+check('the human checkout survives the refused close',
+  (await w.listWorktrees(located)).some((entry) => w.samePath(entry.path, humanPath)))
+
+const holderA = await call('report_author', { subject: 'holder A', body: 'b', worktree: true })
+const holderADigest = (await ledger.listReports()).find((front) => front.subject === 'holder A')
+await call('report_close', { report: holderADigest?.report ?? '', note: 'first closes, keeps' })
+const holderB = await call('report_author', { subject: 'holder B', body: 'b' })
+const holderBDigest = (await ledger.listReports()).find((front) => front.subject === 'holder B')
+await call('report_lease', { report: holderBDigest?.report ?? '', path: holderADigest?.worktree?.path ?? '' })
+const reclose = await call('report_close', {
+  report: holderADigest?.report ?? '', note: 'second close', worktree: 'remove-if-clean',
+})
+check('a second close refuses to remove a checkout another live report holds',
+  reclose.includes('NOT removed') && reclose.includes(holderBDigest?.report ?? ''), reclose)
+check('the held checkout survives the refused re-close',
+  (await w.listWorktrees(located)).some((entry) => w.samePath(entry.path, holderADigest?.worktree?.path ?? '')))
+await call('report_close', { report: holderBDigest?.report ?? '', note: 'release the hold' })
+
+let closedLease = ''
+try {
+  await call('report_lease', { report: holderADigest?.report ?? '', path: holderADigest?.worktree?.path ?? '' })
+} catch (error) {
+  closedLease = error instanceof Error ? error.message : String(error)
+}
+check('a closed report cannot acquire a new checkout claim', closedLease.includes('closed'), closedLease)
+
+// ---- 8c. a roster write failure does not erase the live peer ----------------
+// The peer is already created when the roster append fails. The tool must report
+// what exists (and its id), and must not roll the checkout back out from under it.
+const roster = join(process.env.DSH_REPORT_LEDGER_ROOT ?? '', 'peers.jsonl')
+await writeFile(roster, '', 'utf8')
+await chmod(roster, 0o444)
+let rosterFailure = ''
+try {
+  await call('peer_start', { task: 'roster failure', worktree: true })
+} catch (error) {
+  rosterFailure = error instanceof Error ? error.message : String(error)
+} finally {
+  await chmod(roster, 0o666)
+}
+const orphan = created[created.length - 1]
+check('a roster write failure names the peer that already exists',
+  rosterFailure.includes('was created') && /session-[0-9a-f-]{8,}/.test(rosterFailure), rosterFailure)
+check('the failed roster write does not count the peer against the budget',
+  rosterFailure.includes('NOT counted'), rosterFailure)
+check('the live peer keeps its checkout', orphan?.cwd !== undefined && existsSync(orphan.cwd), String(orphan?.cwd))
+const orphanReport = (await ledger.listReports()).find((front) => front.subject.includes('roster failure'))
+if (orphanReport !== undefined) {
+  await call('report_close', { report: orphanReport.report, worktree: 'remove-if-clean' })
+}
+
+// ---- 8d. handover does not reopen a report it just closed ------------------
+// The retiring session owes itself a hand-off on a report it also names in
+// `close`. The close makes the snapshot stale; transferring the owed hand-off
+// afterwards would record `reopened` and leave the report open while the handover
+// report says it was closed.
+meLive = false
+await call('report_author', { subject: 'handover owed to self', body: 'b', to: [ME] })
+meLive = true
+const owedReport = (await ledger.listReports()).find((front) => front.subject === 'handover owed to self')
+const handoverOut = await call('report_handover', {
+  successor: 'session-successor', close: [owedReport?.report ?? ''],
+})
+const owedAfter = owedReport === undefined ? undefined : await ledger.readReport(owedReport.report)
+check('a report closed during handover stays closed', owedAfter?.front.status === 'closed',
+  String(owedAfter?.front.status))
+check('the handover says the owed hand-off was left untouched',
+  handoverOut.includes('left untouched'), handoverOut)
+const handoverReport = (await ledger.listReports()).find((front) => front.subject.startsWith('handover '))
+if (handoverReport !== undefined) await call('report_close', { report: handoverReport.report })
 
 // ---- 9. the budget refusal reaches the model as a sentence -----------------
 // A full budget must refuse through the tool with the holder named, because that

@@ -119,6 +119,34 @@ check('a dirty kept checkout is called out',
   dirty.warnings.some((warning) => warning.includes('uncommitted work')), dirty.warnings.join(' | '))
 await rm(join(held.prepared.binding.path, 'left-behind.txt'))
 
+// ---- 3b. a directory that is not a checkout --------------------------------
+// `existsSync` is not enough: a plain directory at the recorded path used to be
+// reported as a dirty checkout, which is the opposite diagnosis. Git is asked,
+// and the view gets its own explanation instead of "uncommitted work".
+const plainDir = join(scratch, 'plain-directory')
+await mkdir(plainDir, { recursive: true })
+await writeFile(join(plainDir, 'not-a-checkout.txt'), 'x\n')
+const plainReport = await ledger.allocateId()
+await service.author({
+  reportId: plainReport,
+  subject: 'plain directory binding',
+  body: 'body',
+  actor: ME,
+  worktree: { path: plainDir, branch: 'plain', allocated: true },
+})
+const plainView = await view()
+const plainRecord = plainView.records.find((record) => record.report === plainReport)
+check('a plain directory is classified as not-a-worktree', plainRecord?.presence === 'not-a-worktree',
+  String(plainRecord?.presence))
+check('a plain directory is not asked about cleanliness', plainRecord?.clean === undefined,
+  String(plainRecord?.clean))
+check('a plain directory is not counted as retained',
+  plainView.retained === kept.retained, `${plainView.retained} vs ${kept.retained}`)
+check('a plain directory gets its own warning, not a dirty warning',
+  plainView.warnings.some((warning) => warning.includes('no longer a working tree'))
+  && !plainView.warnings.some((warning) => warning.includes('uncommitted work')),
+  plainView.warnings.join(' | '))
+
 // The retained limit is only worth reporting when nothing will clear it.
 const overBudget = await view({ ...settings, maxRetained: 0, reclaim: 'never' })
 check('accumulation past the retained limit is called out',

@@ -624,6 +624,13 @@ export function registerReportTools(
           }
         }
         for (const owed of assets.owed) {
+          if (closedNow.has(owed.report)) {
+            problems.push(
+              `${owed.report} was closed in this handover but still owes a delivery to ${source}; moving it would `
+              + 'reopen the report, so it was left untouched — use report_transfer by hand if it is really unfinished',
+            )
+            continue
+          }
           if (owed.status === 'closed') {
             problems.push(
               `${owed.report} is closed but still owes a delivery to ${source}; moving it would reopen the report — `
@@ -640,6 +647,9 @@ export function registerReportTools(
         }
         if ((input.checkouts ?? 'release') === 'release') {
           for (const id of assets.checkouts) {
+            // close() already released a claim held by a report it just closed;
+            // releasing it again only produces a false "does not currently hold".
+            if (closedNow.has(id)) continue
             try {
               await service.release(id, actor, 'claim released during a handover')
               done.push(`released ${id}'s claim (the checkout stays on disk for ${successor} to claim)`)
@@ -666,7 +676,13 @@ export function registerReportTools(
           }
         }
         for (const owed of assets.owed) {
-          if (owed.status === 'closed') continue
+          if (owed.status === 'closed') {
+            problems.push(
+              `${owed.report} is closed but still owes a delivery to ${source}; transferring it would reopen the `
+              + 'report, so it was left for its owners to decide',
+            )
+            continue
+          }
           try {
             await service.transfer(owed.report, actor, source, actor, `handover: ${source} -> ${actor}`)
             done.push(`moved ${owed.report}'s unpaid hand-off to ${actor}`)
@@ -848,9 +864,11 @@ export function registerReportTools(
           ...(provisioned === undefined ? {} : { cwd: provisioned.prepared.binding.path }),
         })
       } catch (error) {
-        // No peer exists, so nothing references the checkout that was made for
-        // it. This is the only path that rolls a provision back.
-        if (provisioned !== undefined) await service.rollbackProvision(provisioned)
+        // A peer may already exist when the failure is the roster write: `start`
+        // tags that case. Only a failure before creation leaves the checkout
+        // unreferenced and safe to roll back.
+        const peerExists = (error as { peerCreated?: boolean } | null | undefined)?.peerCreated === true
+        if (provisioned !== undefined && !peerExists) await service.rollbackProvision(provisioned)
         throw error
       }
       // From here the peer is live and already charged against this session's

@@ -131,6 +131,16 @@ const muted: Record<string, string> = {
   color: 'var(--dsw-alias-label-caption)',
 }
 
+/** A non-blocking read failure shown above a drawing that is still usable. */
+const notice: Record<string, string> = {
+  ...muted,
+  padding: '6px 10px',
+  color: 'var(--dsw-alias-state-error-primary)',
+  font: 'var(--dsw-font-xxxs-11, 11px/14px system-ui, sans-serif)',
+  minWidth: '0',
+  whiteSpace: 'normal',
+}
+
 /**
  * The drawing alone: it takes whatever the panel has.
  *
@@ -185,20 +195,24 @@ function bodyFor(t: Translate): (props: TabBodyProps) => ReactElement {
      * row does.
      */
     const onOpen = useCallback((report: string) => {
-      selection.open(bridged.report === report ? undefined : report, sessionId)
+      selection.open(openReport === report ? undefined : report, sessionId)
       activateReportTab(globalThis.document, t('view.tab'))
-    }, [bridged.report, sessionId, t])
+    }, [openReport, sessionId, t])
 
-    if (error !== undefined) return createElement('div', { style: muted }, t('view.error', { code: error }))
-    if (payload === undefined) return createElement('div', { style: muted }, t('view.loading'))
+    if (payload === undefined) {
+      if (error !== undefined) return createElement('div', { style: muted }, t('view.error', { code: error }))
+      return createElement('div', { style: muted }, t('view.loading'))
+    }
     if (reports.length === 0) return createElement('div', { style: muted }, t('view.empty'))
 
     // One container and one child: no open/closed layout to swap in and out, so
     // the drawing keeps its zoom, pan and drill state across a click on a card —
-    // the state that used to be thrown away when the detail half appeared.
+    // the state that used to be thrown away when the detail half appeared. A
+    // failed refresh leaves the last drawing in place and adds a notice above it.
     return createElement(
       'div',
       { style: stackFull },
+      error === undefined ? null : createElement('div', { style: notice }, t('view.error', { code: error })),
       createElement(CardgraphView, {
         payload,
         reports,

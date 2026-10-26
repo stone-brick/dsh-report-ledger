@@ -35,16 +35,16 @@ const { assetsOf, mentions, owns } = await import('../src/report/assets.ts')
 
 /** Agents resident for this run. */
 const live = new Set<string>(['session-a'])
-/** Digests that reached a resident agent. */
-const inbox: { target: string; text: string }[] = []
+/** Digests that reached a resident agent, and whether they woke it. */
+const inbox: { target: string; kind: 'steer' | 'inject'; text: string }[] = []
 
 const service = new ReportService({
   getAgent(sessionId) {
     if (!live.has(sessionId)) return undefined
     return {
       id: sessionId,
-      steer: (message) => { inbox.push({ target: sessionId, text: message.content[0]?.text ?? '' }) },
-      inject: (message) => { inbox.push({ target: sessionId, text: message.content[0]?.text ?? '' }) },
+      steer: (message) => { inbox.push({ target: sessionId, kind: 'steer', text: message.content[0]?.text ?? '' }) },
+      inject: (message) => { inbox.push({ target: sessionId, kind: 'inject', text: message.content[0]?.text ?? '' }) },
     }
   },
   describe: async (sessionId) => `name-of-${sessionId}`,
@@ -150,6 +150,31 @@ check('what a session is owed is listed', owed.owed.map((entry) => entry.report)
 check('ownership does not require a mention check to pass', owns(pieces[0].front, 'a'))
 check('a digest naming a recipient is a candidate', mentions(pieces[0].front, 'b'))
 check('an unrelated session is not a candidate', !mentions(pieces[0].front, 'z'))
+
+// ---- 6. a quiet obligation stays quiet when it changes hands --------------
+// A carbon copy is a quiet delivery; a transfer moves the obligation, not the
+// wake policy. If the new holder is absent and later returns, it must be injected,
+// not woken — otherwise a session unrelated to the task runs a turn.
+const quiet = await service.author({
+  subject: 'quiet transfer', body: 'body', actor: 'session-a', cc: ['session-quiet-1'],
+})
+const quietId = quiet.front.report
+await service.transfer(quietId, 'session-a', 'session-quiet-1', 'session-quiet-2', 'handing the quiet copy on')
+check('a quiet obligation transferred to an absent session stays owed',
+  pendingTargets(await readHops(quietId)).join() === 'session-quiet-2',
+  pendingTargets(await readHops(quietId)).join())
+check('the transferred quiet obligation does not become a wakeup',
+  pendingMode(await readHops(quietId), 'session-quiet-2') === 'quiet',
+  pendingMode(await readHops(quietId), 'session-quiet-2'))
+live.add('session-quiet-2')
+await service.flushSessions(['session-quiet-2'])
+const quietDelivery = (await readHops(quietId)).find(
+  (hop) => hop.action === 'delivered' && hop.to.includes('session-quiet-2'),
+)
+check('the quiet delivery is recorded as quiet', quietDelivery?.note === 'quiet', String(quietDelivery?.note))
+check('the returned recipient was injected, not steered',
+  inbox.some((entry) => entry.target === 'session-quiet-2' && entry.kind === 'inject')
+  && !inbox.some((entry) => entry.target === 'session-quiet-2' && entry.kind === 'steer'))
 
 let failed = 0
 for (const [label, ok, detail] of checks) {

@@ -431,13 +431,29 @@ export class PeerService {
     // that has already succeeded and already been charged against the cap.
     const workspace = await this.#register(created.id, cwd)
 
-    await appendPeer({
-      sessionId: created.id,
-      startedBy: self,
-      startedAt: Date.now(),
-      ...(name === undefined ? {} : { name }),
-      ...(cwd === undefined ? {} : { cwd }),
-    })
+    try {
+      await appendPeer({
+        sessionId: created.id,
+        startedBy: self,
+        startedAt: Date.now(),
+        ...(name === undefined ? {} : { name }),
+        ...(cwd === undefined ? {} : { cwd }),
+      })
+    } catch (error) {
+      // The peer is already live: the adapter created it before this record was
+      // attempted. A caller must be able to address what it has already paid for,
+      // and a worktree caller must not roll the checkout back out from under it.
+      // Tag the failure so tools.ts can tell this apart from "no peer exists".
+      const reason = error instanceof Error ? error.message : String(error)
+      const failure = new Error(
+        `report-ledger: peer ${created.id} was created, but its roster record could not be written (${reason}). `
+        + 'The peer is alive and is NOT counted against the lifetime budget; address it later with report_send '
+        + `(to=${created.id}) and keep any checkout it was given.`,
+      ) as Error & { peerCreated?: boolean; sessionId?: string }
+      failure.peerCreated = true
+      failure.sessionId = created.id
+      throw failure
+    }
 
     return {
       sessionId: created.id,

@@ -328,7 +328,7 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
   }
   const summary: Record<string, string | number> = {
     color: 'var(--dsw-alias-label-tertiary, #888)',
-    fontSize: 'var(--dsw-font-xxs-12, 12)',
+    fontSize: 'var(--dsw-font-xxs-12-font-size, 12px)',
     flex: '1 1 auto',
   }
   /**
@@ -364,7 +364,7 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
   /** The caption look for a timestamp; the digest's meta line reuses its colour. */
   const time: Record<string, string | number> = {
     color: 'var(--dsw-alias-label-caption, #999)',
-    fontSize: 'var(--dsw-font-xxxs-11, 11)',
+    fontSize: 'var(--dsw-font-xxxs-11-font-size, 11px)',
     whiteSpace: 'nowrap',
   }
   /** The muted caption colour, for the empty-state sentences. */

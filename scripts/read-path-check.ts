@@ -26,7 +26,7 @@ export {}
  * Run: node scripts/read-path-check.ts
  */
 
-import { mkdir, mkdtemp, readFile, rm, unlink, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, mkdtemp, readFile, rm, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ReportFrontMatter } from '../src/report/types.ts'
@@ -35,7 +35,7 @@ const root = await mkdtemp(join(tmpdir(), 'report-ledger-read-path-'))
 process.env.DSH_HOME = root
 
 const { ReportService } = await import('../src/report/service.ts')
-const { clearReadCache, listReports, readHops, readReport, reportPath, reportsDir } = await import('../src/report/ledger.ts')
+const { appendHop, clearReadCache, listReports, readHops, readReport, reportPath, reportsDir, routePath } = await import('../src/report/ledger.ts')
 const { pendingTargets } = await import('../src/report/deliver.ts')
 
 /** Agents resident for this run, and how a digest reached each one. */
@@ -227,6 +227,28 @@ check('the present recipient received its hand-off',
   inbox.some((entry) => entry.target === 'session-five' && entry.text.includes(present.front.report)))
 check('an absent recipient is still owed', pendingTargets(await readHops(absent.front.report)).join() === 'session-gone',
   pendingTargets(await readHops(absent.front.report)).join())
+
+// A hand-edited `report:` field must not become the identity. Delivery keys the
+// body path and the arrival hop by `front.report`; a copied document that keeps
+// another report's id would otherwise send and record against that other report.
+const identityId = 'R-7101'
+await writeDocument(identityId, '---\nreport: "R-7998"\nsubject: "identity"\nfrom: "s"\n---\n\nbody\n')
+const identity = await readReport(identityId)
+check('readReport takes its identity from the file name', identity?.front.report === identityId,
+  String(identity?.front.report))
+
+// Simulate a crash in the middle of an append: the next hop must start on a
+// fresh line instead of gluing itself to the torn JSON and disappearing with it.
+const tornId = 'R-7102'
+await writeDocument(tornId, `---\nreport: "${tornId}"\nsubject: "torn"\nfrom: "s"\n---\n\nbody\n`)
+await appendHop(tornId, { at: 1, actor: 's', action: 'authored', to: [] })
+await appendFile(routePath(tornId), '{"at":2,"actor":"s","act', 'utf8')
+await appendHop(tornId, { at: 3, actor: 's', action: 'sent', to: ['session-torn'] })
+const afterTorn = await readHops(tornId)
+check('a hop after a torn append is still readable', afterTorn.some((hop) => hop.action === 'sent'),
+  JSON.stringify(afterTorn))
+check('the torn line is dropped without taking the next hop with it', afterTorn.length === 2,
+  String(afterTorn.length))
 
 let failed = 0
 for (const [label, ok, detail] of checks) {

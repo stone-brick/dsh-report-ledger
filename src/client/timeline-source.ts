@@ -71,12 +71,19 @@ export function useTimeline(sessionId: string): TimelineRead {
   useEffect(() => {
     if (sessionId === '') {
       setError('no-session')
+      setPayload(undefined)
       return undefined
     }
     let cancelled = false
-    setError(undefined)
+    // Do not clear the error before the read succeeds. A transient host failure
+    // would otherwise alternate the panel between drawing and error on every
+    // poll, and every error remounts the canvas and throws its view state away.
     getJson<TimelinePayload>(`${TIMELINE_URL}?root=${encodeURIComponent(sessionId)}`)
-      .then((value) => { if (!cancelled) setPayload(value) })
+      .then((value) => {
+        if (cancelled) return
+        setPayload(value)
+        setError(undefined)
+      })
       .catch((cause: unknown) => { if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause)) })
     return () => { cancelled = true }
   }, [sessionId, nonce])

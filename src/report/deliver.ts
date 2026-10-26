@@ -205,12 +205,18 @@ export function pendingTargets(hops: readonly RouteHop[]): string[] {
  */
 export function pendingMode(hops: readonly RouteHop[], target: string): DeliveryMode {
   let addressed = false
-  for (const hop of hops) {
+  for (const [index, hop] of hops.entries()) {
     // The transfer carries the wake policy with the obligation: the session that
-    // owes it now is owed exactly what the previous one was.
+    // owes it now is owed exactly what the previous one was. Recompute the
+    // predecessor's mode from the window before this hop rather than assuming a
+    // transfer always wakes: a quiet carbon copy must stay quiet when it moves.
     if (hop.action === 'transferred') {
       if (hop.from === target) addressed = false
-      if (hop.to.includes(target)) addressed = true
+      if (hop.to.includes(target)) {
+        addressed = hop.from === undefined
+          ? true
+          : pendingMode(hops.slice(0, index), hop.from) === 'wakeup'
+      }
       continue
     }
     if (!hop.to.includes(target)) continue

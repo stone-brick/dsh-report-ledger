@@ -495,7 +495,12 @@ export function buildCardgraph(
   options: Partial<CardgraphOptions> = {},
 ): CardgraphLayout {
   const demand: ChannelDemand = { gutters: new Map(), roads: new Map(), threadRows: 0, threadArrows: false, cardSideArrows: false, sameFrameLanes: 0, gapLanes: 0, framePorts: new Map() }
-  const first = buildOne(payload, reports, options, demand)
+  // Muting a kind is a view filter, not a layout instruction: the channel demand
+  // must be measured with every wire present, or hiding a busy kind shrinks the
+  // gaps and moves frames under the reader on the next render. The returned
+  // layout is still built with the real `hiddenKinds` on the second pass.
+  const measured = options.fitChannels === true ? { ...options, hiddenKinds: [] } : options
+  const first = buildOne(payload, reports, measured, demand)
   if (options.fitChannels !== true) return first
   const opts: CardgraphOptions = { ...DEFAULT_CARDGRAPH_OPTIONS, ...options }
   const gutterLanes = Math.max(0, ...demand.gutters.values())
@@ -1215,12 +1220,15 @@ function buildOne(
   // column to its right at one of **that column's row gaps**. Cards paint above the
   // wires, so a line through them vanishes; the walk crosses one column at a time and
   // hands over to the channel router from a virtual frame port on the right edge.
-  if (edge.from.kind === 'card' && edge.from.side === 'right') {
+  if (edge.from.kind === 'card' && (edge.from.side === 'right' || edge.from.side === 'left')) {
     const card = cards[edge.from.index]
     const place = card === undefined ? undefined : cardPlace.get(card.report)
     const columns = card === undefined ? 1 : (frameCardColumns[card.frame] ?? 1)
     const frameBox = card === undefined ? undefined : fixed[card.frame]
-    if (card !== undefined && place !== undefined && frameBox !== undefined && place.column + 1 < columns) {
+    const towardsRight = edge.from.side === 'right'
+    const hasColumns = towardsRight ? place !== undefined && place.column + 1 < columns
+      : place !== undefined && place.column - 1 >= 0
+    if (card !== undefined && place !== undefined && frameBox !== undefined && hasColumns) {
       const gap = opts.cardColumnGap ?? CARD_COLUMN_GAP
       const cardX = (column: number): number => frameBox.x + opts.framePaddingX + column * (size.width + gap)
       const gapYFor = (column: number, wanted: number): number => {
@@ -1234,20 +1242,41 @@ function buildOne(
         if (gaps.length === 0) gaps.push(frameBox.y + opts.frameHeaderHeight + 8)
         return gaps.sort((left, right) => Math.abs(left - wanted) - Math.abs(right - wanted))[0] ?? wanted
       }
-      const points: { x: number; y: number }[] = [edge.from, { x: card.bounds.x + card.bounds.width + STUB, y: edge.from.y }]
-      let x = card.bounds.x + card.bounds.width + STUB
+      // Mirror of the right-hand walk: cross each column between the card and the
+      // frame edge at that column's row gaps, then hand over to the channel router
+      // from a virtual frame port on the matching edge.
+      const stubX = towardsRight ? card.bounds.x + card.bounds.width + STUB : card.bounds.x - STUB
+      const points: { x: number; y: number }[] = [edge.from, { x: stubX, y: edge.from.y }]
+      let x = stubX
       let y = edge.from.y
-      for (let column = place.column + 1; column < columns; column++) {
-        const gapY = gapYFor(column, y)
-        points.push({ x, y: gapY })
-        const after = cardX(column) + size.width + gap / 2
-        points.push({ x: after, y: gapY })
-        x = after
-        y = gapY
+      if (towardsRight) {
+        for (let column = place.column + 1; column < columns; column++) {
+          const gapY = gapYFor(column, y)
+          points.push({ x, y: gapY })
+          const after = cardX(column) + size.width + gap / 2
+          points.push({ x: after, y: gapY })
+          x = after
+          y = gapY
+        }
+      } else {
+        for (let column = place.column - 1; column >= 0; column--) {
+          const gapY = gapYFor(column, y)
+          points.push({ x, y: gapY })
+          const after = cardX(column) - gap / 2
+          points.push({ x: after, y: gapY })
+          x = after
+          y = gapY
+        }
       }
       const virtual: PendingEdge = {
         ...edge,
-        from: { kind: 'frame', index: card.frame, side: 'right', x: frameBox.x + frameBox.width, y },
+        from: {
+          kind: 'frame',
+          index: card.frame,
+          side: towardsRight ? 'right' : 'left',
+          x: towardsRight ? frameBox.x + frameBox.width : frameBox.x,
+          y,
+        },
       }
       lanePlan.set(virtual, lanePlan.get(edge) ?? {})
       return tidy([...points, ...route(virtual)])

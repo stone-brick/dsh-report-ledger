@@ -37,11 +37,11 @@ dsh plugin --profile web remove dsh-report-ledger
 ```sh
 # 预构建产物，不需要构建工具链
 dsh plugin --profile web add https://gitee.com/stone_zhan/dsh-report-ledger/releases/download/v0.2.3/dsh-report-ledger-0.2.3.tgz
-# 或直接从 Gitee 安装（安装时自动构建，约 15 秒）
+# 或直接从 Gitee 安装（预构建产物，安装时不构建）
 dsh plugin --profile web add git+https://gitee.com/stone_zhan/dsh-report-ledger.git
 ```
 
-GitHub 每次推送后由 `.github/workflows/mirror-to-gitee.yml` 自动镜像 `main` 与 tags。
+GitHub 每次推送后由 `.github/workflows/mirror-to-gitee.yml` 自动镜像所有分支与 tags。
 
 注意：**npm 安装走的是 npm 镜像站而不是 GitHub**，所以 `npm publish` 之后上面那条一行命令才是国内用户最省事的路；Gitee 镜像解决的是「拿不到 GitHub」时的源码与产物可达性。
 
@@ -194,7 +194,7 @@ web profile 里多两处：
 | [界面](docs/ui.md) | 时间线标签页的交互规则、数据通路、HTTP 守卫与信任假设 |
 | [画布](docs/ui-canvas.md) | 卡片图的几何、为什么一个图库都不引、每项决定的实测数字 |
 | [同伴](docs/peers.md) | `peer_start` 开出来的到底是什么、它落在哪个工作区分组 |
-| [工程约定](docs/pitfalls.md) | 改这个仓库之前：23 条踩过的坑，每一条都对应一次真实故障 |
+| [工程约定](docs/pitfalls.md) | 改这个仓库之前：20 条踩过的坑，每一条都对应一次真实故障 |
 | [开发、构建与验证](docs/dev-build.md) | 构建、测试分层、HMR 开发回路、隔离 profile |
 | [开发者模式](docs/dev-agents.md) | 开发期陪跑代理：名单、增减、退役、归档 |
 | [发布](docs/publishing.md) | 维护者：产物清单、可信发布、CI 分工、Gitee 镜像 |
@@ -203,7 +203,7 @@ web profile 里多两处：
 
 ```sh
 pnpm build        # 产出 lib/index.js（宿主半）与 lib/client.js（浏览器半）
-pnpm test         # 十六套确定性检查，1112 项断言（不需要 DSH，不碰真实账本）
+pnpm test         # 十六套确定性检查，1126 项断言（不需要 DSH，不碰真实账本）
 pnpm check        # 完整本地门禁：typecheck + test + test:tools
 ```
 

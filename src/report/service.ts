@@ -26,6 +26,7 @@ import { evaluateLease, leaseState } from './lease.ts'
 import { allocateId, appendHop, appendReportBody, bodyStartLine, discardUnwrittenId, isValidReportId, listReports, readHops, readReport, reportExists, reportPath, writeReport } from './ledger.ts'
 import {
   addWorktree, classifyGitRefusal, compareKey, headOf, inspectCheckout, isWorktreeClean, removeWorktree, resolveRepo,
+  samePath,
 } from './worktree.ts'
 import type { RepoLocation } from './worktree.ts'
 import type { DeliveryMode, Report, ReportFrontMatter, ReportWorktree, RouteHop } from './types.ts'
@@ -925,14 +926,19 @@ export class ReportService {
         if (options.worktree !== 'remove-if-clean') {
           outcome = { action: 'kept' }
         } else {
-          const repo = await resolveRepo(binding.path)
-          if (repo === undefined) {
-            outcome = { action: 'refused', detail: `${binding.path} is no longer inside a git repository` }
+          const refusal = await this.#removalRefusal(report, binding)
+          if (refusal !== undefined) {
+            outcome = { action: 'refused', detail: refusal }
           } else {
-            const removed = await removeWorktree(repo, binding.path)
-            outcome = removed.ok
-              ? { action: 'removed' }
-              : { action: 'refused', detail: removed.stderr.trim() }
+            const repo = await resolveRepo(binding.path)
+            if (repo === undefined) {
+              outcome = { action: 'refused', detail: `${binding.path} is no longer inside a git repository` }
+            } else {
+              const removed = await removeWorktree(repo, binding.path)
+              outcome = removed.ok
+                ? { action: 'removed' }
+                : { action: 'refused', detail: removed.stderr.trim() }
+            }
           }
         }
       }
@@ -1014,6 +1020,16 @@ export class ReportService {
     return await this.#withRepoLock(key, async () => await this.#withLock(report, async () => {
       const current = await this.#load(report)
       this.#assertOwner(current.front, actor, 'lease', 'leasing')
+      // A closed report is not live work. Letting it acquire a claim produces a
+      // `closed + held` ghost that the referee skips as a holder, so a second
+      // report can claim the same directory and both look held. Reopening is an
+      // explicit act, not a side effect of leasing.
+      if (current.front.status === 'closed') {
+        throw new Error(
+          `report-ledger: ${report} is closed, so it cannot acquire a working-tree claim. Reopen it with a `
+          + 'contribution or report_amend first, or author a new report for the checkout.',
+        )
+      }
       const verdict = await evaluateLease({
         binding,
         repo,
@@ -1181,6 +1197,29 @@ export class ReportService {
    * a reclamation is: a vanished checkout is not a concluded report becoming
    * active again.
    */
+  /**
+   * Why this report may not delete its checkout, if it may not.
+   *
+   * `remove-if-clean` is an explicit, destructive request, so the two safety
+   * rails the docs promise are checked here rather than in the tool: only a
+   * ledger-allocated checkout is removable, and no *other* live report may hold
+   * the same directory. Git's cleanliness check is not enough on its own: a
+   * checkout with only ignored files is clean, and removing it deletes them.
+   */
+  async #removalRefusal(report: string, binding: ReportWorktree): Promise<string | undefined> {
+    if (binding.allocated !== true) {
+      return `${binding.path} was not allocated by the ledger; only ledger-allocated checkouts can be removed`
+    }
+    for (const front of await listReports()) {
+      if (front.report === report || front.status === 'closed') continue
+      if (front.worktree === undefined || !samePath(front.worktree.path, binding.path)) continue
+      if (leaseState(await readHops(front.report)) === 'held') {
+        return `${binding.path} is still held by ${front.report}; release it there before removing this checkout`
+      }
+    }
+    return undefined
+  }
+
   async #recordVanished(actor: string, gone: StaleBinding): Promise<void> {
     await this.#withLock(gone.report, async () => {
       if (!reportExists(gone.report)) return
