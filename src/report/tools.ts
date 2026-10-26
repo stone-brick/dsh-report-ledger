@@ -528,6 +528,7 @@ export function registerReportTools(
         binding === undefined
           ? 'claim released'
           : `claim released; the checkout at ${binding.path} is untouched and stays traceable to ${result.front.report}`,
+        ...(result.warning === undefined ? [] : [`warning: ${result.warning}`]),
       ].join('\n')
     },
   })))
@@ -603,14 +604,16 @@ export function registerReportTools(
       const assets = await assetsFor(source)
       const done: string[] = []
       const problems: string[] = []
+      const warnings: string[] = []
       const closedNow = new Set<string>()
 
       if (retiring) {
         for (const id of input.close ?? []) {
           try {
-            await service.close(id, actor, `closed during a handover to ${successor}`)
+            const closed = await service.close(id, actor, `closed during a handover to ${successor}`)
             closedNow.add(id)
             done.push(`closed ${id}`)
+            if (closed.worktree?.warning !== undefined) warnings.push(`${id}: ${closed.worktree.warning}`)
           } catch (error) {
             problems.push(`could not close ${id}: ${reasonOf(error)}`)
           }
@@ -643,8 +646,9 @@ export function registerReportTools(
             // releasing it again only produces a false "does not currently hold".
             if (closedNow.has(id)) continue
             try {
-              await service.release(id, actor, 'claim released during a handover')
+              const released = await service.release(id, actor, 'claim released during a handover')
               done.push(`released ${id}'s claim (the checkout stays on disk for ${successor} to claim)`)
+              if (released.warning !== undefined) warnings.push(`${id}: ${released.warning}`)
             } catch (error) {
               problems.push(`could not release ${id}'s claim: ${reasonOf(error)}`)
             }
@@ -727,6 +731,7 @@ export function registerReportTools(
         '',
         '### left for the successor',
         ...(left.length === 0 ? ['- nothing'] : left.map((line) => `- ${line}`)),
+        ...(warnings.length === 0 ? [] : ['', '### warnings', ...warnings.map((line) => `- ${line}`)]),
         ...(problems.length === 0 ? [] : ['', '### problems', ...problems.map((line) => `- ${line}`)]),
       ].join('\n')
 
@@ -750,6 +755,7 @@ export function registerReportTools(
         `assets: ${assets.owned.length} open report(s), ${assets.checkouts.length} checkout claim(s), ${assets.owed.length} unpaid hand-off(s)`,
         done.length === 0 ? 'moved: nothing' : `moved (${done.length}):\n${done.map((line) => `  ${line}`).join('\n')}`,
         left.length === 0 ? 'left: nothing' : `left (${left.length}):\n${left.map((line) => `  ${line}`).join('\n')}`,
+        warnings.length === 0 ? undefined : `warnings (${warnings.length}):\n${warnings.map((line) => `  ${line}`).join('\n')}`,
         renderProblems(problems),
         recorded === undefined ? 'NOT recorded: no handover report was written' : `recorded: ${recorded} (task "handover")`,
       ].filter((line): line is string => line !== undefined).join('\n')

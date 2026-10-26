@@ -283,6 +283,18 @@ check('closing warns about uncommitted work',
   (dirtyKeptResult.worktree?.warning ?? '').includes('uncommitted'), dirtyKeptResult.worktree?.warning ?? '')
 check('a dirty checkout still closes', dirtyKeptResult.front.status === 'closed')
 
+const releasedUnmerged = await leaseInto('released with unmerged work', 'owner-a')
+await writeFile(join(releasedUnmerged.prepared.binding.path, 'unmerged-release.txt'), 'x\n')
+await git(releasedUnmerged.prepared.binding.path, 'add', '-A')
+await git(releasedUnmerged.prepared.binding.path, 'commit', '-q', '-m', 'unmerged release work')
+const releaseResult = await service.release(releasedUnmerged.report, 'owner-a', 'done for now')
+check('release warns about an unmerged branch',
+  (releaseResult.warning ?? '').includes('not merged'), releaseResult.warning ?? '')
+check('the released hop records the warning',
+  (await ledger.readHops(releasedUnmerged.report)).some((h) => h.action === 'released'
+    && (h.note ?? '').includes('not merged')))
+await service.close(releasedUnmerged.report, 'owner-a', 'done', { worktree: 'remove-if-clean' })
+
 const removed = await leaseInto('removed on close', 'owner-b')
 const removedResult = await service.close(removed.report, 'owner-b', 'done', { worktree: 'remove-if-clean' })
 check('an opt-in removal happens', removedResult.worktree?.action === 'removed', JSON.stringify(removedResult.worktree))

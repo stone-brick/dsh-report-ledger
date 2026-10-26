@@ -254,12 +254,19 @@ check('no report was left describing the failed peer',
   !(await ledger.listReports()).some((front) => front.subject === 'a peer that cannot start'))
 
 // ---- 5. releasing through the tool ----------------------------------------
+const authoredPath = authoredDigest?.worktree?.path
+if (authoredPath === undefined) throw new Error('fixture: the authored checkout is missing')
+await writeFile(join(authoredPath, 'unmerged-release.txt'), 'x\n')
+await git(authoredPath, 'add', '-A')
+await git(authoredPath, 'commit', '-q', '-m', 'unmerged release work')
 const released = await call('report_release', {
   report: authoredDigest?.report ?? '', note: 'handing the checkout back',
 })
 check('report_release confirms the claim ended', released.includes('claim released'), released)
 check('report_release says the checkout itself is untouched',
   released.includes('untouched') && released.includes('stays traceable'), released)
+check('report_release warns about the unmerged branch',
+  released.includes('warning:') && released.includes('not merged'), released)
 let doubleRelease = ''
 try {
   await call('report_release', { report: authoredDigest?.report ?? '' })
@@ -458,6 +465,15 @@ if (orphanReport !== undefined) {
 meLive = false
 await call('report_author', { subject: 'handover owed to self', body: 'b', to: [ME] })
 meLive = true
+const handoverOrphan = await call('report_author', {
+  subject: 'handover unmerged checkout', body: 'b', worktree: true,
+})
+const handoverOrphanDigest = (await ledger.listReports()).find((front) => front.subject === 'handover unmerged checkout')
+const handoverOrphanPath = handoverOrphanDigest?.worktree?.path
+if (handoverOrphanPath === undefined) throw new Error(`fixture: handover checkout missing (${handoverOrphan})`)
+await writeFile(join(handoverOrphanPath, 'unmerged-handover.txt'), 'x\n')
+await git(handoverOrphanPath, 'add', '-A')
+await git(handoverOrphanPath, 'commit', '-q', '-m', 'unmerged handover work')
 const owedReport = (await ledger.listReports()).find((front) => front.subject === 'handover owed to self')
 const handoverOut = await call('report_handover', {
   successor: 'session-successor', close: [owedReport?.report ?? ''],
@@ -467,6 +483,8 @@ check('a report closed during handover stays closed', owedAfter?.front.status ==
   String(owedAfter?.front.status))
 check('the handover says the owed hand-off was left untouched',
   handoverOut.includes('left untouched'), handoverOut)
+check('handover warns about the kept unmerged checkout it releases',
+  handoverOut.includes('warnings (') && handoverOut.includes('not merged'), handoverOut)
 const handoverReport = (await ledger.listReports()).find((front) => front.subject.startsWith('handover '))
 if (handoverReport !== undefined) await call('report_close', { report: handoverReport.report })
 

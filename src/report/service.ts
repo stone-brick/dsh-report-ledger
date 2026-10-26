@@ -138,6 +138,13 @@ export interface MutationResult {
    * needs to be told it did not happen — a silent refusal would read as success.
    */
   readonly worktree?: WorktreeOutcome
+  /**
+   * A risk the mutation recorded but did not act on.
+   *
+   * Release uses it for a kept checkout whose work is uncommitted or on an
+   * unmerged branch; the warning is also written into the hop's note.
+   */
+  readonly warning?: string
 }
 
 /** What a provisioning produced. */
@@ -1151,14 +1158,18 @@ export class ReportService {
           + '(a claim is released once; closing a report releases it too)',
         )
       }
+      const warning = await this.#checkoutWarning(current.front.worktree)
+      const releaseNote = [note, warning === undefined ? undefined : `warning: ${warning}`]
+        .filter((part): part is string => part !== undefined && part !== '')
+        .join('; ')
       const front = await this.#record(report, {
         at: Date.now(),
         actor,
         action: 'released',
         to: [],
-        ...(note === undefined ? {} : { note }),
+        ...(releaseNote === '' ? {} : { note: releaseNote }),
       })
-      return { front, outcomes: [] }
+      return { front, outcomes: [], ...(warning === undefined ? {} : { warning }) }
     })
   }
 
