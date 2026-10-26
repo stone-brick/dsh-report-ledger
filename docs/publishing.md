@@ -90,7 +90,7 @@ release 创建/上传失败时，先 `gh workflow run mirror-to-gitee.yml --ref 
 
 ```sh
 curl -X POST "https://gitee.com/api/v5/repos/stone_zhan/dsh-report-ledger/releases/<release_id>/attach_files?access_token=<token>" \
-     -F "file=@dsh-report-ledger-0.2.3.tgz"
+     -F "file=@dsh-report-ledger-0.2.4.tgz"
 ```
 
 

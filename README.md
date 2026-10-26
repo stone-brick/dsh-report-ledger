@@ -36,7 +36,7 @@ dsh plugin --profile web remove dsh-report-ledger
 
 ```sh
 # 预构建产物，不需要构建工具链
-dsh plugin --profile web add https://gitee.com/stone_zhan/dsh-report-ledger/releases/download/v0.2.3/dsh-report-ledger-0.2.3.tgz
+dsh plugin --profile web add https://gitee.com/stone_zhan/dsh-report-ledger/releases/download/v0.2.4/dsh-report-ledger-0.2.4.tgz
 # 或直接从 Gitee 安装（预构建产物，安装时不构建）
 dsh plugin --profile web add git+https://gitee.com/stone_zhan/dsh-report-ledger.git
 ```
