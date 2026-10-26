@@ -553,6 +553,49 @@ check('the next plan no longer mentions it',
   JSON.stringify(!('kind' in afterDead) ? afterDead.stale : afterDead))
 await service.discardWorktree(deadRun.binding)
 
+// ---- 13. reclaim is scoped to the repository being allocated in ------------
+// A closed, clean, ledger-allocated checkout in repoA is not repoB's disk
+// budget. Its binding is visible in the global ledger, but planAllocation must
+// not select it for repoB's reclamation.
+const crossPath = join(scratch, 'repo-a-cross')
+const crossMade = await w.addWorktree({ repo: located, path: crossPath, branch: 'cross-a', base: 'main' })
+if (!crossMade.ok) throw new Error(`cross-repo fixture failed: ${crossMade.stderr}`)
+const repoB = join(scratch, 'repo-b')
+await mkdir(repoB, { recursive: true })
+await git(repoB, 'init', '-q', '--initial-branch=main')
+await git(repoB, 'config', 'core.autocrlf', 'false')
+await git(repoB, 'config', 'user.name', 'allocate-check')
+await git(repoB, 'config', 'user.email', 'allocate-check@example.invalid')
+await writeFile(join(repoB, 'f.txt'), 'l1\n')
+await git(repoB, 'add', '-A')
+await git(repoB, 'commit', '-q', '-m', 'base')
+const locatedB = await w.resolveRepo(repoB)
+if (locatedB === undefined) throw new Error('repoB did not resolve')
+const crossFront = {
+  report: 'R-9001', subject: 'repo A old checkout', status: 'closed', from: 'owner-a',
+  to: [], cc: [], authors: ['owner-a'], created: 1, updated: 2, children: [], artifacts: [], hops: 2,
+  worktree: { path: crossPath, branch: 'cross-a', repo: located.commonDir, allocated: true },
+} as unknown as ReportFrontMatter
+const crossHops: RouteHop[] = [
+  { at: 1, actor: 'owner-a', action: 'leased', to: [] },
+  { at: 2, actor: 'owner-a', action: 'released', to: [] },
+]
+const crossPlan = await a.planAllocation({
+  report: 'R-9999', subject: 'repo B new checkout', repo: locatedB,
+  digests: [crossFront],
+  hopsOf: async () => crossHops,
+  isLive: () => false,
+}, { maxActive: 99, maxRetained: 0, reclaim: 'oldest-closed', relativePaths: false })
+check('a checkout from another repository is not reclaimable',
+  !('kind' in crossPlan) && crossPlan.reclaimed === undefined,
+  JSON.stringify('kind' in crossPlan ? crossPlan : { reclaimed: crossPlan.reclaimed }))
+check('a cross-repository checkout does not consume this repository\'s retained count',
+  !('kind' in crossPlan) && crossPlan.retained === 0,
+  'kind' in crossPlan ? crossPlan.kind : String(crossPlan.retained))
+check('the cross-repository checkout is still on disk',
+  (await w.inspectCheckout(crossPath)).presence === 'worktree')
+await service.discardWorktree({ path: crossPath, branch: 'cross-a', repo: located.commonDir, allocated: true })
+
 // ---- report -----------------------------------------------------------------
 try {
   await rm(scratch, { recursive: true, force: true })

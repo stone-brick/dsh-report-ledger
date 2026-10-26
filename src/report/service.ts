@@ -150,7 +150,7 @@ export interface PreparedWorktree {
    * mark, and saying so keeps callers from re-checking what was just produced.
    */
   readonly binding: ReportWorktree & { readonly branch: string; readonly repo: string; readonly allocated: true }
-  /** How many ended claims still have a checkout on disk. */
+  /** How many ended claims in this repository still have a checkout on disk. */
   readonly retained: number
   /** The checkout cleared to make room, when one was. */
   readonly reclaimed?: ReclaimedLease

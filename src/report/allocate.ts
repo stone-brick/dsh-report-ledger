@@ -105,7 +105,7 @@ export function worktreePath(repo: RepoLocation, report: string, subject: string
 export interface WorktreeSettings {
   /** Cap on checkouts held at once. */
   readonly maxActive: number
-  /** Cap on checkouts kept on disk after their claim ended. */
+  /** Cap on checkouts kept on disk after their claim ended, per repository. */
   readonly maxRetained: number
   /** Whether an over-full retained set is cleared automatically. */
   readonly reclaim: 'never' | 'oldest-closed'
@@ -142,7 +142,9 @@ export interface WorktreeConfig {
    */
   maxActive?: number
   /**
-   * Cap on checkouts kept on disk after their claim ended.
+   * Cap on checkouts kept on disk after their claim ended, counted per
+   * repository. A checkout from another repository never consumes this
+   * repository's retained budget.
    *
    * A disk limit. Failing it is never a reason to block work, so it only
    * triggers housekeeping — and only when {@link reclaim} permits it.
@@ -263,7 +265,7 @@ export interface AllocationPlan {
    * caller from re-checking what it just created.
    */
   readonly binding: ReportWorktree & { readonly branch: string; readonly repo: string; readonly allocated: true }
-  /** How many ended claims still have a checkout on disk. */
+  /** How many ended claims in this repository still have a checkout on disk. */
   readonly retained: number
   /** The checkout to reclaim first, when one may be cleared. */
   readonly reclaimed?: ReclaimedLease
@@ -447,6 +449,10 @@ export async function planAllocation(
   const reclaimSkipped: string[] = []
   const stale: StaleBinding[] = []
   for (const candidate of ended) {
+    // Reclaim is scoped to the repository being allocated in. A checkout in
+    // another repository is not this allocation's disk budget, and deleting it
+    // would run under this repository's lock while touching another's.
+    if (candidate.binding.repo === undefined || !samePath(candidate.binding.repo, query.repo.commonDir)) continue
     // The same path is the same checkout. A live report may have adopted this
     // one — reclamation may never take a checkout away from an agent at work.
     const holder = liveClaims.find((live) => samePath(live.worktree.path, candidate.binding.path))

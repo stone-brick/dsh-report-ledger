@@ -9,7 +9,7 @@
 提交的产物与源码是否一致，避免"改了 `src` 忘了 `build`"。
 
 ```sh
-pnpm check          # 完整门禁：类型检查 + 十六套可移植检查（1133 项）+ 工具面三套（195 项）
+pnpm check          # 完整门禁：类型检查 + 十六套可移植检查（1136 项）+ 工具面三套（195 项）
 pnpm build && pnpm pack   # lib/ 随源码提交，pack 前显式重建一次
 npm publish         # ⚠ 本机 registry 若是镜像站，必须显式 --registry=https://registry.npmjs.org
 ```
