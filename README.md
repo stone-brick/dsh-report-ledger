@@ -180,7 +180,7 @@ web profile 里多两处：
 - **`fromName` 是会话标题**，即"会话名"而非"代理名"。
 - **汇报页无法隐藏 composer。** `conversation.view` 的契约没有 composer 可见性维度，外壳在视图下方无条件渲染输入区，所以汇报页底部始终有输入框。视图侧唯一能整块替换它的是 `conversation.composer` 链（审批/提问面板用的同一机制），拿它隐藏属于偏用：该页会同时失去输入、发送、停止、模型/权限控件与队列/待办 dock。等上游给 view 定义提供正式开关后再做。
 
-工作区相关的限制（默认关闭，未开启时都不适用）见 [工作区](docs/worktree.md)。
+工作区相关的限制（默认关闭，未开启时都不适用）见 [工作区](docs/worktree.md)。审计中已确认、但有意暂缓的六项（脚本清理、10k 深链、画布 emoji/帧 hover、视图焦点/无声点击/pane、兼容性 records、publish shasum 断言）见 [已知未修问题](docs/known-issues.md)。
 
 ## 文档
 
@@ -197,6 +197,7 @@ web profile 里多两处：
 | [开发、构建与验证](docs/dev-build.md) | 构建、测试分层、HMR 开发回路、隔离 profile |
 | [开发者模式](docs/dev-agents.md) | 开发期陪跑代理：名单、增减、退役、归档 |
 | [发布](docs/publishing.md) | 维护者：产物清单、可信发布、CI 分工、Gitee 镜像 |
+| [已知未修问题](docs/known-issues.md) | 审计确认、但有意暂缓的六项：证据报告、影响、建议修法、状态 |
 
 ## 开发
 
@@ -206,7 +207,7 @@ pnpm test         # 十六套确定性检查，1117 项断言（不需要 DSH，
 pnpm check        # 完整本地门禁：typecheck + test + test:tools
 ```
 
-开发与测试需要 **Node ≥ 22.6**（脚本直接跑 `.ts`，依赖 type stripping）。`lib/` 随源码提交，所以 clone 下来不用构建也能跑。开发回路、测试为什么分成 `test` 与 `test:tools`、CI 为什么只跑前者，都在 [开发、构建与验证](docs/dev-build.md)。
+开发与测试需要 **Node ≥ 22.18**（脚本直接跑 `.ts`，依赖 type stripping；构建依赖链也声明 `^22.18.0 || >=24.11.0`）。`lib/` 随源码提交，所以 clone 下来不用构建也能跑。开发回路、测试为什么分成 `test` 与 `test:tools`、CI 为什么只跑前者，都在 [开发、构建与验证](docs/dev-build.md)。
 
 ## 许可
 
