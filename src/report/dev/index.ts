@@ -27,7 +27,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -142,6 +142,10 @@ export function installDevMode(ctx: Context, peers: PeerService, service: Report
   const root = packageRoot()
   const rosterPath = join(root, ROSTER_FILE)
   const bindingsPath = join(ledgerRoot(), BINDINGS_FILE)
+  // The roster is the gate, not the config flag: an installed tarball excludes
+  // `dev/`, so it must get no dev tools and must never write into node_modules.
+  // Cloning the repository is what makes developer mode possible.
+  if (!existsSync(rosterPath)) return () => {}
 
   const readBindings = (): Map<string, string> => {
     try {
@@ -172,7 +176,12 @@ export function installDevMode(ctx: Context, peers: PeerService, service: Report
     const rosterDirectory = dirname(rosterPath)
     const parsed = parseRoster(text, (relativePath) => {
       try {
-        return readFileSync(resolve(rosterDirectory, relativePath), 'utf8')
+        const resolved = resolve(rosterDirectory, relativePath)
+        const inside = relative(rosterDirectory, resolved)
+        // A roster is branch data. Reading `../../.env` into a system prompt is a
+        // path escape, not a prompt file: keep promptFile inside dev/.
+        if (inside.startsWith('..') || isAbsolute(inside)) return undefined
+        return readFileSync(resolved, 'utf8')
       } catch {
         return undefined
       }

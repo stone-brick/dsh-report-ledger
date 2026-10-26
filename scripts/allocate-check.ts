@@ -403,6 +403,12 @@ check('a fractional count is not obeyed', a.resolveWorktree({ maxActive: 1.5 }).
 check('a usable count is kept verbatim',
   a.resolveWorktree({ maxActive: 2, maxRetained: 0 }).settings.maxActive === 2
   && a.resolveWorktree({ maxActive: 2, maxRetained: 0 }).settings.maxRetained === 0)
+const badEnums = a.resolveWorktree({ reclaim: 'always' as never, onClose: 'remove' as never, root: 'relative/base' })
+check('unknown reclaim/onClose values fall back to the safe defaults',
+  badEnums.settings.reclaim === 'never' && badEnums.onClose === 'keep',
+  JSON.stringify({ reclaim: badEnums.settings.reclaim, onClose: badEnums.onClose }))
+check('a relative root is ignored instead of producing relative bindings',
+  badEnums.settings.base === undefined, String(badEnums.settings.base))
 const sanePlan = await a.planAllocation({
   report: 'R-9999', subject: 'probe', repo: located, digests: [], hopsOf: async () => [], isLive: () => false,
 }, a.resolveWorktree({ maxActive: 0 }).settings)

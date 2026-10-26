@@ -125,7 +125,7 @@ export function splitFrontMatter(raw: string): { data: Record<string, unknown>; 
   // resumed by line. The blank separator that `serializeReport` writes is not
   // part of the body a reader sees, hence the skip.
   let lead = 0
-  while (lead < bodyLines.length && bodyLines[lead] === '') lead++
+  while (lead < bodyLines.length && (bodyLines[lead] ?? '').trim() === '') lead++
   return {
     data: parsed as Record<string, unknown>,
     body: bodyLines.join('\n').replace(/^\n/, ''),

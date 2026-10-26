@@ -274,22 +274,26 @@ export class PeerService {
    */
   constructor(host: PeerHost, maxPeers: number = DEFAULT_MAX_PEERS) {
     this.#host = host
-    this.#maxPeers = maxPeers > 0 ? maxPeers : DEFAULT_MAX_PEERS
+    this.#maxPeers = typeof maxPeers === 'number' && Number.isInteger(maxPeers) && maxPeers > 0
+      ? maxPeers
+      : DEFAULT_MAX_PEERS
   }
 
   /** Assemble the shared roster inputs for one caller. */
   async #inputs(self: string): Promise<Omit<RosterInput, 'scope' | 'limit'>> {
-    const [records, reports, peers] = await Promise.all([
+    // One unreadable source must not take the whole roster down: a broken session
+    // listing still leaves "the peers I started" worth showing, and vice versa.
+    const [records, reports, peers] = await Promise.allSettled([
       this.#host.listSessionRecords(),
       this.#host.listReports(),
       readPeers(),
     ])
     return {
       self,
-      records,
+      records: records.status === 'fulfilled' ? records.value : [],
       liveIds: this.#host.liveIds(),
-      peers,
-      reports,
+      peers: peers.status === 'fulfilled' ? peers.value : [],
+      reports: reports.status === 'fulfilled' ? reports.value : [],
       titles: new Map(),
     }
   }
@@ -321,9 +325,9 @@ export class PeerService {
    */
   async startedCount(self: string): Promise<number> {
     const peers = await readPeers()
-    let count = 0
-    for (const peer of peers) if (peer.startedBy === self) count++
-    return count
+    // Count distinct sessions, not log lines: a duplicated line (the documented
+    // manual-recovery path edits this file) must not silently consume a slot.
+    return new Set(peers.filter((peer) => peer.startedBy === self).map((peer) => peer.sessionId)).size
   }
 
   /**
@@ -396,7 +400,7 @@ export class PeerService {
     const task = input.task.trim()
     if (task === '') throw new Error('report-ledger: peer_start requires a non-empty task')
     const name = input.name?.trim() || undefined
-    if (name !== undefined && name.length > 60) throw new Error('report-ledger: peer_start name must be 60 characters or fewer')
+    if (name !== undefined && [...name].length > 60) throw new Error('report-ledger: peer_start name must be 60 characters or fewer')
 
     const already = await this.startedCount(self)
     if (already >= this.#maxPeers) {

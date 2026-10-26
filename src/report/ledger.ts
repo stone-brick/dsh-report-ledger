@@ -65,6 +65,7 @@ const REPORT_ID = /^R-(\d{4,})$/
 
 /** Report file name shape. */
 const REPORT_FILE = /^R-(\d{4,})\.md$/
+const REPORT_ROUTE = /^R-(\d{4,})\.route\.jsonl$/
 
 /**
  * How much of a document is opened to build its digest.
@@ -288,7 +289,7 @@ export async function allocateId(): Promise<string> {
   await ensureDirs()
   let highest = 0
   for (const name of await readdir(reportsDir())) {
-    const match = REPORT_FILE.exec(name)
+    const match = REPORT_FILE.exec(name) ?? REPORT_ROUTE.exec(name)
     if (match === null) continue
     const value = Number(match[1])
     if (Number.isFinite(value) && value > highest) highest = value
@@ -296,6 +297,9 @@ export async function allocateId(): Promise<string> {
   for (let attempt = 0; attempt < 64; attempt++) {
     const candidate = `R-${String(highest + 1 + attempt).padStart(4, '0')}`
     const path = reportPath(candidate)
+    // An orphan sidecar is an old audit trail whose document was removed. Reusing
+    // the id would make the new report inherit those hops, so skip the number.
+    if (existsSync(routePath(candidate))) continue
     try {
       // Claim the name without clobbering: a loss here means someone else won.
       await writeFile(path, '', { flag: 'wx' })
@@ -421,7 +425,12 @@ async function mapPool<T, R>(items: readonly T[], limit: number, work: (item: T)
       results[index] = await work(items[index] as T)
     }
   })
-  await Promise.all(workers)
+  // `work` is allowed to throw, but a bare Promise.all would leave the other
+  // workers' rejections unhandled and can take the process down. Wait for all of
+  // them, then surface the first failure to the caller.
+  const settled = await Promise.allSettled(workers)
+  const failed = settled.find((entry) => entry.status === 'rejected')
+  if (failed !== undefined) throw failed.reason
   return results
 }
 
@@ -725,6 +734,13 @@ export async function discardUnwrittenId(id: string): Promise<boolean> {
   }
   try {
     await unlink(path)
+    // The claim never had a chance to append a hop; an empty sidecar left beside
+    // the placeholder is litter, but a non-empty one is someone's audit trail.
+    try {
+      if ((await readFile(routePath(id), 'utf8')) === '') await unlink(routePath(id))
+    } catch {
+      // Missing or unreadable sidecar: leave it alone.
+    }
     forget(id)
     return true
   } catch {

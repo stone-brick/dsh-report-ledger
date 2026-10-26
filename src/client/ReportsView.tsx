@@ -173,13 +173,14 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
       return undefined
     }
     let cancelled = false
-    getJson<TimelinePayload>(`${TIMELINE_URL}?root=${encodeURIComponent(sessionId)}`)
+    const controller = new AbortController()
+    getJson<TimelinePayload>(`${TIMELINE_URL}?root=${encodeURIComponent(sessionId)}`, controller.signal)
       .then((value) => { if (!cancelled) { setPayload(value); setError(undefined) } })
       .catch((cause: unknown) => { if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause)) })
     // Note the asymmetry: a new read does NOT clear the previous failure. The
     // banner below stays until a read actually succeeds, so a failing host is a
     // steady, readable statement instead of a strobe of "failed / stale / failed".
-    return () => { cancelled = true }
+    return () => { cancelled = true; controller.abort() }
   }, [sessionId, timelineNonce])
 
   // Keep an open tab honest. Polling stops while the page is hidden, and a

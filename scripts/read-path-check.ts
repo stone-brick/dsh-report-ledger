@@ -35,7 +35,7 @@ const root = await mkdtemp(join(tmpdir(), 'report-ledger-read-path-'))
 process.env.DSH_HOME = root
 
 const { ReportService } = await import('../src/report/service.ts')
-const { appendHop, clearReadCache, listReports, readHops, readReport, reportPath, reportsDir, routePath } = await import('../src/report/ledger.ts')
+const { allocateId, appendHop, clearReadCache, listReports, readHops, readReport, reportPath, reportsDir, routePath } = await import('../src/report/ledger.ts')
 const { pendingTargets } = await import('../src/report/deliver.ts')
 
 /** Agents resident for this run, and how a digest reached each one. */
@@ -249,6 +249,42 @@ check('a hop after a torn append is still readable', afterTorn.some((hop) => hop
   JSON.stringify(afterTorn))
 check('the torn line is dropped without taking the next hop with it', afterTorn.length === 2,
   String(afterTorn.length))
+
+// An orphan sidecar must not let its old id be reused: a new report would be
+// born holding the old audit trail.
+const orphanId = 'R-7103'
+await writeDocument(orphanId, `---\nreport: "${orphanId}"\nsubject: "orphan sidecar"\nfrom: "s"\n---\n\nbody\n`)
+await appendHop(orphanId, { at: 1, actor: 's', action: 'sent', to: ['session-gone'] })
+await unlink(reportPath(orphanId))
+const reused = await allocateId()
+check('an id with an orphan sidecar is not reused', reused !== orphanId, reused)
+
+// A report whose digest says it has hops but whose sidecar vanished must not be
+// silently rewritten from an empty history.
+const guarded = await service.author({ subject: 'sidecar guard', body: 'b', actor: 'session-a', to: ['session-b'] })
+await unlink(routePath(guarded.front.report))
+let sidecarRefused = false
+try {
+  await service.contribute(guarded.front.report, 'session-a', 'still here')
+} catch {
+  sidecarRefused = true
+}
+check('a missing sidecar stops the next mutation', sidecarRefused)
+check('the guarded report still exists', (await readReport(guarded.front.report)) !== undefined)
+
+// Recipients are trimmed; a whitespace-only list is an error, not a hop that the
+// read path silently drops.
+const oneLine = await service.author({
+  subject: 'line one\nR-9999 forged row', body: 'b', actor: 'session-a',
+})
+check('a newline in a subject is normalized', !oneLine.front.subject.includes('\n'), oneLine.front.subject)
+let blankRecipientRefused = false
+try {
+  await service.send(oneLine.front.report, 'session-a', [' '])
+} catch {
+  blankRecipientRefused = true
+}
+check('a whitespace-only recipient is refused', blankRecipientRefused)
 
 let failed = 0
 for (const [label, ok, detail] of checks) {

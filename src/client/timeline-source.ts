@@ -30,18 +30,35 @@ export const REPORT_URL = '/api/report-ledger/report'
  */
 export const POLL_INTERVAL_MS = 10_000
 
+/** A hung host must not pile up an unbounded number of in-flight polls. */
+const READ_TIMEOUT_MS = 15_000
+
 /** Read one endpoint and unwrap its result envelope. */
-export async function getJson<T>(url: string): Promise<T> {
-  const response = await fetch(url, { credentials: 'same-origin', headers: { accept: 'application/json' } })
-  let body: unknown
+export async function getJson<T>(url: string, signal?: AbortSignal): Promise<T> {
+  const controller = new AbortController()
+  const abort = (): void => controller.abort()
+  if (signal?.aborted === true) controller.abort()
+  else signal?.addEventListener('abort', abort, { once: true })
+  const timer = setTimeout(abort, READ_TIMEOUT_MS)
   try {
-    body = await response.json()
-  } catch {
-    throw new Error(`HTTP ${response.status}`)
+    const response = await fetch(url, {
+      credentials: 'same-origin',
+      headers: { accept: 'application/json' },
+      signal: controller.signal,
+    })
+    let body: unknown
+    try {
+      body = await response.json()
+    } catch {
+      throw new Error(`HTTP ${response.status}`)
+    }
+    const envelope = body as { ok?: boolean; code?: string; value?: T }
+    if (envelope.ok !== true) throw new Error(envelope.code ?? `HTTP ${response.status}`)
+    return envelope.value as T
+  } finally {
+    clearTimeout(timer)
+    signal?.removeEventListener('abort', abort)
   }
-  const envelope = body as { ok?: boolean; code?: string; value?: T }
-  if (envelope.ok !== true) throw new Error(envelope.code ?? `HTTP ${response.status}`)
-  return envelope.value as T
 }
 
 /** What one view needs to draw a session tree's ledger. */
@@ -75,17 +92,18 @@ export function useTimeline(sessionId: string): TimelineRead {
       return undefined
     }
     let cancelled = false
+    const controller = new AbortController()
     // Do not clear the error before the read succeeds. A transient host failure
     // would otherwise alternate the panel between drawing and error on every
     // poll, and every error remounts the canvas and throws its view state away.
-    getJson<TimelinePayload>(`${TIMELINE_URL}?root=${encodeURIComponent(sessionId)}`)
+    getJson<TimelinePayload>(`${TIMELINE_URL}?root=${encodeURIComponent(sessionId)}`, controller.signal)
       .then((value) => {
         if (cancelled) return
         setPayload(value)
         setError(undefined)
       })
       .catch((cause: unknown) => { if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause)) })
-    return () => { cancelled = true }
+    return () => { cancelled = true; controller.abort() }
   }, [sessionId, nonce])
 
   useEffect(() => {
@@ -153,7 +171,8 @@ export function useReportDetail(report: string | undefined, nonce: number): Repo
   useEffect(() => {
     if (report === undefined) return undefined
     let cancelled = false
-    getJson<ReportDetail>(`${REPORT_URL}?id=${encodeURIComponent(report)}`)
+    const controller = new AbortController()
+    getJson<ReportDetail>(`${REPORT_URL}?id=${encodeURIComponent(report)}`, controller.signal)
       .then((value) => { if (!cancelled) setState({ report, detail: value }) })
       .catch((cause: unknown) => {
         if (cancelled) return
@@ -164,7 +183,7 @@ export function useReportDetail(report: string | undefined, nonce: number): Repo
           ? { report, detail: previous.detail, error: message }
           : { report, error: message })
       })
-    return () => { cancelled = true }
+    return () => { cancelled = true; controller.abort() }
   }, [report, nonce])
 
   if (report === undefined || state === undefined || state.report !== report) {

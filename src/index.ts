@@ -6,8 +6,8 @@
  *
  *  1. the report service, which owns the durable ledger under
  *     `$DSH_HOME/report-ledger`;
- *  2. the model-facing tools: eleven `report_*` rows (twelve once the worktree
- *     feature is enabled) plus `peer_list` / `peer_start`;
+ *  2. the model-facing tools: thirteen `report_*` rows (fourteen once the
+ *     worktree feature is enabled) plus `peer_list` / `peer_start`;
  *  3. the delivery pump — when a session becomes resident again, every hand-off
  *     the ledger is still holding for it is delivered, and one deferred sweep
  *     does the same for sessions that were already resident when this row

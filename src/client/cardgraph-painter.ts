@@ -794,6 +794,10 @@ export function createCanvasPainter(canvas: HTMLCanvasElement): CardgraphPainter
     const last = points[points.length - 2]
     const end = points[points.length - 1]
     const angle = last === undefined || end === undefined ? 0 : Math.atan2(end.y - last.y, end.x - last.x)
+    const lastLength = last === undefined || end === undefined ? 0 : Math.hypot(end.x - last.x, end.y - last.y)
+    // A short jump (adjacent cards are 8px apart) cannot hold the full 9px head;
+    // shrink it so the base does not sit inside the parent card.
+    const headLength = Math.min(ARROW_LENGTH, Math.max(0, lastLength - ARROW_GAP))
     const tip = end === undefined ? undefined : { x: end.x - Math.cos(angle) * ARROW_GAP, y: end.y - Math.sin(angle) * ARROW_GAP }
     const stroked = tip === undefined || points.length === 0 ? points : [...points.slice(0, -1), tip]
     // A hover in progress reveals the wire from its source; a settled hover (phase 1)
@@ -850,7 +854,7 @@ export function createCanvasPainter(canvas: HTMLCanvasElement): CardgraphPainter
     // The head turns with the last segment, so a wire that arrives through a
     // gutter points into the frame rather than along the way it came.
     if (tip === undefined) return
-    const back = { x: tip.x - Math.cos(angle) * ARROW_LENGTH, y: tip.y - Math.sin(angle) * ARROW_LENGTH }
+    const back = { x: tip.x - Math.cos(angle) * headLength, y: tip.y - Math.sin(angle) * headLength }
     const side = { x: -Math.sin(angle) * ARROW_HALF, y: Math.cos(angle) * ARROW_HALF }
     ctx.setLineDash([])
     ctx.fillStyle = stroke

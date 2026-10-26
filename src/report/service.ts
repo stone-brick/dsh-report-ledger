@@ -18,12 +18,13 @@
  * @module dsh-report-ledger/report/service
  */
 
+import { existsSync } from 'node:fs'
 import { basename } from 'node:path'
 import { planAllocation, reclaimRefusal, type ReclaimedLease, type StaleBinding, type WorktreeSettings } from './allocate.ts'
 import type { AgentLike } from './deliver.ts'
 import { deliver, pendingMode, pendingTargets, type DeliveryOutcome } from './deliver.ts'
 import { evaluateLease, leaseState } from './lease.ts'
-import { allocateId, appendHop, appendReportBody, bodyStartLine, discardUnwrittenId, isValidReportId, listReports, readHops, readReport, reportExists, reportPath, writeReport } from './ledger.ts'
+import { allocateId, appendHop, appendReportBody, bodyStartLine, discardUnwrittenId, isValidReportId, listReports, readHops, readReport, reportExists, reportPath, routePath, writeReport } from './ledger.ts'
 import {
   addWorktree, classifyGitRefusal, compareKey, headOf, inspectCheckout, isWorktreeClean, removeWorktree, resolveRepo,
   samePath,
@@ -36,6 +37,27 @@ const BODY_INLINE_LIMIT = 8000
 
 /** How many characters of a body are shown when it exceeds the inline limit. */
 const BODY_HEAD_LIMIT = 1200
+
+/** A subject is one line; a newline would forge a second row in report_list. */
+function oneLineSubject(subject: string): string {
+  return subject.trim().replace(/\s*\r?\n\s*/g, ' ')
+}
+
+/**
+ * Trim recipient ids and drop blanks.
+ *
+ * A whitespace-only id used to be appended to a hop but discarded by the read
+ * path, so the sender believed it had addressed someone the ledger never showed.
+ * If the caller supplied recipients but none survive, that is an error, not a
+ * silent no-op.
+ */
+function cleanTargets(targets: readonly string[], verb: string): string[] {
+  const cleaned = targets.map((target) => target.trim()).filter((target) => target !== '')
+  if (targets.length > 0 && cleaned.length === 0) {
+    throw new Error(`report-ledger: ${verb} recipients must be non-empty session ids`)
+  }
+  return cleaned
+}
 
 /** Host capabilities the service consumes. */
 export interface ReportServiceHost {
@@ -338,6 +360,17 @@ export class ReportService {
 
   /** Append one hop, then refresh the derived digest fields. */
   async #record(report: string, hop: RouteHop, options: { touch?: boolean } = {}): Promise<ReportFrontMatter> {
+    // A report whose digest says it has hops but whose sidecar is gone is a
+    // damaged record, not a new one. Appending would start a fresh path and the
+    // next #sync would project that empty history over the digest — erasing the
+    // recipients and co-authors. Refuse and leave the damage visible instead.
+    const current = await readReport(report)
+    if (current !== undefined && current.front.hops > 0 && !existsSync(routePath(report))) {
+      throw new Error(
+        `report-ledger: ${report}'s transfer path is missing while its digest records ${current.front.hops} hops; `
+        + 'refusing to rewrite the report from an empty history. Restore the .route.jsonl file first.',
+      )
+    }
     await appendHop(report, hop)
     return await this.#sync(report, options)
   }
@@ -373,14 +406,33 @@ export class ReportService {
 
   /** Deliver a digest and record one arrival hop per recipient that received it. */
   async #deliver(front: ReportFrontMatter, targets: readonly string[], mode: DeliveryMode, actor: string): Promise<DeliveryOutcome[]> {
-    const outcomes = await deliver(this.#host, front, reportPath(front.report), targets, mode)
-    const arrivals = outcomes.filter((outcome) => outcome.status === 'delivered')
-    if (arrivals.length === 0) return outcomes
-    const at = Date.now()
-    for (const arrival of arrivals) {
-      await appendHop(front.report, { at, actor, action: 'delivered', to: [arrival.targetId], note: mode })
+    // One target at a time: a failing steer/inject must not discard the arrivals
+    // that already happened earlier in the batch. The caller gets an aggregate
+    // error naming both sides instead of a blanket "send failed".
+    const outcomes: DeliveryOutcome[] = []
+    const failures: string[] = []
+    for (const target of new Set(targets)) {
+      try {
+        outcomes.push(...await deliver(this.#host, front, reportPath(front.report), [target], mode))
+      } catch (error) {
+        failures.push(`${target} (${error instanceof Error ? error.message : String(error)})`)
+      }
     }
-    await this.#sync(front.report)
+    const arrivals = outcomes.filter((outcome) => outcome.status === 'delivered')
+    if (arrivals.length > 0) {
+      const at = Date.now()
+      for (const arrival of arrivals) {
+        await appendHop(front.report, { at, actor, action: 'delivered', to: [arrival.targetId], note: mode })
+      }
+      await this.#sync(front.report)
+    }
+    if (failures.length > 0) {
+      const delivered = arrivals.map((arrival) => arrival.targetId).join(', ') || 'nobody'
+      throw new Error(
+        `report-ledger: delivered to ${delivered}; failed for ${failures.join('; ')}. `
+        + 'The failures remain pending and will be retried by the delivery sweep.',
+      )
+    }
     return outcomes
   }
 
@@ -390,8 +442,10 @@ export class ReportService {
    * @returns the created digest and any immediate delivery outcomes.
    */
   async author(input: AuthorInput): Promise<MutationResult> {
-    const subject = input.subject.trim()
+    const subject = oneLineSubject(input.subject)
     if (subject === '') throw new Error('report-ledger: report_author requires a non-empty subject')
+    const to = cleanTargets(input.to ?? [], 'report_author')
+    const cc = cleanTargets(input.cc ?? [], 'report_author')
     // A caller that had to know the id in advance — because it names the working
     // tree it is about to create — claims the id itself and passes it back.
     const allocated = input.reportId === undefined
@@ -462,16 +516,15 @@ export class ReportService {
     }
 
     let outcomes: DeliveryOutcome[] = []
-    if ((input.to?.length ?? 0) > 0) {
-      const sent = await this.#record(report, { at: Date.now(), actor: input.actor, action: 'sent', to: [...(input.to ?? [])] })
+    if (to.length > 0) {
+      const sent = await this.#record(report, { at: Date.now(), actor: input.actor, action: 'sent', to })
       refreshed = sent
-      outcomes = await this.#deliver(sent, input.to ?? [], 'wakeup', input.actor)
+      outcomes = await this.#deliver(sent, to, 'wakeup', input.actor)
     }
     // A session named in both lists was addressed, and addressing wins: copying
     // it as well would deliver the same digest twice and record two arrivals for
     // one intended hand-off. The carbon copy adds nothing the address did not.
-    const addressed = input.to ?? []
-    const copies = [...new Set((input.cc ?? []).filter((target) => !addressed.includes(target)))]
+    const copies = [...new Set(cc.filter((target) => !to.includes(target)))]
     if (copies.length > 0) {
       const copied = await this.#record(report, { at: Date.now(), actor: input.actor, action: 'cc', to: copies })
       refreshed = copied
@@ -603,7 +656,8 @@ export class ReportService {
    * @returns the refreshed digest and delivery outcomes.
    */
   async send(report: string, actor: string, targets: readonly string[], note?: string): Promise<MutationResult> {
-    if (targets.length === 0) throw new Error('report-ledger: report_send requires at least one recipient')
+    const cleaned = cleanTargets(targets, 'report_send')
+    if (cleaned.length === 0) throw new Error('report-ledger: report_send requires at least one recipient')
     return this.#withLock(report, async () => {
       await this.#load(report)
       await this.#reopenIfClosed(report, actor)
@@ -611,10 +665,10 @@ export class ReportService {
         at: Date.now(),
         actor,
         action: 'sent',
-        to: [...targets],
+        to: cleaned,
         ...(note === undefined ? {} : { note }),
       })
-      const outcomes = await this.#deliver(front, targets, 'wakeup', actor)
+      const outcomes = await this.#deliver(front, cleaned, 'wakeup', actor)
       return { front: (await this.#load(report)).front, outcomes }
     })
   }
@@ -691,7 +745,8 @@ export class ReportService {
    * @returns the refreshed digest and delivery outcomes.
    */
   async carbonCopy(report: string, actor: string, targets: readonly string[], note?: string): Promise<MutationResult> {
-    if (targets.length === 0) throw new Error('report-ledger: report_cc requires at least one recipient')
+    const cleaned = cleanTargets(targets, 'report_cc')
+    if (cleaned.length === 0) throw new Error('report-ledger: report_cc requires at least one recipient')
     return this.#withLock(report, async () => {
       await this.#load(report)
       await this.#reopenIfClosed(report, actor)
@@ -699,10 +754,10 @@ export class ReportService {
         at: Date.now(),
         actor,
         action: 'cc',
-        to: [...targets],
+        to: cleaned,
         ...(note === undefined ? {} : { note }),
       })
-      const outcomes = await this.#deliver(front, targets, 'quiet', actor)
+      const outcomes = await this.#deliver(front, cleaned, 'quiet', actor)
       return { front: (await this.#load(report)).front, outcomes }
     })
   }
@@ -727,7 +782,8 @@ export class ReportService {
     mode: 'forward' | 'copy',
     note?: string,
   ): Promise<MutationResult> {
-    if (targets.length === 0) throw new Error('report-ledger: report_forward requires at least one target')
+    const cleaned = cleanTargets(targets, 'report_forward')
+    if (cleaned.length === 0) throw new Error('report-ledger: report_forward requires at least one target')
     return this.#withLock(report, async () => {
       await this.#load(report)
       await this.#reopenIfClosed(report, actor)
@@ -735,10 +791,10 @@ export class ReportService {
         at: Date.now(),
         actor,
         action: mode === 'copy' ? 'copied' : 'forwarded',
-        to: [...targets],
+        to: cleaned,
         ...(note === undefined ? {} : { note }),
       })
-      const outcomes = await this.#deliver(front, targets, mode === 'copy' ? 'quiet' : 'wakeup', actor)
+      const outcomes = await this.#deliver(front, cleaned, mode === 'copy' ? 'quiet' : 'wakeup', actor)
       return { front: (await this.#load(report)).front, outcomes }
     })
   }
@@ -1415,7 +1471,7 @@ export class ReportService {
       const next: { subject?: string; task?: string; artifacts?: readonly string[] } = {}
 
       if (patch.subject !== undefined) {
-        const subject = patch.subject.trim()
+        const subject = oneLineSubject(patch.subject)
         if (subject === '') throw new Error('report-ledger: an amendment cannot blank the subject')
         if (subject !== current.front.subject) {
           next.subject = subject
@@ -1451,6 +1507,11 @@ export class ReportService {
         throw new Error(`report-ledger: nothing to amend on ${report} — the provided values already match`)
       }
 
+      // Resolve the display name before reopening: a throwing describe() must not
+      // leave the report reopened with the amendment itself unwritten.
+      const amendmentName = patch.body !== undefined
+        ? await this.#host.describe(actor)
+        : undefined
       await this.#reopenIfClosed(report, actor)
 
       if (patch.body !== undefined) {
@@ -1458,7 +1519,7 @@ export class ReportService {
           // A true rewrite, recorded as such on the hop.
           await writeReport({ front: (await this.#load(report)).front, body: patch.body }, report)
         } else {
-          const name = await this.#host.describe(actor)
+          const name = amendmentName
           const header = `\n\n---\n\n### amendment by ${name ?? actor} at ${new Date().toISOString()}\n\n`
           await appendReportBody(report, `${header}${patch.body.trim()}\n`)
         }

@@ -89,7 +89,7 @@ check('the archive carries the outline', archived.includes('## outline') && arch
 check('a conclusion section is kept in full', archived.includes('结论是要点。'))
 check('a sub-conclusion is kept in full', archived.includes('子结论也要保留。'))
 check('a non-conclusion section is omitted', !archived.includes('96 项通过'))
-check('the omission is named', /omitted sections \(\d+\):.*任务/.test(archived), archived.slice(0, 0))
+check('the omission is named', /omitted sections \(\d+\):[\s\S]*- 任务/.test(archived), archived.slice(0, 0))
 check('the digest is present', archived.includes('- status: closed · task: views · hops: 19'))
 
 // ---- the byte budget is real --------------------------------------------

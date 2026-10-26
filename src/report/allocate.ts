@@ -22,7 +22,7 @@
  * @module dsh-report-ledger/report/allocate
  */
 
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import { leaseState } from './lease.ts'
 import {
   gitVersion, hasSubmodules, inspectCheckout, isWorktreeClean, relativePathsRefusal, samePath,
@@ -202,11 +202,15 @@ export function resolveWorktree(config?: WorktreeConfig): WorktreeRuntime {
     settings: {
       maxActive: countSetting(config?.maxActive, 4, 1),
       maxRetained: countSetting(config?.maxRetained, 4, 0),
-      reclaim: config?.reclaim ?? 'never',
+      // Unknown enum values fall back to the safe default instead of silently
+      // disabling reclamation or changing close behaviour.
+      reclaim: config?.reclaim === 'oldest-closed' ? 'oldest-closed' : 'never',
       relativePaths: config?.relativePaths === true,
-      ...(config?.root === undefined ? {} : { base: config.root }),
+      // A relative root would make binding.path relative, breaking the digest's
+      // absolute-path contract and every later lease/maintenance check.
+      ...(config?.root === undefined || !isAbsolute(config.root) ? {} : { base: config.root }),
     },
-    onClose: config?.onClose ?? 'keep',
+    onClose: config?.onClose === 'remove-if-clean' ? 'remove-if-clean' : 'keep',
   }
 }
 

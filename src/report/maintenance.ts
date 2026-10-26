@@ -153,7 +153,7 @@ export async function buildWorktreeReport(
   const warnings: string[] = []
   const unmanaged: string[] = []
   const dangling: string[] = []
-  const prunable = new Set<string>()
+  const prunable: string[] = []
   for (const bucket of byRepo.values()) {
     const first = bucket[0]
     if (first === undefined) continue
@@ -178,7 +178,7 @@ export async function buildWorktreeReport(
       // Recorded for the per-record flag as well as the flat list, so a caller
       // can see at a glance which bound checkout git has lost track of.
       if (entry.prunable) {
-        prunable.add(entry.path)
+        prunable.push(entry.path)
         dangling.push(entry.path)
       }
     }
@@ -195,7 +195,7 @@ export async function buildWorktreeReport(
   }
 
   const resolved = records.map((record) => (
-    prunable.has(record.path) ? { ...record, prunable: true } : record
+    prunable.some((path) => samePath(path, record.path)) ? { ...record, prunable: true } : record
   ))
 
   // ---- what is worth saying out loud ---------------------------------------

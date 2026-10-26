@@ -198,8 +198,12 @@ export function renderArchive(topic: ArchiveTopic, sources: readonly ArchiveSour
       parts.push(section.text, '')
     }
     if (omitted.length > 0) {
+      // One heading per line. The old single line was the last line of the
+      // section and vanished whole when the byte budget cut before it; line-per-
+      // heading keeps at least the beginning of the list visible.
       parts.push(
-        `omitted sections (${omitted.length}): ${omitted.map((section) => section.heading).join(' · ')}`,
+        `omitted sections (${omitted.length}):`,
+        ...omitted.map((section) => `- ${section.heading}`),
         '',
       )
     }

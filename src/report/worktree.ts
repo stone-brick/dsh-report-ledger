@@ -168,8 +168,18 @@ const REFUSALS: readonly (readonly [GitRefusal, RegExp])[] = [
  */
 export async function runGit(cwd: string, args: readonly string[]): Promise<GitResult> {
   return await new Promise<GitResult>((settle) => {
+    // Git's environment variables can redirect every command to another
+    // repository (GIT_DIR/GIT_WORK_TREE/...); a plugin must judge the path it was
+    // given, not the shell's current repository.
+    const env = { ...process.env }
+    delete env.GIT_DIR
+    delete env.GIT_WORK_TREE
+    delete env.GIT_INDEX_FILE
+    delete env.GIT_OBJECT_DIRECTORY
+    delete env.GIT_COMMON_DIR
     execFile('git', [...args], {
       cwd,
+      env,
       encoding: 'utf8',
       timeout: GIT_TIMEOUT_MS,
       maxBuffer: 8 * 1024 * 1024,

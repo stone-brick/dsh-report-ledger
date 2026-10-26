@@ -505,8 +505,9 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
     const box = boxRef.current
     if (box === null) return undefined
     const rect = box.getBoundingClientRect()
-    const x = (clientX - rect.left - offset.x) / zoom
-    const y = (clientY - rect.top - offset.y) / zoom
+    // The canvas starts at the padding box; getBoundingClientRect is the border box.
+    const x = (clientX - rect.left - box.clientLeft - offset.x) / zoom
+    const y = (clientY - rect.top - box.clientTop - offset.y) / zoom
     return hitTest(targets, x, y)
   }, [targets, offset, zoom])
 
@@ -544,8 +545,10 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
    * @param factor - what to multiply the current zoom by.
    */
   const stepZoom = useCallback((factor: number) => {
+    const next = clamp(zoomRef.current * factor, MIN_ZOOM, MAX_ZOOM)
+    if (next === zoomRef.current) return
     fittedTransform.current = false
-    setZoom((z) => clamp(z * factor, MIN_ZOOM, MAX_ZOOM))
+    setZoom(next)
   }, [])
 
   /** Remember the transform a scope is being left with, so coming back does not fit again. */
@@ -672,8 +675,6 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
     if (box === null) return
     const onWheel = (event: WheelEvent): void => {
       event.preventDefault()
-      // Whatever the gesture is, the view is the reader's from here on.
-      fittedTransform.current = false
       // `deltaMode` 1 is lines and 2 is pages; a mouse on Windows reports pixels.
       const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? box.clientHeight : 1
       const dy = event.deltaY * unit
@@ -685,6 +686,8 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
         const py = event.clientY - rect.top
         const current = zoomRef.current
         const next = clamp(current * Math.exp(-dy * WHEEL_ZOOM_RATE), MIN_ZOOM, MAX_ZOOM)
+        if (next === current) return
+        fittedTransform.current = false
         const ratio = next / current
         // Keep the point under the cursor fixed: the offset scales about it.
         setOffset({ x: px - (px - previous.x) * ratio, y: py - (py - previous.y) * ratio })
@@ -699,6 +702,8 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
       const overflowY = height - box.clientHeight
       const panX = event.shiftKey && dx === 0 ? dy : dx
       const panY = event.shiftKey ? 0 : dy
+      // A drawing that fits its box has nothing to pan; the fit should survive.
+      if (overflowX > 0 || overflowY > 0) fittedTransform.current = false
       setOffset({
         x: overflowX > 0 ? clamp(previous.x - panX, box.clientWidth - width - EDGE_MARGIN, EDGE_MARGIN) : previous.x,
         y: overflowY > 0 ? clamp(previous.y - panY, box.clientHeight - height - EDGE_MARGIN, EDGE_MARGIN) : previous.y,
@@ -907,14 +912,10 @@ export function CardgraphView({ payload, reports, t, openReport, onOpen, idHint,
             type="button"
             aria-label={`${card.report} · ${card.subject}`}
             title={idHint(card.report)}
-            onClick={(event) => {
+            onClick={() => {
+              // Pointer activation is handled by the captured pointerup path;
+              // this click reaches us for keyboard/reader activation only.
               onOpen(card.report)
-              // A mouse click focuses the button, and focus is also a hover path
-              // (that is how a keyboard reader lights a card). Left alone, the
-              // click would leave the path lit after the pointer moved on: the
-              // pointer is gone but the button still has focus. Keyboard
-              // activation reports `detail === 0`, and keeps its focus on purpose.
-              if (event.detail > 0) event.currentTarget.blur()
             }}
             onFocus={() => { setHover({ report: card.report }); selection.hover(card.report, 'canvas') }}
             onBlur={() => { setHover({}); selection.clearHover('canvas') }}
