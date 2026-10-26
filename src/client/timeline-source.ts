@@ -82,13 +82,19 @@ export interface TimelineRead {
  */
 export function useTimeline(sessionId: string): TimelineRead {
   const [payload, setPayload] = useState<TimelinePayload | undefined>(undefined)
+  const [loadedFor, setLoadedFor] = useState<string | undefined>(undefined)
   const [error, setError] = useState<string | undefined>(undefined)
   const [nonce, setNonce] = useState(0)
+
+  // A payload belongs to the session it was read for. Deriving the returned value
+  // from `loadedFor` means a session switch never shows the previous tree, even
+  // for the one frame before the new read lands.
+  useEffect(() => { setError(undefined) }, [sessionId])
 
   useEffect(() => {
     if (sessionId === '') {
       setError('no-session')
-      setPayload(undefined)
+      setLoadedFor(undefined)
       return undefined
     }
     let cancelled = false
@@ -100,6 +106,7 @@ export function useTimeline(sessionId: string): TimelineRead {
       .then((value) => {
         if (cancelled) return
         setPayload(value)
+        setLoadedFor(sessionId)
         setError(undefined)
       })
       .catch((cause: unknown) => { if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause)) })
@@ -122,7 +129,7 @@ export function useTimeline(sessionId: string): TimelineRead {
   }, [sessionId])
 
   const refresh = useCallback(() => { setNonce((value) => value + 1) }, [])
-  return { payload, error, refresh }
+  return { payload: loadedFor === sessionId ? payload : undefined, error, refresh }
 }
 
 /** What one report's detail read returns. */

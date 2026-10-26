@@ -30,7 +30,7 @@ import {
   Tag,
   Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { ReportDetail, TimelinePayload, WorktreeLane } from '../shared/wire.ts'
+import type { ReportDetail, WorktreeLane } from '../shared/wire.ts'
 import {
   buildRows,
   emptyState,
@@ -53,7 +53,7 @@ import {
 import { ReportDetailView } from './ReportDetailView.tsx'
 import type { PathOpener } from './path-opener.ts'
 import { selection } from './selection-bridge.ts'
-import { getJson, POLL_INTERVAL_MS, TIMELINE_URL, useReportDetail } from './timeline-source.ts'
+import { useReportDetail, useTimeline } from './timeline-source.ts'
 import { fill, stamp } from './format.ts'
 import { HOP_LABEL, LEASE_HINT, STATUS_LABEL, STATUS_TONE, type ReportLedgerKey } from './locales.ts'
 import { SEARCH_CLASS } from './styles.ts'
@@ -101,9 +101,9 @@ function rememberedStatus(): StatusFilter {
  */
 export function ReportsView(props: ReportsViewProps): ReactElement {
   const { sessionId, t, opener } = props
-  const [payload, setPayload] = useState<TimelinePayload | undefined>(undefined)
-  const [error, setError] = useState<string | undefined>(undefined)
-  const [timelineNonce, setTimelineNonce] = useState(0)
+  // One read path for both surfaces: the canvas tab and this view consume the
+  // same hook, so polling, visibility handling and failure semantics cannot drift.
+  const { payload, error, refresh: refreshTimeline } = useTimeline(sessionId ?? '')
   // Refreshing the timeline and re-reading the open detail are two different
   // things: the background poll must move the first without touching the second,
   // or the panel would blink back to "reading the transfer path" every interval
@@ -149,8 +149,6 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
   // Resetting them together is what keeps a switched-to session from rendering
   // the previous session's collaboration (or leaving its report open in it).
   useEffect(() => {
-    setPayload(undefined)
-    setError(undefined)
     setOpenReport(undefined)
     setScrollTarget(undefined)
   }, [sessionId])
@@ -166,40 +164,6 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
     setOpenReport(bridged.report)
     if (bridged.report !== undefined) setScrollTarget(bridged.report)
   }, [bridged.report, bridged.session, openReport, sessionId])
-
-  useEffect(() => {
-    if (sessionId === undefined || sessionId === '') {
-      setError('no-session')
-      return undefined
-    }
-    let cancelled = false
-    const controller = new AbortController()
-    getJson<TimelinePayload>(`${TIMELINE_URL}?root=${encodeURIComponent(sessionId)}`, controller.signal)
-      .then((value) => { if (!cancelled) { setPayload(value); setError(undefined) } })
-      .catch((cause: unknown) => { if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause)) })
-    // Note the asymmetry: a new read does NOT clear the previous failure. The
-    // banner below stays until a read actually succeeds, so a failing host is a
-    // steady, readable statement instead of a strobe of "failed / stale / failed".
-    return () => { cancelled = true; controller.abort() }
-  }, [sessionId, timelineNonce])
-
-  // Keep an open tab honest. Polling stops while the page is hidden, and a
-  // returning page catches up immediately, so a background tab costs nothing and
-  // a foreground one is never behind.
-  useEffect(() => {
-    if (sessionId === undefined || sessionId === '') return undefined
-    const tick = (): void => {
-      if (globalThis.document?.visibilityState === 'hidden') return
-      setTimelineNonce((value) => value + 1)
-    }
-    const timer = globalThis.setInterval(tick, POLL_INTERVAL_MS)
-    const onVisibility = (): void => { if (globalThis.document?.visibilityState !== 'hidden') tick() }
-    globalThis.document?.addEventListener('visibilitychange', onVisibility)
-    return () => {
-      globalThis.clearInterval(timer)
-      globalThis.document?.removeEventListener('visibilitychange', onVisibility)
-    }
-  }, [sessionId])
 
   const rows = useMemo<Row[]>(() => (payload === undefined ? [] : buildRows(payload, basis)), [payload, basis])
   const counts = useMemo(() => statusCounts(payload?.reports ?? []), [payload])
@@ -282,7 +246,7 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
   )
 
   const refresh = useCallback(() => {
-    setTimelineNonce((value) => value + 1)
+    refreshTimeline()
     setDetailNonce((value) => value + 1)
   }, [])
 
