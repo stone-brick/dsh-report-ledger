@@ -37,8 +37,8 @@ export type ReportStatus = (typeof REPORT_STATUSES)[number]
  * the addressed hand-off and its arrival; `cc` is a quiet copy; `forwarded` and
  * `copied` are onward transfer and duplication; `read`/`acked` close the loop for
  * one reader; `leased`/`released` bracket a claim on a working tree, and
- * `reclaimed` records that the ledger cleared a checkout away — whether to stay
- * within its retained budget or because the owner asked for it at closing time;
+ * `reclaimed` records that the ledger cleared a checkout away because the owner
+ * asked for it at closing time;
  * `amended` records a correction to the digest or the body; `closed` concludes
  * the matter, and `reopened` records that fresh activity brought it back to life;
  * `transferred` moves one unpaid hand-off from the session that owed it to
@@ -141,7 +141,7 @@ export interface ReportWorktree {
   /**
    * Whether the ledger created this working tree.
    *
-   * Only an allocated tree may ever be reclaimed automatically. A tree the
+   * Only an allocated tree may be removed by an explicit close. A tree the
    * ledger merely adopted belongs to whoever made it, and no policy here is
    * entitled to delete it.
    */

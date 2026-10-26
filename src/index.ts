@@ -1185,6 +1185,13 @@ export function apply(ctx: Context, config?: Config): void {
   const host = buildHost(ctx)
   const service = new ReportService(host)
   const peers = new PeerService(buildPeerHost(ctx, host), config?.maxPeersPerAgent ?? DEFAULT_MAX_PEERS)
+  // Automatic reclamation was removed. An old composition may still carry the
+  // field; ignoring it silently would leave the operator believing cleanup is on.
+  const legacyReclaim = (config?.worktree as Record<string, unknown> | undefined)?.reclaim
+  if (legacyReclaim !== undefined) {
+    ctx.logger?.warn?.('report-ledger: worktree.reclaim is no longer supported and is ignored; '
+      + 'checkouts are only removed by an explicit close with remove-if-clean.')
+  }
   const worktree = resolveWorktree(config?.worktree)
 
   ctx.effect(() => registerReportTools(ctx, service, peers, worktree), 'report-ledger: model tools')

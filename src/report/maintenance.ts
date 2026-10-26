@@ -39,7 +39,7 @@ export interface WorktreeRecord {
   readonly head?: string
   /** The shared git directory recorded on the binding. */
   readonly repo?: string
-  /** Whether the ledger created it. Only these are ever reclaimed. */
+  /** Whether the ledger created it. Only these may be removed by a close. */
   readonly allocated: boolean
   /** Whether the claim is live, ended, or the checkout has been cleared. */
   readonly state: LeaseState
@@ -63,7 +63,6 @@ export interface WorktreeReport {
   readonly limits: {
     readonly maxActive: number
     readonly maxRetained: number
-    readonly reclaim: 'never' | 'oldest-closed'
   }
   /** Claims held right now. */
   readonly active: number
@@ -207,7 +206,7 @@ export async function buildWorktreeReport(
   for (const record of resolved) {
     if (record.presence === 'not-a-worktree') {
       warnings.push(`the directory at ${record.path} (${record.report}) is no longer a working tree; it is not counted `
-        + 'as retained and will not be reclaimed automatically. Move it back, repair it, or remove it by hand.')
+        + 'as retained. Move it back, repair it, or remove it by hand.')
       continue
     }
     if (record.state === 'held' && !record.onDisk) {
@@ -221,14 +220,13 @@ export async function buildWorktreeReport(
         + 'as released rather than reclaimed. The next allocation will note that it is gone.')
     }
     if (record.clean === false && record.state !== 'held') {
-      warnings.push(`the kept checkout at ${record.path} (${record.report}) has uncommitted work, `
-        + 'so it will never be reclaimed automatically.')
+      warnings.push(`the kept checkout at ${record.path} (${record.report}) has uncommitted work; `
+        + 'it must be cleaned up or removed by hand.')
     }
   }
-  if (retained > settings.maxRetained && settings.reclaim === 'never') {
-    warnings.push(`${retained} checkouts are kept on disk past the retained limit of ${settings.maxRetained}, `
-      + 'and automatic reclamation is off, so they will accumulate. Close reports with worktree:"remove-if-clean", '
-      + 'or set worktree.reclaim to "oldest-closed".')
+  if (retained > settings.maxRetained) {
+    warnings.push(`${retained} checkouts are kept on disk past the warning threshold of ${settings.maxRetained}. `
+      + 'Nothing is deleted automatically; close reports with worktree:"remove-if-clean" or clean them up by hand.')
   }
   // Deduplicated because two bindings can name the same repository, and the
   // listing below is per repository rather than per binding.
@@ -248,7 +246,6 @@ export async function buildWorktreeReport(
     limits: {
       maxActive: settings.maxActive,
       maxRetained: settings.maxRetained,
-      reclaim: settings.reclaim,
     },
     active,
     retained,

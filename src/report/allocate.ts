@@ -6,18 +6,15 @@
  * room are separate questions, and conflating them is how a convenient feature
  * becomes a destructive one.
  *
- * **Two limits, not one.** `maxActive` bounds how many checkouts may be *held at
- * once* — a coordination limit, and the one a caller waits on. `maxRetained`
- * bounds how many may sit on disk after their claim *ended* — a disk limit. They
- * are deliberately separate numbers because they fail differently: a full active
- * budget means someone is working and you must wait, while a full retained
- * budget means nobody is working and there is litter to clear.
+ * **One enforced limit, one warning.** `maxActive` bounds how many checkouts may
+ * be *held at once* — a coordination limit, and the one a caller waits on.
+ * `maxRetained` no longer deletes anything: it is a warning threshold the
+ * maintenance view reports against. A checkout is only removed by an explicit
+ * close (`remove-if-clean`), never as a side effect of allocating another one.
  *
- * **Reclaiming can never free an active slot.** A reclaimable checkout is by
- * definition one whose claim already ended, so clearing it cannot release a live
- * holder's claim. Coupling the two would amount to offering "take a checkout
- * away from an agent at work" as a configuration option; a full active budget is
- * a refusal with no override, and it names who to wait for.
+ * **Allocation never frees disk.** It creates a checkout or refuses; it does not
+ * take an old one away. The active budget is a refusal with no override, and it
+ * names who to wait for.
  *
  * @module dsh-report-ledger/report/allocate
  */
@@ -25,9 +22,9 @@
 import { isAbsolute, join } from 'node:path'
 import { leaseState } from './lease.ts'
 import {
-  gitVersion, hasSubmodules, inspectCheckout, isWorktreeClean, relativePathsRefusal, samePath,
+  gitVersion, hasSubmodules, inspectCheckout, relativePathsRefusal, samePath,
 } from './worktree.ts'
-import type { CheckoutReality, RepoLocation } from './worktree.ts'
+import type { RepoLocation } from './worktree.ts'
 import type { ReportFrontMatter, ReportWorktree, RouteHop } from './types.ts'
 
 /** The branch prefix every ledger-allocated checkout uses. */
@@ -105,10 +102,8 @@ export function worktreePath(repo: RepoLocation, report: string, subject: string
 export interface WorktreeSettings {
   /** Cap on checkouts held at once. */
   readonly maxActive: number
-  /** Cap on checkouts kept on disk after their claim ended, per repository. */
+  /** Warning threshold for checkouts kept on disk after their claim ended, per repository. */
   readonly maxRetained: number
-  /** Whether an over-full retained set is cleared automatically. */
-  readonly reclaim: 'never' | 'oldest-closed'
   /** Base directory for allocated checkouts; the default is beside the repository. */
   readonly base?: string
   /** Write linking files as relative paths. Raises the repository format version. */
@@ -135,30 +130,19 @@ export interface WorktreeConfig {
   /**
    * Cap on checkouts held at once.
    *
-   * A coordination limit, and the one a caller waits on. Reclaiming can never
+   * A coordination limit, and the one a caller waits on. No allocation can
    * raise it, because what it would have to clear is a checkout someone is
    * working in.
    * @default 4
    */
   maxActive?: number
   /**
-   * Cap on checkouts kept on disk after their claim ended, counted per
-   * repository. A checkout from another repository never consumes this
-   * repository's retained budget.
-   *
-   * A disk limit. Failing it is never a reason to block work, so it only
-   * triggers housekeeping — and only when {@link reclaim} permits it.
+   * Warning threshold for checkouts kept on disk after their claim ended,
+   * counted per repository. Exceeding it never deletes anything; the maintenance
+   * view reports the count and points at explicit cleanup.
    * @default 4
    */
   maxRetained?: number
-  /**
-   * Whether an over-full retained set is cleared automatically.
-   *
-   * Off by default. When on, the oldest checkouts whose claim ended *and* which
-   * are clean are removed; an unclean one is always skipped and reported.
-   * @default 'never'
-   */
-  reclaim?: 'never' | 'oldest-closed'
   /**
    * Write linking files as relative paths, so a repository and its checkouts can
    * be moved together.
@@ -204,9 +188,6 @@ export function resolveWorktree(config?: WorktreeConfig): WorktreeRuntime {
     settings: {
       maxActive: countSetting(config?.maxActive, 4, 1),
       maxRetained: countSetting(config?.maxRetained, 4, 0),
-      // Unknown enum values fall back to the safe default instead of silently
-      // disabling reclamation or changing close behaviour.
-      reclaim: config?.reclaim === 'oldest-closed' ? 'oldest-closed' : 'never',
       relativePaths: config?.relativePaths === true,
       // A relative root would make binding.path relative, breaking the digest's
       // absolute-path contract and every later lease/maintenance check.
@@ -214,28 +195,6 @@ export function resolveWorktree(config?: WorktreeConfig): WorktreeRuntime {
     },
     onClose: config?.onClose === 'remove-if-clean' ? 'remove-if-clean' : 'keep',
   }
-}
-
-/** A checkout the ledger created and may clear away. */
-interface Reclaimable {
-  /** The report that owns it. */
-  readonly report: string
-  /** Absolute path of the checkout. */
-  readonly path: string
-  /** Its branch, when it has one. */
-  readonly branch?: string
-  /** When its claim ended. */
-  readonly releasedAt: number
-}
-
-/** A claim taken back to make room on disk. */
-export interface ReclaimedLease {
-  /** The report the checkout belonged to. */
-  readonly report: string
-  /** The path to clear. */
-  readonly path: string
-  /** Its branch, when it had one. */
-  readonly branch?: string
 }
 
 /** A binding whose checkout is no longer a usable working tree. */
@@ -267,18 +226,13 @@ export interface AllocationPlan {
   readonly binding: ReportWorktree & { readonly branch: string; readonly repo: string; readonly allocated: true }
   /** How many ended claims in this repository still have a checkout on disk. */
   readonly retained: number
-  /** The checkout to reclaim first, when one may be cleared. */
-  readonly reclaimed?: ReclaimedLease
-  /** Candidates for reclamation that were refused, and why. */
-  readonly reclaimSkipped: readonly string[]
   /**
    * Bindings whose checkout has already vanished.
    *
-   * Not candidates: a checkout that is gone frees no disk, so it must not count
-   * against the retained budget. But the ledger still believes it owns one
-   * there, and leaving that belief in place would have every later allocation
-   * re-examine it. The caller records the fact once, which is both true and what
-   * stops the repetition.
+   * Not candidates for anything: a checkout that is gone frees no disk. But the
+   * ledger still believes it owns one there, and leaving that belief in place
+   * would have every later allocation re-examine it. The caller records the fact
+   * once, which is both true and what stops the repetition.
    */
   readonly stale: readonly StaleBinding[]
 }
@@ -317,15 +271,6 @@ export interface AllocationQuery {
   readonly version?: string
 }
 
-/** When a claim ended, from the hop that ended it. */
-function lastReleaseAt(hops: readonly RouteHop[]): number {
-  let at = 0
-  for (const hop of hops) {
-    if (hop.action === 'released') at = hop.at
-  }
-  return at
-}
-
 /**
  * The message shown when the active budget is full.
  *
@@ -348,41 +293,16 @@ export function budgetMessage(
 }
 
 /**
- * Why a candidate the plan chose must not actually be removed, if anything has
- * changed since the plan was made.
- *
- * The plan is a decision about the filesystem taken from the filesystem, and the
- * window between making it and acting on it is real. So the same checks are
- * asked again immediately before the delete, from the helper both sides share,
- * and a disagreement aborts the allocation instead of stepping over it: taking
- * something away is never the safe default.
- * @param target - the checkout the plan selected.
- * @param reality - what git reports there now.
- * @returns the reason to refuse, or `undefined` when it is safe to remove.
- */
-export function reclaimRefusal(target: ReclaimedLease, reality: CheckoutReality): string | undefined {
-  if (reality.presence === 'missing') return `${target.path} is no longer on disk`
-  if (reality.presence === 'not-a-worktree') return `${target.path} is not a working tree of its repository any more`
-  if (target.branch !== undefined && reality.branch !== target.branch) {
-    const actual = reality.branch === undefined ? 'a detached HEAD' : `'${reality.branch}'`
-    return `${target.path} is on ${actual}, not '${target.branch}'`
-  }
-  return undefined
-}
-
-/**
  * Decide what to allocate, or refuse.
  *
  * One pass over the ledger yields both answers: which checkouts are held now,
- * and which ended claims left one behind. The budget is then checked against the
- * held set alone and refuses without an override; reclamation runs afterwards,
- * for the disk limit, and can only reach checkouts whose claim already ended.
+ * and which ended claims left one behind. Only the held set can refuse the
+ * allocation (the active budget); the ended set is examined only to correct
+ * stale beliefs and to count what remains on disk. **Nothing is deleted here.**
  *
- * Two innocents have to be protected from that reclamation. A checkout a live
- * report *adopted* is still named by the closed report that made it — the path
- * is the same, so the closed report's binding looks like litter while someone is
- * working in it. And a path that exists but is no longer a working tree is not a
- * checkout to clear at all; it is a belief to correct, once.
+ * A checkout a live report *adopted* is still named by the closed report that
+ * made it. Its ended binding must not be mistaken for a vanished checkout just
+ * because someone else is working in it, so a live holder skips the stale check.
  * @param query - the allocation and the ledger it must fit into.
  * @param settings - the resolved settings.
  * @returns the plan, or the refusal.
@@ -419,7 +339,7 @@ export async function planAllocation(
 
   const held: { report: string; actor: string; live: boolean }[] = []
   const liveClaims: { report: string; worktree: ReportWorktree }[] = []
-  const ended: { report: string; binding: ReportWorktree; releasedAt: number }[] = []
+  const ended: { report: string; binding: ReportWorktree }[] = []
   for (const front of query.digests) {
     if (front.report === query.report) continue
     const binding = front.worktree
@@ -434,37 +354,30 @@ export async function planAllocation(
       continue
     }
     // Only a checkout the ledger created, for a report that concluded, whose
-    // claim ended *without having been cleared* is ever a candidate. A checkout
-    // merely adopted belongs to whoever made it, whatever the report says, and
-    // one already recorded as reclaimed has nothing left to free.
+    // claim ended *without having been cleared* is examined at all. A checkout
+    // merely adopted belongs to whoever made it, whatever the report says.
     if (state !== 'released' || front.status !== 'closed' || binding.allocated !== true) continue
-    ended.push({ report: front.report, binding, releasedAt: lastReleaseAt(hops) })
+    ended.push({ report: front.report, binding })
   }
 
   if (held.length >= settings.maxActive) {
     return { kind: 'budget', message: budgetMessage(held, settings.maxActive) }
   }
 
-  const reclaimable: Reclaimable[] = []
-  const reclaimSkipped: string[] = []
   const stale: StaleBinding[] = []
+  let retained = 0
   for (const candidate of ended) {
-    // Reclaim is scoped to the repository being allocated in. A checkout in
-    // another repository is not this allocation's disk budget, and deleting it
-    // would run under this repository's lock while touching another's.
+    // Only this repository's checkouts are inspected: a checkout elsewhere is
+    // not this allocation's retained count, and recording its stale state from
+    // here would blame the wrong repository.
     if (candidate.binding.repo === undefined || !samePath(candidate.binding.repo, query.repo.commonDir)) continue
     // The same path is the same checkout. A live report may have adopted this
-    // one — reclamation may never take a checkout away from an agent at work.
+    // one; its ended binding is not a vanished checkout while someone works in it.
     const holder = liveClaims.find((live) => samePath(live.worktree.path, candidate.binding.path))
-    if (holder !== undefined) {
-      reclaimSkipped.push(
-        `${candidate.report} (its checkout at ${candidate.binding.path} is held by ${holder.report})`,
-      )
-      continue
-    }
+    if (holder !== undefined) continue
     // Existing is not the same as being a checkout: a directory that stopped
-    // being one makes `git status` fail there, and reading that failure as dirty
-    // is a wrong diagnosis that also occupies the budget forever.
+    // being one would make `git status` fail there, and reading that failure as
+    // dirty is a wrong diagnosis.
     const reality = await inspectCheckout(candidate.binding.path)
     if (reality.presence === 'missing') {
       stale.push({ report: candidate.report, path: candidate.binding.path })
@@ -478,32 +391,7 @@ export async function planAllocation(
       })
       continue
     }
-    reclaimable.push({
-      report: candidate.report,
-      path: candidate.binding.path,
-      ...(candidate.binding.branch === undefined ? {} : { branch: candidate.binding.branch }),
-      releasedAt: candidate.releasedAt,
-    })
-  }
-
-  reclaimable.sort((left, right) => left.releasedAt - right.releasedAt || left.report.localeCompare(right.report))
-  let reclaimed: ReclaimedLease | undefined
-  if (settings.reclaim === 'oldest-closed' && reclaimable.length > settings.maxRetained) {
-    for (const candidate of reclaimable) {
-      // The cleanliness gate holds even though the switch is on. A closed report
-      // says the conversation ended, which is not the same claim as "nothing
-      // here is worth keeping", and only the second one licenses a delete.
-      if (!(await isWorktreeClean(candidate.path))) {
-        reclaimSkipped.push(`${candidate.report} (uncommitted changes at ${candidate.path})`)
-        continue
-      }
-      reclaimed = {
-        report: candidate.report,
-        path: candidate.path,
-        ...(candidate.branch === undefined ? {} : { branch: candidate.branch }),
-      }
-      break
-    }
+    retained++
   }
 
   return {
@@ -513,9 +401,7 @@ export async function planAllocation(
       repo: query.repo.commonDir,
       allocated: true,
     },
-    retained: reclaimable.length - (reclaimed === undefined ? 0 : 1),
-    ...(reclaimed === undefined ? {} : { reclaimed }),
-    reclaimSkipped,
+    retained,
     stale,
   }
 }

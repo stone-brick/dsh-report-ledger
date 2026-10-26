@@ -311,7 +311,7 @@ const keptPath = 'D:\\fixtures\\R-0042'
 const authoringDown = {
   provision: async () => ({
     report: 'R-0042',
-    prepared: { binding: { path: keptPath, branch: 'dsh/R-0042', allocated: true }, retained: [], reclaimSkipped: [], stale: [] },
+    prepared: { binding: { path: keptPath, branch: 'dsh/R-0042', allocated: true }, retained: 0, stale: [] },
   }),
   author: async () => { throw new Error('fixture: the ledger is unwritable') },
   rollbackProvision: async (input: { report: string }) => {

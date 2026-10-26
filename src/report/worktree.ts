@@ -4,7 +4,7 @@
  * The ledger records *intent*; git records *reality*. This module is the whole
  * of the second half: it shells out to `git`, reads `git worktree list`, and
  * decides nothing. Every policy question — which report may hold a branch, when
- * a lease may be reclaimed, what to do when the two layers disagree — belongs to
+ * a checkout may be removed, what to do when the two layers disagree — belongs to
  * the service layer, because answering it needs the ledger. This module must
  * stay usable and testable without one.
  *

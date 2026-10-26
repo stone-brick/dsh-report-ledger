@@ -32,7 +32,7 @@ const ledger = await import('../src/report/ledger.ts')
 const checks: [string, boolean, string][] = []
 const check = (label: string, ok: boolean, detail = ''): void => { checks.push([label, ok, detail]) }
 
-const settings: WorktreeSettings = { maxActive: 8, maxRetained: 8, reclaim: 'never', relativePaths: false }
+const settings: WorktreeSettings = { maxActive: 8, maxRetained: 8, relativePaths: false }
 
 const git = async (cwd: string, ...args: string[]): Promise<string> => {
   const result = await w.runGit(cwd, args)
@@ -87,7 +87,7 @@ check('an empty ledger has nothing active or retained', empty.active === 0 && em
 check('an empty ledger says nothing', empty.warnings.length === 0, empty.warnings.join(' | '))
 check('the main worktree is not reported as unmanaged', empty.unmanaged.length === 0, empty.unmanaged.join())
 check('the view carries the feature state and limits',
-  empty.enabled === true && empty.limits.maxActive === 8 && empty.limits.reclaim === 'never')
+  empty.enabled === true && empty.limits.maxActive === 8 && empty.limits.maxRetained === 8)
 
 // ---- 2. a live claim -------------------------------------------------------
 const held = await leaseInto('held checkout')
@@ -147,14 +147,10 @@ check('a plain directory gets its own warning, not a dirty warning',
   && !plainView.warnings.some((warning) => warning.includes('uncommitted work')),
   plainView.warnings.join(' | '))
 
-// The retained limit is only worth reporting when nothing will clear it.
-const overBudget = await view({ ...settings, maxRetained: 0, reclaim: 'never' })
-check('accumulation past the retained limit is called out',
-  overBudget.warnings.some((warning) => warning.includes('past the retained limit')), overBudget.warnings.join(' | '))
-const withReclaim = await view({ ...settings, maxRetained: 0, reclaim: 'oldest-closed' })
-check('and is not called out when reclamation is on',
-  !withReclaim.warnings.some((warning) => warning.includes('past the retained limit')),
-  withReclaim.warnings.join(' | '))
+// The retained threshold is a warning; nothing clears it automatically.
+const overBudget = await view({ ...settings, maxRetained: 0 })
+check('accumulation past the warning threshold is called out',
+  overBudget.warnings.some((warning) => warning.includes('past the warning threshold')), overBudget.warnings.join(' | '))
 
 // ---- 4. a checkout that vanished under a live claim ------------------------
 const vanished = await leaseInto('vanishing checkout')
@@ -190,29 +186,26 @@ check('a vanished unbound checkout is reported as dangling',
 check('a dangling entry is not also offered for adoption',
   !afterStrayGone.unmanaged.some((path) => w.samePath(path, strayPath)), afterStrayGone.unmanaged.join())
 
-// ---- 6. reclamation is terminal, and clears at most one per allocation ----
+// ---- 6. allocation never reclaims an old checkout --------------------------
 const terminal = await leaseInto('terminal checkout')
 await service.close(terminal.report, ME, 'done')
-// Two clean, concluded, ledger-allocated checkouts are candidates now: the one
-// from step 3 is older, and the documented behaviour is one reclamation per
-// allocation — the oldest. So the newer one must still be there afterwards.
-const beforeReclaim = await view()
-check('both candidates are retained before reclamation',
-  beforeReclaim.records.filter((record) => record.state === 'released' && record.onDisk).length === 2,
-  String(beforeReclaim.records.filter((record) => record.state === 'released' && record.onDisk).length))
+const beforeAllocation = await view()
+check('both concluded checkouts are retained before allocation',
+  beforeAllocation.records.filter((record) => record.state === 'released' && record.onDisk).length === 2,
+  String(beforeAllocation.records.filter((record) => record.state === 'released' && record.onDisk).length))
 await service.prepareWorktree({
   report: 'R-9999', subject: 'probe', actor: ME, repo: located, base: 'main',
-  settings: { ...settings, maxRetained: 0, reclaim: 'oldest-closed' },
+  settings: { ...settings, maxRetained: 0 },
 })
-const afterReclaim = await view()
-const oldest = afterReclaim.records.find((record) => record.report === held.report)
-const newer = afterReclaim.records.find((record) => record.report === terminal.report)
-check('reclamation clears the oldest concluded checkout', oldest?.state === 'reclaimed', String(oldest?.state))
-check('a reclaimed checkout is reported as off disk', oldest?.onDisk === false)
-check('one allocation reclaims at most one checkout',
+const afterAllocation = await view()
+const oldest = afterAllocation.records.find((record) => record.report === held.report)
+const newer = afterAllocation.records.find((record) => record.report === terminal.report)
+check('allocation does not clear the oldest concluded checkout',
+  oldest?.state === 'released' && oldest.onDisk === true, `${oldest?.state} onDisk=${oldest?.onDisk}`)
+check('allocation leaves the other concluded checkout alone',
   newer?.state === 'released' && newer.onDisk === true, `${newer?.state} onDisk=${newer?.onDisk}`)
-check('a reclaimed checkout is no longer counted as retained',
-  afterReclaim.retained === 1, String(afterReclaim.retained))
+check('both concluded checkouts are still counted as retained',
+  afterAllocation.retained === 2, String(afterAllocation.retained))
 
 // ---- 7. a removal the ledger performed is not an anomaly -------------------
 // Closing with remove-if-clean takes the checkout away *and* records that the

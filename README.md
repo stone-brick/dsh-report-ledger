@@ -160,11 +160,10 @@ reports/R-0001.route.jsonl   append-only 传递路径，一行一跳
 | `worktree.enabled` | `false` | 开启后一份汇报可拥有自己的 git 检出，见 [工作区](docs/worktree.md) |
 | `worktree.root` | 仓库同级 `.dsh-worktrees/<仓库名>/` | 检出根目录 |
 | `worktree.onClose` | `keep` | 结案处置：`keep` \| `remove-if-clean` |
-| `worktree.maxActive` / `maxRetained` | `4` / `4` | 同时占用上限 / 结案后留在磁盘上的上限 |
-| `worktree.reclaim` | `never` | `never` \| `oldest-closed`：超预算时清一个最老的、干净的、账本自建的 |
+| `worktree.maxActive` / `maxRetained` | `4` / `4` | 同时占用上限 / 结案后留在磁盘上的告警阈值（不自动删除） |
 | `worktree.relativePaths` | `false` | 启用 `extensions.relativeWorktrees`，会把仓库格式版本抬到 1（旧版 git 直接拒绝访问） |
 
-开启工作区之后，每份汇报可以有自己的 git 检出，但**独立的只有工作目录与索引**：`config`、`hooks`、对象库以及检出之外的一切仍然共享——装一个 hook，会影响所有检出的每一次提交。占用与回收的完整规则见 [工作区](docs/worktree.md)。
+开启工作区之后，每份汇报可以有自己的 git 检出，但**独立的只有工作目录与索引**：`config`、`hooks`、对象库以及检出之外的一切仍然共享——装一个 hook，会影响所有检出的每一次提交。占用与清理的完整规则见 [工作区](docs/worktree.md)。
 
 ## 界面
 
@@ -203,7 +202,7 @@ web profile 里多两处：
 
 ```sh
 pnpm build        # 产出 lib/index.js（宿主半）与 lib/client.js（浏览器半）
-pnpm test         # 十六套确定性检查，1136 项断言（不需要 DSH，不碰真实账本）
+pnpm test         # 十六套确定性检查，1110 项断言（不需要 DSH，不碰真实账本）
 pnpm check        # 完整本地门禁：typecheck + test + test:tools
 ```
 

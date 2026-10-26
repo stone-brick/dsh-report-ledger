@@ -35,7 +35,7 @@ const checks: [string, boolean, string][] = []
 const check = (label: string, ok: boolean, detail = ''): void => { checks.push([label, ok, detail]) }
 
 /** The resolved settings, wide open unless a test narrows them. */
-const generous: WorktreeSettings = { maxActive: 99, maxRetained: 99, reclaim: 'never', relativePaths: false }
+const generous: WorktreeSettings = { maxActive: 99, maxRetained: 99, relativePaths: false }
 
 const git = async (cwd: string, ...args: string[]): Promise<string> => {
   const result = await w.runGit(cwd, args)
@@ -150,7 +150,7 @@ check('authoring with a binding records both hops',
 // refusal naming the holder — never an invitation to clear someone else's work.
 let budgetRefusal = ''
 try {
-  await leaseInto('over budget', 'owner-b', { ...generous, maxActive: 1, maxRetained: 0, reclaim: 'oldest-closed' })
+  await leaseInto('over budget', 'owner-b', { ...generous, maxActive: 1, maxRetained: 0 })
 } catch (error) {
   budgetRefusal = error instanceof Error ? error.message : String(error)
 }
@@ -158,7 +158,7 @@ check('a full active budget refuses the allocation', budgetRefusal !== '', 'the 
 check('the refusal names the holder', budgetRefusal.includes(first.report), budgetRefusal)
 check('the refusal says whether the holder is around', budgetRefusal.includes('(live)'), budgetRefusal)
 check('the refusal offers the ways out', budgetRefusal.includes('report_release'), budgetRefusal)
-check('a full budget is refused even with reclamation enabled',
+check('a full budget is still refused',
   budgetRefusal.includes('budget is full'), budgetRefusal)
 check('the refused allocation left no checkout behind',
   (await w.listWorktrees(located)).length === 2, String((await w.listWorktrees(located)).length))
@@ -175,110 +175,35 @@ check('a repository using submodules refuses allocation', submoduleRefusal.inclu
 check('the refusal explains why', submoduleRefusal.includes('cannot be moved'), submoduleRefusal)
 await rm(join(repo, '.gitmodules'))
 
-// ---- 5. retained counting and what may be reclaimed ------------------------
+// ---- 5. allocation never deletes an old checkout ----------------------------
+// The retained threshold is a warning only. A closed, kept checkout stays on
+// disk no matter how far over maxRetained the next allocation is.
 const second = await leaseInto('second checkout', 'owner-a')
-
-// A claim that ended but whose report is still open is not a candidate: the
-// conversation continues, and the checkout may be claimed again tomorrow.
-await service.release(second.report, 'owner-a')
+await service.close(second.report, 'owner-a', 'done')
 const secondDigest = await digestOf(second.report)
 check('a released binding survives on the digest', secondDigest?.worktree !== undefined)
-const openRetained = await a.planAllocation({
+const overThresholdSettings: WorktreeSettings = { ...generous, maxRetained: 0 }
+const overThreshold = await a.planAllocation({
   report: 'R-9999', subject: 'probe', repo: located,
   digests: await ledger.listReports(),
   hopsOf: async (id) => await ledger.readHops(id),
   isLive: () => false,
-}, { ...generous, maxRetained: 0, reclaim: 'oldest-closed' })
-check('a released claim on an open report is not reclaimed',
-  !('kind' in openRetained) && openRetained.reclaimed === undefined,
-  JSON.stringify('kind' in openRetained ? openRetained : openRetained.reclaimed))
-
-// An adopted checkout belongs to whoever made it, whatever the report says.
-const adoptedId = await ledger.allocateId()
-const adoptedPath = join(located.worktreeRoot, 'adopted')
-await w.addWorktree({ repo: located, path: adoptedPath, branch: 'adopted-branch', base: 'main' })
-await service.author({
-  reportId: adoptedId, subject: 'adopted checkout', body: 'b', actor: 'owner-a',
-  worktree: { path: adoptedPath, branch: 'adopted-branch', repo: located.commonDir },
-})
-await service.close(adoptedId, 'owner-a', 'done')
-const adoptedPlan = await a.planAllocation({
-  report: 'R-9999', subject: 'probe', repo: located,
-  digests: await ledger.listReports(),
-  hopsOf: async (id) => await ledger.readHops(id),
-  isLive: () => false,
-}, { ...generous, maxRetained: 0, reclaim: 'oldest-closed' })
-check('an adopted checkout is never reclaimed',
-  !('kind' in adoptedPlan) && adoptedPlan.reclaimed?.report !== adoptedId,
-  JSON.stringify(!('kind' in adoptedPlan) ? adoptedPlan.reclaimed : adoptedPlan))
-
-// ---- 6. reclamation picks the oldest clean candidate ----------------------
-// Distinct release times, so "oldest" is decided by the clock rather than by the
-// tie-break on report id.
-const oldCandidate = await leaseInto('oldest candidate', 'owner-a')
-await service.close(oldCandidate.report, 'owner-a', 'done')
-await new Promise((resolve) => { setTimeout(resolve, 8) })
-const newCandidate = await leaseInto('newer candidate', 'owner-b')
-await service.close(newCandidate.report, 'owner-b', 'done')
-
-const digestBeforeReclaim = await digestOf(oldCandidate.report)
-const reclaimSettings: WorktreeSettings = { ...generous, maxActive: 99, maxRetained: 1, reclaim: 'oldest-closed' }
-const planned = await a.planAllocation({
-  report: 'R-9999', subject: 'probe', repo: located,
-  digests: await ledger.listReports(),
-  hopsOf: async (id) => await ledger.readHops(id),
-  isLive: () => false,
-}, reclaimSettings)
-check('reclamation chooses a candidate', !('kind' in planned) && planned.reclaimed !== undefined)
-check('reclamation chooses the oldest by release time',
-  !('kind' in planned) && planned.reclaimed?.report === oldCandidate.report,
-  JSON.stringify(!('kind' in planned) ? planned.reclaimed : planned))
-check('an unclean oldest candidate is skipped, not forced',
-  !('kind' in planned) && planned.reclaimSkipped.length === 0)
-
-// Dirt on the oldest must move the choice to the next clean one and be reported.
-await writeFile(join(oldCandidate.prepared.binding.path, 'uncommitted.txt'), 'x\n')
-const withDirty = await a.planAllocation({
-  report: 'R-9999', subject: 'probe', repo: located,
-  digests: await ledger.listReports(),
-  hopsOf: async (id) => await ledger.readHops(id),
-  isLive: () => false,
-}, reclaimSettings)
-check('a dirty candidate is skipped in favour of the next clean one',
-  !('kind' in withDirty) && withDirty.reclaimed?.report === newCandidate.report,
-  JSON.stringify(!('kind' in withDirty) ? withDirty.reclaimed : withDirty))
-check('the skipped candidate is reported with its reason',
-  !('kind' in withDirty) && withDirty.reclaimSkipped.some((entry) => entry.includes(oldCandidate.report)
-    && entry.includes('uncommitted')), JSON.stringify(!('kind' in withDirty) ? withDirty.reclaimSkipped : []))
-check('the dirty checkout is still on disk', await w.isWorktreeClean(oldCandidate.prepared.binding.path) === false)
-await rm(join(oldCandidate.prepared.binding.path, 'uncommitted.txt'))
-
-check('reclamation is off by default',
-  !('kind' in await a.planAllocation({
-    report: 'R-9999', subject: 'probe', repo: located,
-    digests: await ledger.listReports(),
-    hopsOf: async (id) => await ledger.readHops(id),
-    isLive: () => false,
-  }, { ...reclaimSettings, reclaim: 'never' })))
-
-// ---- 7. reclamation happens, is recorded, and does not revive the report ---
-const before = await service.prepareWorktree({
+}, overThresholdSettings)
+check('the plan has no reclaim slot at all',
+  !('kind' in overThreshold) && !('reclaimed' in (overThreshold as unknown as Record<string, unknown>)))
+check('the old checkout still counts as retained',
+  !('kind' in overThreshold) && overThreshold.retained >= 1,
+  JSON.stringify(!('kind' in overThreshold) ? overThreshold.retained : overThreshold))
+const afterThreshold = await service.prepareWorktree({
   report: 'R-9999', subject: 'probe', actor: 'owner-c', repo: located, base: 'main',
-  settings: reclaimSettings,
+  settings: overThresholdSettings,
 })
-check('provisioning carries out the reclamation', before.reclaimed?.report === oldCandidate.report,
-  JSON.stringify(before.reclaimed))
-check('the reclaimed checkout is gone from disk',
-  !(await w.listWorktrees(located)).some((entry) => w.samePath(entry.path, oldCandidate.prepared.binding.path)))
-check('the reclaimed report is told, in its own trail',
-  (await ledger.readHops(oldCandidate.report)).some((h) => h.action === 'reclaimed'))
-// The whole reason the administrative hop exists: clearing litter must not make
-// a concluded report look active again and float it to the top of every listing.
-check('the reclaimed report does not look newly active',
-  (await digestOf(oldCandidate.report))?.updated === digestBeforeReclaim?.updated,
-  `${(await digestOf(oldCandidate.report))?.updated} vs ${digestBeforeReclaim?.updated}`)
-check('the reclaimed report stays concluded', (await digestOf(oldCandidate.report))?.status === 'closed')
-await service.discardWorktree(before.binding)
+check('provisioning over the threshold does not remove the old checkout',
+  (await w.listWorktrees(located)).some((entry) => w.samePath(entry.path, second.prepared.binding.path)))
+check('provisioning over the threshold records no reclaimed hop',
+  !(await ledger.readHops(second.report)).some((h) => h.action === 'reclaimed'))
+await service.discardWorktree(afterThreshold.binding)
+await service.discardWorktree(second.prepared.binding)
 
 // ---- 8. a checkout that vanished without the ledger's help -----------------
 // The ledger's own removals leave a `reclaimed` hop, so a binding that is merely
@@ -299,13 +224,13 @@ const stalePlan = await a.planAllocation({
   digests: await ledger.listReports(),
   hopsOf: async (id) => await ledger.readHops(id),
   isLive: () => false,
-}, { ...generous, maxRetained: 0, reclaim: 'oldest-closed' })
+}, { ...generous, maxRetained: 0 })
 check('a checkout removed by hand is reported as stale',
   !('kind' in stalePlan) && stalePlan.stale.some((entry) => entry.report === vanished.report),
   JSON.stringify(!('kind' in stalePlan) ? stalePlan.stale : stalePlan))
-check('a vanished checkout is not misreported as dirty',
-  !('kind' in stalePlan) && !stalePlan.reclaimSkipped.some((entry) => entry.includes(vanished.report)),
-  JSON.stringify(!('kind' in stalePlan) ? stalePlan.reclaimSkipped : []))
+check('a vanished checkout is not counted as retained',
+  !('kind' in stalePlan) && stalePlan.retained === 0, JSON.stringify(!('kind' in stalePlan) ? stalePlan.retained : stalePlan))
+
 
 // Provisioning records it, which is what makes the state terminal rather than
 // repeated — and it must not make a concluded report look active again.
@@ -329,12 +254,10 @@ const afterClear = await a.planAllocation({
   digests: await ledger.listReports(),
   hopsOf: async (id) => await ledger.readHops(id),
   isLive: () => false,
-}, { ...generous, maxRetained: 0, reclaim: 'oldest-closed' })
+}, { ...generous, maxRetained: 0 })
 check('the next plan no longer mentions it at all',
-  !('kind' in afterClear)
-  && !afterClear.stale.some((entry) => entry.report === vanished.report)
-  && !afterClear.reclaimSkipped.some((entry) => entry.includes(vanished.report)),
-  JSON.stringify(!('kind' in afterClear) ? { stale: afterClear.stale, skipped: afterClear.reclaimSkipped } : afterClear))
+  !('kind' in afterClear) && !afterClear.stale.some((entry) => entry.report === vanished.report),
+  JSON.stringify(!('kind' in afterClear) ? afterClear.stale : afterClear))
 await service.discardWorktree(cleared.binding)
 
 // ---- 9. close decides the checkout's fate, and says which ------------------
@@ -403,10 +326,8 @@ check('a fractional count is not obeyed', a.resolveWorktree({ maxActive: 1.5 }).
 check('a usable count is kept verbatim',
   a.resolveWorktree({ maxActive: 2, maxRetained: 0 }).settings.maxActive === 2
   && a.resolveWorktree({ maxActive: 2, maxRetained: 0 }).settings.maxRetained === 0)
-const badEnums = a.resolveWorktree({ reclaim: 'always' as never, onClose: 'remove' as never, root: 'relative/base' })
-check('unknown reclaim/onClose values fall back to the safe defaults',
-  badEnums.settings.reclaim === 'never' && badEnums.onClose === 'keep',
-  JSON.stringify({ reclaim: badEnums.settings.reclaim, onClose: badEnums.onClose }))
+const badEnums = a.resolveWorktree({ onClose: 'remove' as never, root: 'relative/base' })
+check('an unknown onClose value falls back to keep', badEnums.onClose === 'keep', badEnums.onClose)
 check('a relative root is ignored instead of producing relative bindings',
   badEnums.settings.base === undefined, String(badEnums.settings.base))
 const sanePlan = await a.planAllocation({
@@ -434,77 +355,6 @@ const modernPlan = await a.planAllocation({
 }, { ...generous, relativePaths: true })
 check('a git that supports the flag passes the gate', !('kind' in modernPlan), JSON.stringify(modernPlan))
 
-// ---- 13. reclamation never takes a checkout someone is working in ---------
-// The dangerous shape: a report closes and keeps its allocated checkout, a
-// second live report adopts it, and the *closed* report's binding still names the
-// same path. Reclamation reads that binding as litter while an agent is at work.
-const hop = (action: RouteHop['action'], at = 1): RouteHop => ({ at, actor: 'fixture', action, to: [] })
-const claimFront = (
-  report: string,
-  worktree: NonNullable<ReportFrontMatter['worktree']>,
-  status: ReportFrontMatter['status'] = 'open',
-): ReportFrontMatter => ({
-  report, subject: 'fixture claim', status, from: 'owner-b', to: [], cc: [], authors: ['owner-b'],
-  created: 0, updated: 0, children: [], artifacts: [], hops: 1, worktree,
-})
-
-const guardedTarget = await leaseInto('reclaim guard target', 'owner-a')
-await service.close(guardedTarget.report, 'owner-a', 'done')
-const guardedPath = guardedTarget.prepared.binding.path
-const guardedBranch = guardedTarget.prepared.binding.branch
-check('the guarded fixture is a closed, kept, allocated checkout',
-  (await digestOf(guardedTarget.report))?.status === 'closed'
-  && leaseState(await ledger.readHops(guardedTarget.report)) === 'released'
-  && await w.isWorktreeClean(guardedPath))
-const liveAdopter = claimFront('R-9100', {
-  path: guardedPath, branch: guardedBranch, repo: located.commonDir, allocated: false,
-})
-const guardedPlan = await a.planAllocation({
-  report: 'R-9999', subject: 'probe', repo: located,
-  digests: [...(await ledger.listReports()), liveAdopter],
-  hopsOf: async (id) => (id === liveAdopter.report ? [hop('leased')] : await ledger.readHops(id)),
-  isLive: () => false,
-}, { ...generous, maxRetained: 0, reclaim: 'oldest-closed' })
-check('a closed binding whose checkout a live report holds is not a candidate',
-  !('kind' in guardedPlan) && guardedPlan.reclaimed?.report !== guardedTarget.report,
-  JSON.stringify(!('kind' in guardedPlan) ? guardedPlan.reclaimed : guardedPlan))
-check('the skipped candidate names the report holding it',
-  !('kind' in guardedPlan) && guardedPlan.reclaimSkipped.some((entry) => entry.includes(guardedTarget.report)
-    && entry.includes(liveAdopter.report)),
-  JSON.stringify(!('kind' in guardedPlan) ? guardedPlan.reclaimSkipped : []))
-
-// The same checks are asked again right before the delete, from a helper the
-// service can call: the plan was made from the filesystem and it can move.
-check('a target that is no longer a checkout is refused at delete time',
-  a.reclaimRefusal({ report: 'R-0001', path: '/gone' }, { presence: 'not-a-worktree' }) !== undefined)
-check('a target that vanished is refused at delete time',
-  a.reclaimRefusal({ report: 'R-0001', path: '/gone' }, { presence: 'missing' }) !== undefined)
-check('a target on another branch is refused at delete time',
-  (a.reclaimRefusal({ report: 'R-0001', path: '/wt', branch: 'b' }, { presence: 'worktree', branch: 'c' }) ?? '')
-    .includes("'c'"),
-  String(a.reclaimRefusal({ report: 'R-0001', path: '/wt', branch: 'b' }, { presence: 'worktree', branch: 'c' })))
-check('a target that still matches is safe to remove',
-  a.reclaimRefusal({ report: 'R-0001', path: '/wt', branch: 'b' }, { presence: 'worktree', branch: 'b' }) === undefined)
-
-// End to end: the same shape through the real ledger, then a real allocation.
-const adopterId = await ledger.allocateId()
-await service.author({ reportId: adopterId, subject: 'adopts the guarded checkout', body: 'b', actor: 'owner-b' })
-await service.lease(adopterId, 'owner-b', { path: guardedPath })
-const guardedRun = await service.prepareWorktree({
-  report: 'R-9998', subject: 'guard run', actor: 'owner-c', repo: located, base: 'main',
-  settings: { ...generous, maxRetained: 0, reclaim: 'oldest-closed' },
-})
-check('an allocation does not reclaim the checkout its live holder is working in',
-  guardedRun.reclaimed?.report !== guardedTarget.report, JSON.stringify(guardedRun.reclaimed))
-check('the adopted checkout is still on disk', await w.isWorktreeClean(guardedPath))
-check('the live holder still records the claim',
-  leaseState(await ledger.readHops(adopterId)) === 'held',
-  leaseState(await ledger.readHops(adopterId)))
-check('the closed owner was not told its checkout was cleared',
-  leaseState(await ledger.readHops(guardedTarget.report)) === 'released',
-  leaseState(await ledger.readHops(guardedTarget.report)))
-await service.discardWorktree(guardedRun.binding)
-
 // ---- 14. a path that exists but is no longer a checkout is stale, not dirty -
 const deadPath = join(scratch, 'dead-checkout')
 await mkdir(deadPath, { recursive: true })
@@ -520,18 +370,12 @@ const deadPlan = await a.planAllocation({
   digests: await ledger.listReports(),
   hopsOf: async (id) => await ledger.readHops(id),
   isLive: () => false,
-}, { ...generous, maxRetained: 0, reclaim: 'oldest-closed' })
+}, { ...generous, maxRetained: 0 })
 const deadStale = !('kind' in deadPlan) ? deadPlan.stale.find((entry) => entry.report === deadId) : undefined
 check('a directory that is not a checkout is reported stale', deadStale !== undefined,
   JSON.stringify(!('kind' in deadPlan) ? deadPlan.stale : deadPlan))
 check('the stale record says what was found there instead',
   (deadStale?.detail ?? '').includes('no longer a working tree'), String(deadStale?.detail))
-check('it is not misreported as having uncommitted changes',
-  !('kind' in deadPlan) && !deadPlan.reclaimSkipped.some((entry) => entry.includes(deadId)),
-  JSON.stringify(!('kind' in deadPlan) ? deadPlan.reclaimSkipped : []))
-check('it is not eligible for reclamation',
-  !('kind' in deadPlan) && deadPlan.reclaimed?.report !== deadId,
-  JSON.stringify(!('kind' in deadPlan) ? deadPlan.reclaimed : deadPlan))
 const deadRun = await service.prepareWorktree({
   report: 'R-9997', subject: 'stale run', actor: 'owner-c', repo: located, base: 'main', settings: generous,
 })
@@ -547,16 +391,16 @@ const afterDead = await a.planAllocation({
   digests: await ledger.listReports(),
   hopsOf: async (id) => await ledger.readHops(id),
   isLive: () => false,
-}, { ...generous, maxRetained: 0, reclaim: 'oldest-closed' })
+}, { ...generous, maxRetained: 0 })
 check('the next plan no longer mentions it',
   !('kind' in afterDead) && !afterDead.stale.some((entry) => entry.report === deadId),
   JSON.stringify(!('kind' in afterDead) ? afterDead.stale : afterDead))
 await service.discardWorktree(deadRun.binding)
 
-// ---- 13. reclaim is scoped to the repository being allocated in ------------
-// A closed, clean, ledger-allocated checkout in repoA is not repoB's disk
-// budget. Its binding is visible in the global ledger, but planAllocation must
-// not select it for repoB's reclamation.
+// ---- 15. the retained count is scoped to the repository being allocated in --
+// A closed, clean, ledger-allocated checkout in repoA is not repoB's retained
+// count. Its binding is visible in the global ledger, but planAllocation must
+// not inspect or count it when allocating in repoB.
 const crossPath = join(scratch, 'repo-a-cross')
 const crossMade = await w.addWorktree({ repo: located, path: crossPath, branch: 'cross-a', base: 'main' })
 if (!crossMade.ok) throw new Error(`cross-repo fixture failed: ${crossMade.stderr}`)
@@ -585,10 +429,7 @@ const crossPlan = await a.planAllocation({
   digests: [crossFront],
   hopsOf: async () => crossHops,
   isLive: () => false,
-}, { maxActive: 99, maxRetained: 0, reclaim: 'oldest-closed', relativePaths: false })
-check('a checkout from another repository is not reclaimable',
-  !('kind' in crossPlan) && crossPlan.reclaimed === undefined,
-  JSON.stringify('kind' in crossPlan ? crossPlan : { reclaimed: crossPlan.reclaimed }))
+}, { maxActive: 99, maxRetained: 0, relativePaths: false })
 check('a cross-repository checkout does not consume this repository\'s retained count',
   !('kind' in crossPlan) && crossPlan.retained === 0,
   'kind' in crossPlan ? crossPlan.kind : String(crossPlan.retained))

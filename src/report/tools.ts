@@ -68,15 +68,6 @@ async function requireWorktree(
  */
 function renderProvision(prepared: PreparedWorktree): string[] {
   const lines = [`worktree=${prepared.binding.path} branch=${prepared.binding.branch}`]
-  if (prepared.reclaimed !== undefined) {
-    lines.push(
-      `reclaimed ${prepared.reclaimed.report}'s checkout at ${prepared.reclaimed.path} to stay within the retained `
-      + 'budget; that report remains closed',
-    )
-  }
-  for (const skipped of prepared.reclaimSkipped) {
-    lines.push(`kept a checkout the budget would otherwise have cleared: ${skipped}`)
-  }
   for (const gone of prepared.stale) {
     lines.push(`recorded that ${gone.report}'s checkout at ${gone.path} was already gone — nothing to remove`)
   }

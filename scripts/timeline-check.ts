@@ -255,7 +255,7 @@ const response = (): { captured: Capture; res: never } => {
 const emptyWorktreeReport = {
   generatedAt: 0,
   enabled: false,
-  limits: { maxActive: 0, maxRetained: 0, reclaim: 'never' as const },
+  limits: { maxActive: 0, maxRetained: 0 },
   active: 0,
   retained: 0,
   records: [],

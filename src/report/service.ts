@@ -20,14 +20,13 @@
 
 import { existsSync } from 'node:fs'
 import { basename } from 'node:path'
-import { planAllocation, reclaimRefusal, type ReclaimedLease, type StaleBinding, type WorktreeSettings } from './allocate.ts'
+import { planAllocation, type StaleBinding, type WorktreeSettings } from './allocate.ts'
 import type { AgentLike } from './deliver.ts'
 import { deliver, pendingMode, pendingTargets, type DeliveryOutcome } from './deliver.ts'
 import { evaluateLease, leaseState } from './lease.ts'
 import { allocateId, appendHop, appendReportBody, bodyStartLine, discardUnwrittenId, isValidReportId, listReports, readHops, readReport, reportExists, reportPath, routePath, writeReport } from './ledger.ts'
 import {
-  addWorktree, classifyGitRefusal, compareKey, headOf, inspectCheckout, isWorktreeClean, removeWorktree, resolveRepo,
-  samePath,
+  addWorktree, classifyGitRefusal, compareKey, headOf, removeWorktree, resolveRepo, samePath,
 } from './worktree.ts'
 import type { RepoLocation } from './worktree.ts'
 import type { DeliveryMode, Report, ReportFrontMatter, ReportWorktree, RouteHop } from './types.ts'
@@ -152,10 +151,6 @@ export interface PreparedWorktree {
   readonly binding: ReportWorktree & { readonly branch: string; readonly repo: string; readonly allocated: true }
   /** How many ended claims in this repository still have a checkout on disk. */
   readonly retained: number
-  /** The checkout cleared to make room, when one was. */
-  readonly reclaimed?: ReclaimedLease
-  /** Candidates for reclamation that were refused, and why. */
-  readonly reclaimSkipped: readonly string[]
   /** Bindings whose checkout had already vanished, now recorded as such. */
   readonly stale: readonly StaleBinding[]
 }
@@ -1189,7 +1184,6 @@ export class ReportService {
       if ('kind' in plan) throw new Error(`report-ledger: ${plan.message}`)
 
       for (const gone of plan.stale) await this.#recordVanished(input.actor, gone)
-      if (plan.reclaimed !== undefined) await this.#reclaim(input.actor, plan.reclaimed)
 
       const created = await this.#createWorktree(input.repo, plan.binding, input.base, input.settings.relativePaths)
       if (!created.ok) throw new Error(`report-ledger: ${created.reason}`)
@@ -1200,9 +1194,7 @@ export class ReportService {
       return {
         binding: { ...plan.binding, ...(head === undefined ? {} : { head }) },
         retained: plan.retained,
-        reclaimSkipped: plan.reclaimSkipped,
         stale: plan.stale,
-        ...(plan.reclaimed === undefined ? {} : { reclaimed: plan.reclaimed }),
       }
     })
   }
@@ -1287,55 +1279,6 @@ export class ReportService {
         note: gone.detail === undefined
           ? `checkout ${gone.path} was already gone; nothing to remove`
           : `checkout ${gone.path} ${gone.detail}; nothing to remove`,
-      }, { touch: false })
-    })
-  }
-
-  /**
-   * Clear a checkout whose claim already ended, and record that it happened.
-   *
-   * Removal goes through git without a force flag, so an unclean tree refuses
-   * here exactly as it would for a human — and that refusal aborts the
-   * allocation rather than being stepped over, because taking something away is
-   * never the safe default.
-   *
-   * The hop is recorded with `touch: false`: clearing litter must not make a
-   * concluded report look like it just became active and float it to the top of
-   * every listing. It is still recorded, because taking something away from
-   * another report is precisely the act an audit exists for.
-   */
-  async #reclaim(actor: string, target: ReclaimedLease): Promise<void> {
-    // The plan was made from the filesystem and the filesystem moves: ask again
-    // immediately before deleting, through the same helper the plan used, and
-    // abort the allocation rather than stepping over a disagreement.
-    const reality = await inspectCheckout(target.path)
-    const changed = reclaimRefusal(target, reality)
-    if (reality.repo === undefined || changed !== undefined) {
-      throw new Error(
-        `report-ledger: refusing to reclaim ${target.path} from ${target.report} — `
-        + `${changed ?? 'its repository could not be resolved'}; nothing was removed`,
-      )
-    }
-    if (!(await isWorktreeClean(target.path))) {
-      throw new Error(
-        `report-ledger: refusing to reclaim ${target.path} from ${target.report} — `
-        + 'it has uncommitted work; nothing was removed',
-      )
-    }
-    const removed = await removeWorktree(reality.repo, target.path)
-    if (!removed.ok) {
-      throw new Error(
-        `report-ledger: refusing to reclaim ${target.path} from ${target.report} — ${removed.stderr.trim()}`,
-      )
-    }
-    await this.#withLock(target.report, async () => {
-      if (!reportExists(target.report)) return
-      await this.#record(target.report, {
-        at: Date.now(),
-        actor,
-        action: 'reclaimed',
-        to: [],
-        note: `checkout ${target.path} cleared to stay within the retained budget`,
       }, { touch: false })
     })
   }
