@@ -202,7 +202,7 @@ web profile 里多两处：
 
 ```sh
 pnpm build        # 产出 lib/index.js（宿主半）与 lib/client.js（浏览器半）
-pnpm test         # 十六套确定性检查，1110 项断言（不需要 DSH，不碰真实账本）
+pnpm test         # 十六套确定性检查，1115 项断言（不需要 DSH，不碰真实账本）
 pnpm check        # 完整本地门禁：typecheck + test + test:tools
 ```
 

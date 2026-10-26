@@ -207,6 +207,18 @@ check('allocation leaves the other concluded checkout alone',
 check('both concluded checkouts are still counted as retained',
   afterAllocation.retained === 2, String(afterAllocation.retained))
 
+// A kept checkout whose branch has unmerged commits is the orphaned experiment:
+// the view has to name it even when the closing happened long ago.
+const orphan = await leaseInto('orphan checkout')
+await writeFile(join(orphan.prepared.binding.path, 'orphan.txt'), 'x\n')
+await git(orphan.prepared.binding.path, 'add', '-A')
+await git(orphan.prepared.binding.path, 'commit', '-q', '-m', 'unmerged orphan')
+await service.close(orphan.report, ME, 'done')
+const orphanView = await view()
+check('a kept unmerged branch is called out',
+  orphanView.warnings.some((warning) => warning.includes(orphan.report) && warning.includes('not merged')),
+  orphanView.warnings.filter((warning) => warning.includes(orphan.report)).join(' | '))
+
 // ---- 7. a removal the ledger performed is not an anomaly -------------------
 // Closing with remove-if-clean takes the checkout away *and* records that the
 // ledger did it. Without the record the binding would sit at `released` with

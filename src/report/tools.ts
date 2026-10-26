@@ -82,9 +82,10 @@ function renderWorktreeOutcome(outcome: WorktreeOutcome | undefined, canRemove: 
   // The hint only names a parameter the caller can actually see and pass; on a
   // deployment with the feature off, `worktree` is not advertised at all.
   if (outcome.action === 'kept') {
-    return canRemove
+    const base = canRemove
       ? 'working tree kept (close with worktree:"remove-if-clean" to remove it)'
       : 'working tree kept'
+    return outcome.warning === undefined ? base : `${base}\nwarning: ${outcome.warning}`
   }
   return `working tree NOT removed — git refused: ${outcome.detail ?? 'unknown reason'}`
 }

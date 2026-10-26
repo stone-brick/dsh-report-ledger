@@ -26,7 +26,8 @@ import { deliver, pendingMode, pendingTargets, type DeliveryOutcome } from './de
 import { evaluateLease, leaseState } from './lease.ts'
 import { allocateId, appendHop, appendReportBody, bodyStartLine, discardUnwrittenId, isValidReportId, listReports, readHops, readReport, reportExists, reportPath, routePath, writeReport } from './ledger.ts'
 import {
-  addWorktree, classifyGitRefusal, compareKey, headOf, removeWorktree, resolveRepo, samePath,
+  addWorktree, classifyGitRefusal, compareKey, headOf, isWorktreeClean, removeWorktree, resolveRepo, samePath,
+  unmergedCommitCount,
 } from './worktree.ts'
 import type { RepoLocation } from './worktree.ts'
 import type { DeliveryMode, Report, ReportFrontMatter, ReportWorktree, RouteHop } from './types.ts'
@@ -161,6 +162,14 @@ export interface WorktreeOutcome {
   readonly action: 'kept' | 'removed' | 'refused'
   /** Why a removal was refused, in git's own words. */
   readonly detail?: string
+  /**
+   * What is worth knowing about a kept checkout.
+   *
+   * Present when closing keeps a checkout that has uncommitted work, or a branch
+   * with commits the repository's current branch does not contain: exactly the
+   * shapes that become orphaned once the report stops being live work.
+   */
+  readonly warning?: string
 }
 
 /**
@@ -975,7 +984,8 @@ export class ReportService {
       let outcome: WorktreeOutcome | undefined
       if (binding !== undefined) {
         if (options.worktree !== 'remove-if-clean') {
-          outcome = { action: 'kept' }
+          const warning = await this.#checkoutWarning(binding)
+          outcome = warning === undefined ? { action: 'kept' } : { action: 'kept', warning }
         } else {
           const refusal = await this.#removalRefusal(report, binding)
           if (refusal !== undefined) {
@@ -1015,7 +1025,11 @@ export class ReportService {
           note: `checkout ${binding?.path ?? ''} removed at the owner's request`,
         })
       }
-      const closedNote = [note, disposition]
+      const closedNote = [
+        note,
+        disposition,
+        outcome?.warning === undefined ? undefined : `warning: ${outcome.warning}`,
+      ]
         .filter((part): part is string => part !== undefined && part !== '')
         .join('; ')
       const front = await this.#record(report, {
@@ -1266,6 +1280,33 @@ export class ReportService {
       }
     }
     return undefined
+  }
+
+  /**
+   * What is at risk if a checkout is kept while its report stops being live work.
+   *
+   * Closing is the point where attention moves away, so this is the last cheap
+   * moment to say that the kept directory holds work that exists nowhere else
+   * (uncommitted changes) or on a branch the main worktree does not contain.
+   * It never refuses the close: refusing would trap a report whose owner cannot
+   * clean up, and the warning is recorded in the closed hop so it stays visible.
+   */
+  async #checkoutWarning(binding: ReportWorktree): Promise<string | undefined> {
+    const repo = await resolveRepo(binding.path)
+    if (repo === undefined) {
+      return `${binding.path} is no longer inside a git repository; its kept checkout cannot be verified`
+    }
+    if ((await headOf(binding.path)) === undefined) {
+      return `${binding.path} is no longer a readable checkout; its kept directory cannot be verified`
+    }
+    if (!(await isWorktreeClean(binding.path))) {
+      return `${binding.path} has uncommitted changes; closing keeps a checkout whose work exists in no commit`
+    }
+    if (binding.branch === undefined) return undefined
+    const unmerged = await unmergedCommitCount(binding.path, binding.branch)
+    if (unmerged === undefined || unmerged.count === 0) return undefined
+    return `branch '${binding.branch}' has ${unmerged.count} commit(s) not merged into '${unmerged.base}'; `
+      + `the kept checkout at ${binding.path} will be orphaned until it is merged or removed`
   }
 
   async #recordVanished(actor: string, gone: StaleBinding): Promise<void> {

@@ -262,12 +262,26 @@ await service.discardWorktree(cleared.binding)
 
 // ---- 9. close decides the checkout's fate, and says which ------------------
 const kept = await leaseInto('kept on close', 'owner-a')
+await writeFile(join(kept.prepared.binding.path, 'unmerged.txt'), 'x\n')
+await git(kept.prepared.binding.path, 'add', '-A')
+await git(kept.prepared.binding.path, 'commit', '-q', '-m', 'unmerged work')
 const keptResult = await service.close(kept.report, 'owner-a', 'done')
 check('closing keeps the checkout by default', keptResult.worktree?.action === 'kept',
   JSON.stringify(keptResult.worktree))
+check('closing warns about an unmerged branch',
+  (keptResult.worktree?.warning ?? '').includes('not merged'), keptResult.worktree?.warning ?? '')
 check('the kept checkout is still on disk', await w.isWorktreeClean(kept.prepared.binding.path))
 check('the closed hop records the disposition',
   (await ledger.readHops(kept.report)).some((h) => h.action === 'closed' && (h.note ?? '').includes('working tree kept')))
+check('the closed hop also records the warning',
+  (await ledger.readHops(kept.report)).some((h) => h.action === 'closed' && (h.note ?? '').includes('not merged')))
+
+const dirtyKept = await leaseInto('dirty kept on close', 'owner-a')
+await writeFile(join(dirtyKept.prepared.binding.path, 'uncommitted.txt'), 'x\n')
+const dirtyKeptResult = await service.close(dirtyKept.report, 'owner-a', 'done')
+check('closing warns about uncommitted work',
+  (dirtyKeptResult.worktree?.warning ?? '').includes('uncommitted'), dirtyKeptResult.worktree?.warning ?? '')
+check('a dirty checkout still closes', dirtyKeptResult.front.status === 'closed')
 
 const removed = await leaseInto('removed on close', 'owner-b')
 const removedResult = await service.close(removed.report, 'owner-b', 'done', { worktree: 'remove-if-clean' })

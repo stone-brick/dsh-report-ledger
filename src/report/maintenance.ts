@@ -18,7 +18,7 @@
 
 import { leaseState, type LeaseState } from './lease.ts'
 import {
-  inspectCheckout, isWorktreeClean, listWorktrees, resolveRepo, samePath, type CheckoutPresence,
+  inspectCheckout, isWorktreeClean, listWorktrees, resolveRepo, samePath, unmergedCommitCount, type CheckoutPresence,
 } from './worktree.ts'
 import type { WorktreeSettings } from './allocate.ts'
 import type { ReportFrontMatter, ReportStatus, RouteHop } from './types.ts'
@@ -222,6 +222,18 @@ export async function buildWorktreeReport(
     if (record.clean === false && record.state !== 'held') {
       warnings.push(`the kept checkout at ${record.path} (${record.report}) has uncommitted work; `
         + 'it must be cleaned up or removed by hand.')
+    }
+    // A closed report whose checkout is still on disk and whose branch has
+    // commits the main worktree does not contain is the orphaned-experiment
+    // shape: nothing will delete it now, and nothing will merge it either.
+    if (record.state === 'released' && record.onDisk && record.presence === 'worktree'
+      && record.clean === true && record.branch !== undefined) {
+      const unmerged = await unmergedCommitCount(record.path, record.branch)
+      if (unmerged !== undefined && unmerged.count > 0) {
+        warnings.push(`${record.report}'s kept checkout at ${record.path} has ${unmerged.count} commit(s) on `
+          + `'${record.branch}' not merged into '${unmerged.base}'. Merge it or remove the checkout; `
+          + 'nothing deletes or merges it automatically.')
+      }
     }
   }
   if (retained > settings.maxRetained) {

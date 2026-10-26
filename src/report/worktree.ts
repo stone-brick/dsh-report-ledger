@@ -386,6 +386,43 @@ export async function isWorktreeClean(worktreePath: string): Promise<boolean> {
   return result.stdout.trim() === ''
 }
 
+/** How far a checkout's branch is ahead of the repository's current branch. */
+export interface UnmergedCommits {
+  /** The branch the count is measured against (the main worktree's HEAD). */
+  readonly base: string
+  /** Commits reachable from the checkout's branch but not from `base`. */
+  readonly count: number
+}
+
+/**
+ * Count the commits on a checkout's branch that are not reachable from the
+ * repository's current branch.
+ *
+ * Used only for a warning: a kept checkout whose branch has unmerged commits is
+ * the shape that becomes orphaned after its report closes. The base is the main
+ * worktree's current branch (`repoRoot`'s HEAD); when that cannot be resolved,
+ * or the checkout is already on that branch, nothing is claimed.
+ * @param worktreePath - the linked checkout to inspect.
+ * @param branch - its branch, as recorded on the binding.
+ * @returns the base branch and count, or `undefined` when the question cannot be answered.
+ */
+export async function unmergedCommitCount(
+  worktreePath: string,
+  branch: string,
+): Promise<UnmergedCommits | undefined> {
+  const repo = await resolveRepo(worktreePath)
+  if (repo === undefined || repo.bare) return undefined
+  const baseResult = await runGit(repo.repoRoot, ['rev-parse', '--abbrev-ref', 'HEAD'])
+  if (!baseResult.ok) return undefined
+  const base = baseResult.stdout.trim()
+  if (base === '' || base === 'HEAD' || base === branch) return undefined
+  const countResult = await runGit(repo.repoRoot, ['rev-list', '--count', `${base}..${branch}`])
+  if (!countResult.ok) return undefined
+  const count = Number.parseInt(countResult.stdout.trim(), 10)
+  if (!Number.isInteger(count) || count < 0) return undefined
+  return { base, count }
+}
+
 /**
  * Read the commit a working tree is on.
  * @param worktreePath - the working tree to inspect.
