@@ -98,7 +98,7 @@ jobs:
       # prepublishOnly 再各跑一遍（本机 npm publish 会连跑两次构建）。
       #
       # 这里刻意**不跑 typecheck**：本仓库的类型来自 DSH profile 的官方包层
-      # （见 README「运行时解析需要 node_modules/@deepseek-ai junction」一节），
+      # （见 docs/pitfalls.md「运行时解析需要 node_modules/@deepseek-ai junction」一条），
       # CI 里没有这一层；把官方包装成 devDependency 会在工作区复制一份服务注册表，
       # 反而破坏本地开发时的实例同一性。所以 CI 只跑确定性检查 + 构建。
       - name: Publish

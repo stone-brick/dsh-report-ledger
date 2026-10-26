@@ -9,7 +9,7 @@ name: ci
 # 与 publish.yml 的纪律保持一致：只跑 `pnpm test` 与构建，**不跑 typecheck、也不跑
 # `pnpm test:tools`**。
 #
-#   - typecheck 要 DSH profile 的官方包层（见 README 的 junction 一节），runner 上没有这一层；
+#   - typecheck 要 DSH profile 的官方包层（见 docs/dev-build.md 的 junction 一节），runner 上没有这一层；
 #   - `pnpm test:tools` 会运行期 import `src/report/tools.ts`，而它运行期 import
 #     `@deepseek-ai/dsh-tools` —— 那是个**未在 package.json 里声明**的包，靠本机的 junction
 #     解析。lockfile 里没有它，所以 `pnpm install` 之后 runner 上必然解析不到。
