@@ -96,6 +96,13 @@ export function apply(ctx: ClientContext): void {
   // the contribution hangs off `ctx.inject`, not the `inject` list above.
   installSidebarTab(ctx, t)
 
+  // The view owns the transcript area only. The shell renders its composer below
+  // every conversation view — `conversation.view` has no composer-visibility
+  // dimension — so the tab always shows the composer. The one wholesale
+  // replacement is the `conversation.composer` chain (the approval/question
+  // mechanism); using it to hide the composer is off-label and would cost the
+  // tab its input, stop button, and docks, so it stays undone until the shell
+  // exposes a per-view switch. See README 「已知限制」.
   ctx.slots.inject('conversation.view', () => ctx.slots.register(
     {
       name: 'conversation.view',
