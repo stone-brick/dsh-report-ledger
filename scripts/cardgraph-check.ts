@@ -51,6 +51,7 @@ const report = (id: string, over: Record<string, unknown> = {}): Front => ({
   children: [],
   artifacts: [],
   hops: 1,
+  reads: 0,
   ...over,
   authors: (over.authors as readonly string[] | undefined) ?? [(over.from as string | undefined) ?? 'session-root'],
 }) as Front

@@ -187,6 +187,20 @@ export interface ReportFrontMatter {
   readonly artifacts: readonly string[]
   /** Number of recorded hops — the cheap indicator that the full path exists. */
   readonly hops: number
+  /**
+   * How many of those hops were reads.
+   *
+   * Split out of `hops` because the two answer different questions. A read is an
+   * audit fact — who opened the body — and never a causal act, so counting it in
+   * the one cheap "how much happened" signal turned that signal into a traffic
+   * counter: the only way to learn what work a report had seen was to subtract by
+   * hand, and a listing whose last hop was a glance read as freshly active.
+   *
+   * Derived from the same hop stream, so the split costs no extra state and no
+   * migration: a digest written before this field existed reports `reads: 0` and
+   * is repaired by the first mutation (or by the digest-repair pass).
+   */
+  readonly reads: number
   /** The most recent hop, inlined so a digest can show "where it is now". */
   readonly last?: {
     readonly at: number

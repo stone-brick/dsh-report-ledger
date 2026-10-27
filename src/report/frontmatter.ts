@@ -250,6 +250,7 @@ export function toFrontMatter(data: Record<string, unknown>): ReportFrontMatter 
     ...(worktree === undefined ? {} : { worktree }),
     artifacts: strList(data.artifacts),
     hops: num(data.hops) ?? 0,
+    reads: num(data.reads) ?? 0,
     ...(last === undefined ? {} : { last }),
     ...(str(data.spill) === undefined ? {} : { spill: str(data.spill) as string }),
   }
@@ -305,6 +306,7 @@ export function frontMatterYaml(front: ReportFrontMatter): string {
   }
   ordered.artifacts = [...front.artifacts]
   ordered.hops = front.hops
+  ordered.reads = front.reads
   if (front.last !== undefined) {
     ordered.last = { at: front.last.at, action: front.last.action, actor: front.last.actor }
   }

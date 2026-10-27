@@ -247,7 +247,7 @@ const claimFront = (
   status: ReportFrontMatter['status'] = 'open',
 ): ReportFrontMatter => ({
   report, subject: 'fixture claim', status, from: 'session-owner', to: [], cc: [], authors: ['session-owner'],
-  created: 0, updated: 0, children: [], artifacts: [], hops: 1, worktree,
+  created: 0, updated: 0, children: [], artifacts: [], hops: 1, reads: 0, worktree,
 })
 const heldHops = async (): Promise<readonly RouteHop[]> => [hop('leased')]
 

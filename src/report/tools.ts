@@ -156,10 +156,10 @@ function actorOf(exec: ExecLike): string {
 }
 
 /** Render a mutation result as a compact model-facing report. */
-function renderMutation(front: { report: string; status: string; subject: string; to: readonly string[]; cc: readonly string[]; authors: readonly string[]; hops: number }, outcomes: readonly DeliveryOutcome[], prepared?: PreparedWorktree): string {
+function renderMutation(front: { report: string; status: string; subject: string; to: readonly string[]; cc: readonly string[]; authors: readonly string[]; hops: number; reads: number }, outcomes: readonly DeliveryOutcome[], prepared?: PreparedWorktree): string {
   const lines = [
     `${front.report} [${front.status}] ${front.subject}`,
-    `authors=${front.authors.join(',')} to=${front.to.length === 0 ? '-' : front.to.join(',')} cc=${front.cc.length === 0 ? '-' : front.cc.join(',')} hops=${front.hops}`,
+    `authors=${front.authors.join(',')} to=${front.to.length === 0 ? '-' : front.to.join(',')} cc=${front.cc.length === 0 ? '-' : front.cc.join(',')} hops=${front.hops} reads=${front.reads}`,
   ]
   if (outcomes.length > 0) {
     const delivered = outcomes.filter((outcome) => outcome.status === 'delivered').map((outcome) => outcome.targetId)
@@ -388,7 +388,7 @@ export function registerReportTools(
 
   disposers.push(ctx.tools.register(defineTool({
     name: 'report_read',
-    description: 'Read one report: its digest, its COMPLETE transfer path (every hop with actor and time, and any recipient the report is still owed to), and its body. Use it when a digest told you a report exists and you need the substance, or when you need to know exactly how a report travelled and who holds copies. Reading is itself recorded as a hop.',
+    description: 'Read one report: its digest, its COMPLETE transfer path (every hop with actor and time, and any recipient the report is still owed to), and its body. Use it when a digest told you a report exists and you need the substance, or when you need to know exactly how a report travelled and who holds copies. Reading is itself recorded — as a `read` hop, counted in `reads` rather than `hops`, because a look is an audit fact and not activity. The path opens with a per-action tally, so "how much of this was reading" never needs a pass over the ledger by hand.',
     parameters: {
       report: { type: 'string', required: true, description: 'Report id to read, e.g. R-0007.' },
     },

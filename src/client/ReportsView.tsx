@@ -627,6 +627,10 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
                     </>
                   ) : null}
                   {` · ${fill(t('row.hops'), { count: front.hops })}`}
+                  {/* Reads are counted apart from the hop total: a glance is not
+                      activity, and the row would otherwise read as freshly worked
+                      on every time somebody opened the body. */}
+                  {front.reads === 0 ? '' : ` · ${fill(t('row.reads'), { count: front.reads })}`}
                   {front.authors.length > 1 ? ` · ${fill(t('row.authors'), { count: front.authors.length })}` : ''}
                   {/* The last hop's action is ledger vocabulary, so it is named
                       with the same word the transfer path uses below. */}

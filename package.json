@@ -62,6 +62,7 @@
   "scripts": {
     "build": "tsdown",
     "watch": "tsdown --watch",
+    "repair": "node scripts/repair-digests.ts",
     "test": "node scripts/smoke.ts && node scripts/guidance-check.ts && node scripts/dev-roster-check.ts && node scripts/dev-archive-check.ts && node scripts/handover-check.ts && node scripts/timeline-check.ts && node scripts/client-filter-check.ts && node scripts/cardgraph-check.ts && node scripts/cardgraph-paint-check.ts && node scripts/read-path-check.ts && node scripts/worktree-check.ts && node scripts/lease-check.ts && node scripts/allocate-check.ts && node scripts/maintenance-check.ts && node scripts/selection-bridge-check.ts && node scripts/path-opener-check.ts",
     "test:tools": "node scripts/worktree-tools-check.ts && node scripts/workspace-check.ts && node scripts/roster-check.ts",
     "typecheck": "tsc --noEmit",

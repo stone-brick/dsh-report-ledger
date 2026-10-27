@@ -32,6 +32,7 @@ import {
 } from './worktree.ts'
 import type { RepoLocation } from './worktree.ts'
 import type { DeliveryMode, Report, ReportFrontMatter, ReportStatus, ReportWorktree, RouteHop } from './types.ts'
+import { HOP_ACTIONS, type HopAction } from './types.ts'
 
 /** Body size above which `report_read` returns a paged pointer instead of everything. */
 const BODY_INLINE_LIMIT = 8000
@@ -222,6 +223,8 @@ export interface DigestRow {
   readonly cc: readonly string[]
   /** Recorded hop count. */
   readonly hops: number
+  /** How many of those hops were reads. */
+  readonly reads: number
   /** Collaboration label, when the report carries one. */
   readonly task?: string
   /** Compact label of the bound working tree, when one is bound. */
@@ -284,6 +287,7 @@ function renderFrontLine(front: ReportFrontMatter): string {
     `cc=${front.cc.length === 0 ? '-' : front.cc.join(',')}`,
     `authors=${front.authors.join(',')}`,
     `hops=${front.hops}`,
+    `reads=${front.reads}`,
     `updated=${new Date(front.updated).toISOString()}`,
   ]
   if (front.task !== undefined) parts.push(`task=${front.task}`)
@@ -294,8 +298,43 @@ function renderFrontLine(front: ReportFrontMatter): string {
   return parts.join(' | ')
 }
 
-/** Derive the route projection from the authoritative hop stream. */
-function projectRoute(hops: readonly RouteHop[]): Pick<ReportFrontMatter, 'to' | 'cc' | 'authors' | 'hops' | 'last'> {
+/**
+ * One line counting hops by action, in the canonical action order.
+ *
+ * This is the statistics exit the digest split made necessary: "how much of this
+ * path is reads" used to be answerable only by reading the JSONL by hand — and
+ * because reading through the tool records a read, doing that measurement changed
+ * the thing measured. A tally rendered from the same hop stream costs nothing and
+ * leaves the ledger alone.
+ * @param hops - the report's complete transfer path.
+ * @returns the counting line.
+ */
+function tallyHops(hops: readonly RouteHop[]): string {
+  const counts = new Map<HopAction, number>()
+  for (const hop of hops) counts.set(hop.action, (counts.get(hop.action) ?? 0) + 1)
+  const parts = HOP_ACTIONS
+    .filter((action) => counts.has(action))
+    .map((action) => `${action} ${counts.get(action) ?? 0}`)
+  return `${hops.length} hop(s): ${parts.join(', ')}`
+}
+
+/**
+ * Derive the route projection from the authoritative hop stream.
+ *
+ * Two of these fields exist to answer questions the hop stream alone answers too
+ * expensively, and both are deliberately narrower than "the last thing recorded":
+ *
+ *  - `hops` counts every recorded event, because its job is to certify that the
+ *    full path exists and how long it is;
+ *  - `reads` counts the subset that were reads, because a read is an audit fact
+ *    rather than a causal act, and folding it into the work signal left readers
+ *    subtracting by hand (the exact cost this field removes);
+ *  - `last` is the most recent **causal** hop. It answers "where is this now", and
+ *    somebody looking at a report does not move it — with reads included, 12 of 67
+ *    reports on this machine showed `last=read@…`, i.e. a glance masqueraded as
+ *    activity.
+ */
+function projectRoute(hops: readonly RouteHop[]): Pick<ReportFrontMatter, 'to' | 'cc' | 'authors' | 'hops' | 'reads' | 'last'> {
   const authors: string[] = []
   const to: string[] = []
   const cc: string[] = []
@@ -317,12 +356,21 @@ function projectRoute(hops: readonly RouteHop[]): Pick<ReportFrontMatter, 'to' |
       for (const target of hop.to) if (!to.includes(target)) to.push(target)
     }
   }
-  const tail = hops.length === 0 ? undefined : hops[hops.length - 1]
+  let reads = 0
+  let tail: RouteHop | undefined
+  for (const hop of hops) {
+    if (hop.action === 'read') {
+      reads += 1
+      continue
+    }
+    tail = hop
+  }
   return {
     to,
     cc,
     authors,
     hops: hops.length,
+    reads,
     ...(tail === undefined ? {} : { last: { at: tail.at, action: tail.action, actor: tail.actor } }),
   }
 }
@@ -342,6 +390,26 @@ export interface PendingHandoff {
   readonly status: ReportStatus
   /** Whether delivering it requests a turn or only adds context. */
   readonly mode: DeliveryMode
+}
+
+/** One digest brought back in line with its hop stream. */
+export interface DigestRepair {
+  /** The report it concerns. */
+  readonly report: string
+  /** Whether the stored digest disagreed with the hop stream. */
+  readonly changed: boolean
+  /** The counters the document carried. */
+  readonly stored: string
+  /** The counters its hop stream derives. */
+  readonly derived: string
+  /** Why it was left unwritten, when it was. */
+  readonly skipped?: string
+}
+
+/** The counters a repair compares, rendered so a dry run reads like the real thing. */
+function digestCounters(front: Pick<ReportFrontMatter, 'hops' | 'reads'> & { readonly last?: ReportFrontMatter['last'] }): string {
+  const last = front.last === undefined ? '-' : `${front.last.action}@${front.last.actor}`
+  return `hops=${front.hops} reads=${front.reads} last=${last}`
 }
 
 /** The report service. */
@@ -499,6 +567,7 @@ export class ReportService {
         children: [],
         artifacts: [...(input.artifacts ?? [])],
         hops: 0,
+        reads: 0,
         ...(input.parent === undefined ? {} : { parent: input.parent }),
         ...(input.task === undefined ? {} : { task: input.task }),
         ...(input.worktree === undefined ? {} : { worktree: input.worktree }),
@@ -846,7 +915,16 @@ export class ReportService {
       // `touch: false`: the hop is still recorded, but a read is not activity
       // that should make an old or concluded report look freshly updated in a
       // listing, where `updated` is the sort key.
-      await this.#record(report, { at: Date.now(), actor, action: 'read', to: [] }, { touch: false })
+      //
+      // This read is part of its own report: the response is rendered from
+      // `recorded` and from the extended path, so the digest, the tally and the
+      // route all include it. A view that omitted the reader's own look would
+      // answer "how much of this was reading" with an off-by-one that changes
+      // between two identical calls.
+      const readHop: RouteHop = { at: Date.now(), actor, action: 'read', to: [] }
+      const recorded = await this.#record(report, readHop, { touch: false })
+      const pathHops = [...hops, readHop]
+      const tally = tallyHops(pathHops)
       const path = reportPath(report)
       const body = found.body.trim()
       let rendered = body
@@ -863,9 +941,9 @@ export class ReportService {
         rendered = `${head.text}\n\n… body truncated (${body.length} chars total). `
           + `The next unread line is ${resume}; read the rest with the read tool at ${path} using offset=${resume}.`
       }
-      const route = hops.length === 0
+      const route = pathHops.length === 0
         ? '  (no hops recorded)'
-        : hops.map((hop) => {
+        : pathHops.map((hop) => {
           const targets = hop.to.length === 0 ? '' : ` -> ${hop.to.join(',')}`
           const note = hop.note === undefined ? '' : `  # ${hop.note}`
           return `  ${new Date(hop.at).toISOString()}  ${hop.action.padEnd(11)} by ${hop.actor}${targets}${note}`
@@ -881,11 +959,12 @@ export class ReportService {
         + ` (${worktree.allocated === true ? 'allocated by the ledger' : 'adopted'})`,
       ]
       return [
-        renderFrontLine(found.front),
+        renderFrontLine(recorded),
         ...lease,
         `body=${path}`,
         '',
         '## transfer path',
+        tally,
         route,
         ...(pending.length === 0 ? [] : ['', `## still pending delivery to: ${pending.join(', ')}`]),
         '',
@@ -935,6 +1014,7 @@ export class ReportService {
       to: front.to,
       cc: front.cc,
       hops: front.hops,
+      reads: front.reads,
       ...(front.task === undefined ? {} : { task: front.task }),
       ...(front.worktree === undefined ? {} : { worktree: worktreeLabel(front.worktree) }),
       ...(front.last === undefined ? {} : { last: `${front.last.action}@${front.last.actor}` }),
@@ -1591,6 +1671,60 @@ export class ReportService {
   }
 
   /**
+   * Rebuild every digest's derived counters from its hop stream.
+   *
+   * The front matter is a cache of `projectRoute`, so it can only be as current
+   * as the report's last mutation. That is harmless while the projection's meaning
+   * never changes — and it is exactly why adding a derived field needs a pass: a
+   * digest written before `reads` existed would report zero reads until something
+   * else touched it, which reads like "nobody ever opened this" rather than "this
+   * document predates the field". The same pass is what makes a future change of
+   * the projection's *definition* safe to ship: rewrite every digest once, under
+   * the new rule, instead of living with two meanings at the same time.
+   *
+   * Runs under each report's own writer lock and re-derives from a fresh read
+   * inside it, so a mutation that landed during the scan is never undone by a
+   * stale rewrite. `updated` is deliberately not touched: making a stale digest
+   * honest is not activity, and stamping it would reorder every listing. A report
+   * whose transfer path has gone missing is skipped rather than rewritten — that
+   * is the same damage guard {@link ReportService}#record applies, for the same
+   * reason: rebuilding from an empty history would erase its recipients.
+   * @param options - `dryRun` reports what would change without writing.
+   * @returns one record per report in the ledger.
+   */
+  async repairDigests(options: { dryRun?: boolean } = {}): Promise<DigestRepair[]> {
+    const repairs: DigestRepair[] = []
+    for (const digest of await listReports()) {
+      const stored = digestCounters(digest)
+      const derived = digestCounters(projectRoute(await readHops(digest.report)))
+      if (stored === derived) {
+        repairs.push({ report: digest.report, changed: false, stored, derived })
+        continue
+      }
+      if (options.dryRun === true) {
+        repairs.push({ report: digest.report, changed: true, stored, derived })
+        continue
+      }
+      const skipped = await this.#withLock(digest.report, async () => {
+        const current = await readReport(digest.report)
+        if (current === undefined) return 'it disappeared while the sweep was running'
+        if (current.front.hops > 0 && !existsSync(routePath(digest.report))) {
+          return 'its transfer path is missing, so the digest cannot be rebuilt from it'
+        }
+        const fresh = projectRoute(await readHops(digest.report))
+        // Re-checked inside the lock: a mutation that ran during the scan has
+        // already corrected this digest, and rewriting would be a no-op that the
+        // report would count as changed.
+        if (digestCounters(fresh) === digestCounters(current.front)) return undefined
+        await writeReport({ front: { ...current.front, ...fresh }, body: current.body }, digest.report)
+        return undefined
+      })
+      repairs.push({ report: digest.report, changed: true, stored, derived, ...(skipped === undefined ? {} : { skipped }) })
+    }
+    return repairs
+  }
+
+  /**
    * Deliver every held hand-off owed to one session that just became resident.
    * @param sessionId - the session that became resident.
    * @returns the deliveries that succeeded.
@@ -1678,5 +1812,5 @@ export function renderRow(row: DigestRow): string {
   // reader scans for, and a listing that hides it forces a second call per report.
   const task = row.task === undefined ? '' : ` task=${row.task}`
   const worktree = row.worktree === undefined ? '' : ` wt=${row.worktree}`
-  return `${row.report} [${row.status}] ${row.subject}${task}${worktree} | from=${row.from} to=${row.to.length === 0 ? '-' : row.to.join(',')} cc=${row.cc.length === 0 ? '-' : row.cc.join(',')} hops=${row.hops} last=${last}`
+  return `${row.report} [${row.status}] ${row.subject}${task}${worktree} | from=${row.from} to=${row.to.length === 0 ? '-' : row.to.join(',')} cc=${row.cc.length === 0 ? '-' : row.cc.join(',')} hops=${row.hops} reads=${row.reads} last=${last}`
 }

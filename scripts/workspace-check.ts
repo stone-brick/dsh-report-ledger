@@ -552,6 +552,7 @@ const queuedFront = {
   children: [],
   artifacts: [],
   hops: 1,
+  reads: 0,
 }
 await writeReport({ front: queuedFront, body: 'the queued body' })
 await appendHop('R-0001', { at: Date.now(), actor: 'session-sender', action: 'sent', to: ['session-live-1'] })

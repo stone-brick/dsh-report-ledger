@@ -286,6 +286,81 @@ try {
 }
 check('a whitespace-only recipient is refused', blankRecipientRefused)
 
+// ---- reads are counted apart from the work signal -------------------------
+// A read is an audit fact and never a causal act. Counting it in `hops` made the
+// one cheap "how much happened" number a traffic counter, and let a listing whose
+// last hop was somebody looking read as freshly active — the two things this
+// split exists to stop. The body still has to be recorded when it is opened, so
+// the count and the path have to disagree on purpose.
+const readme = await service.author({ subject: 'read counting', body: 'b', actor: 'session-a', to: ['session-b'] })
+const beforeReads = await listed(readme.front.report)
+check('a fresh report has no reads yet', beforeReads?.reads === 0, String(beforeReads?.reads))
+check('a fresh report counts authoring and the first send',
+  beforeReads?.hops === 2 && beforeReads?.last?.action === 'sent',
+  `hops=${beforeReads?.hops} last=${beforeReads?.last?.action}`)
+
+await service.read(readme.front.report, 'session-b')
+const afterOne = await listed(readme.front.report)
+check('a read is still recorded in the path total', afterOne?.hops === 3, String(afterOne?.hops))
+check('a read is also counted in reads', afterOne?.reads === 1, String(afterOne?.reads))
+check('a read does not become "where the report is now"',
+  afterOne?.last?.action === 'sent', String(afterOne?.last?.action))
+
+const readPath = await service.read(readme.front.report, 'session-c')
+const afterTwo = await listed(readme.front.report)
+check('a second read raises the count again', afterTwo?.reads === 2, String(afterTwo?.reads))
+check('the work a report has seen is hops minus reads',
+  (afterTwo?.hops ?? 0) - (afterTwo?.reads ?? 0) === 2, `hops=${afterTwo?.hops} reads=${afterTwo?.reads}`)
+check('the path still records every read', (await readHops(readme.front.report)).length === 4,
+  String((await readHops(readme.front.report)).length))
+check('the digest line carries both counters', readPath.includes('hops=4 | reads=2'), readPath.split('\n')[0])
+check('the path opens with a per-action tally',
+  readPath.includes('4 hop(s): authored 1, sent 1, read 2'), readPath.split('\n').slice(0, 8).join('\n'))
+
+// A causal hop still moves `last` once reads have piled up.
+await service.contribute(readme.front.report, 'session-b', 'now it moved')
+const afterWork = await listed(readme.front.report)
+check('a contribution moves last past the reads', afterWork?.last?.action === 'contributed', String(afterWork?.last?.action))
+check('a contribution counts as work, not as a read',
+  afterWork?.hops === 5 && afterWork?.reads === 2, `hops=${afterWork?.hops} reads=${afterWork?.reads}`)
+
+// ---- repairing a digest written before the split --------------------------
+// Front matter is a cache, so a document from before `reads` existed reports zero
+// until something rebuilds it. The repair pass is that something; it must be
+// idempotent, must not stamp `updated` (a repair is not activity), and must leave
+// a report whose path is missing alone.
+const staleId = readme.front.report
+const staleDocument = await readReport(staleId)
+const staleText = (await readFile(reportPath(staleId), 'utf8'))
+  .replace(/^hops: \d+$/m, 'hops: 41')
+  .replace(/^reads: \d+$/m, 'reads: 0')
+await writeFile(reportPath(staleId), staleText, 'utf8')
+check('the fixture was made stale', staleText.includes('hops: 41') && staleText.includes('reads: 0'),
+  staleText.slice(0, 200))
+
+const dry = await service.repairDigests({ dryRun: true })
+const dryFor = dry.find((repair) => repair.report === staleId)
+check('a dry run reports what would change', dryFor?.changed === true, JSON.stringify(dryFor))
+check('a dry run writes nothing', (await listed(staleId))?.hops === 41, String((await listed(staleId))?.hops))
+
+const pass = await service.repairDigests()
+const repaired = pass.find((repair) => repair.report === staleId)
+check('the sweep rewrites a stale digest', repaired?.changed === true, JSON.stringify(repaired))
+const afterRepair = await listed(staleId)
+check('the repaired digest matches its hop stream', afterRepair?.hops === 5 && afterRepair?.reads === 2,
+  `hops=${afterRepair?.hops} reads=${afterRepair?.reads}`)
+check('a repair does not restamp updated, so a listing keeps its order',
+  afterRepair?.updated === staleDocument?.front.updated, `${afterRepair?.updated} vs ${staleDocument?.front.updated}`)
+const secondPass = await service.repairDigests()
+check('a second sweep rewrites nothing',
+  secondPass.every((repair) => !repair.changed || repair.skipped !== undefined),
+  secondPass.filter((repair) => repair.changed && repair.skipped === undefined).map((repair) => repair.report).join(','))
+// The fixture above whose sidecar was deleted: rebuilding it from an empty history
+// would erase its recipients, so the sweep must report it and leave it alone.
+check('a report whose path is gone is reported, not rewritten',
+  secondPass.find((repair) => repair.report === guarded.front.report)?.skipped !== undefined,
+  JSON.stringify(secondPass.find((repair) => repair.report === guarded.front.report)))
+
 let failed = 0
 for (const [label, ok, detail] of checks) {
   if (!ok) failed++

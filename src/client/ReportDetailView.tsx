@@ -581,6 +581,7 @@ export function ReportDetailView(props: ReportDetailViewProps): ReactElement {
         </span>
       )}
       <span>{` · ${fill(t('row.hops'), { count: front.hops })}`}</span>
+      {front.reads === 0 ? null : <span>{` · ${fill(t('row.reads'), { count: front.reads })}`}</span>}
       {front.last === undefined ? null : <span>{` · ${t('row.last')} ${t(HOP_LABEL[front.last.action])}`}</span>}
       {front.task === undefined ? null : <Tag tone="info">{front.task}</Tag>}
     </span>

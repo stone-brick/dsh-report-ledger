@@ -97,7 +97,7 @@ export function renderDigest(front: ReportFrontMatter, path: string, mode: Deliv
   const audience = mode === 'wakeup' ? 'addressed to you' : 'copied to you'
   const lines = [
     `[report ${front.report} — ${audience}] ${front.subject}`,
-    `from=${front.from} status=${front.status} hops=${front.hops} authors=${front.authors.length}`,
+    `from=${front.from} status=${front.status} hops=${front.hops} reads=${front.reads} authors=${front.authors.length}`,
   ]
   if (front.to.length > 0) lines.push(`to=${front.to.join(',')}`)
   if (front.cc.length > 0) lines.push(`cc=${front.cc.join(',')}`)
