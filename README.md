@@ -112,10 +112,10 @@ reports/R-0001.route.jsonl   append-only 传递路径，一行一跳
 | `report_cc` | 抄送给更多代理（不唤醒）：让需要知情者持有副本 |
 | `report_forward` | 转呈下去，或 `mode:"copy"` 作为参考副本分发 |
 | `report_read` | 读缩略 + 完整传递路径（开头一行按动作计数）+ 正文（读取记为 `read`，**算进 `reads`、不算进 `hops`**；不推进 `updated`、不改变列表顺序） |
-| `report_list` | 只列缩略，可按 `session`、`status`、`task`、`worktree` 过滤，用于纵览长期协作 |
+| `report_list` | 只列缩略，可按 `session`、`status`、`task`、`worktree` 过滤，用于纵览长期协作；行里带 `authors=N`——回执说明有人确认收到，`authors=1` 说明**没人真的写过东西** |
 | `report_ack` | 回执，让发送方看到闭环 |
 | `report_amend` | 修正：改缩略字段或更正正文，仅发起者/共写者可改，改动会被记录 |
-| `report_close` | 结案：事情的终结，仅发起者/共写者可关；同时**交还**它持有的工作区 |
+| `report_close` | 结案：事情的终结，仅发起者/共写者可关；**从未有过贡献的汇报必须带 `note`**（交代做到了哪，或为什么没写），否则拒绝；同时**交还**它持有的工作区 |
 | `report_lease` | 认领一个**已存在**的检出（仅工作区功能开启时暴露） |
 | `report_release` | 交还检出占用，检出留在磁盘上原封不动（工作区关闭时调用会说明"本部署未启用工作区"） |
 | `report_transfer` | 把一笔**尚未送达**的投递从欠它的会话转给另一个会话——义务仍然存在，只是换了人欠；**不记为送达** |

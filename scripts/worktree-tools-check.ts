@@ -459,7 +459,9 @@ check('the failed roster write does not count the peer against the budget',
 check('the live peer keeps its checkout', orphan?.cwd !== undefined && existsSync(orphan.cwd), String(orphan?.cwd))
 const orphanReport = (await ledger.listReports()).find((front) => front.subject.includes('roster failure'))
 if (orphanReport !== undefined) {
-  await call('report_close', { report: orphanReport.report, worktree: 'remove-if-clean' })
+  await call('report_close', {
+    report: orphanReport.report, note: 'fixture: nothing was handed off in this report', worktree: 'remove-if-clean',
+  })
 }
 
 // ---- 8d. handover does not reopen a report it just closed ------------------
@@ -491,7 +493,9 @@ check('the handover says the owed hand-off was left untouched',
 check('handover warns about the kept unmerged checkout it releases',
   handoverOut.includes('warnings (') && handoverOut.includes('not merged'), handoverOut)
 const handoverReport = (await ledger.listReports()).find((front) => front.subject.startsWith('handover '))
-if (handoverReport !== undefined) await call('report_close', { report: handoverReport.report })
+if (handoverReport !== undefined) {
+  await call('report_close', { report: handoverReport.report, note: 'fixture: the handover record is concluded' })
+}
 
 // ---- 9. the budget refusal reaches the model as a sentence -----------------
 // A full budget must refuse through the tool with the holder named, because that

@@ -464,7 +464,7 @@ export function registerReportTools(
 
   disposers.push(ctx.tools.register(defineTool({
     name: 'report_close',
-    description: 'Conclude a report — record that the matter is finished so the ledger stops treating it as live work. Closing is the OWNER\'s act, not a reader\'s: only the agent that opened the report or one of its co-authors may close it, and a refusal names who to ask. This is different from acknowledging: report_ack says "I have taken this in" while the matter is still running. Closing is not a lock — if anyone later contributes to, sends, copies, forwards, or amends a closed report it reopens automatically and records that, so a prematurely closed report can never silently swallow new work.',
+    description: 'Conclude a report — record that the matter is finished so the ledger stops treating it as live work. Closing is the OWNER\'s act, not a reader\'s: only the agent that opened the report or one of its co-authors may close it, and a refusal names who to ask. A report that never received a contribution cannot be closed without a note: the ending has to say what was done and how it was verified, or why nothing was written, because a silent close is exactly where work disappears. This is different from acknowledging: report_ack says "I have taken this in" while the matter is still running. Closing is not a lock — if anyone later contributes to, sends, copies, forwards, or amends a closed report it reopens automatically and records that, so a prematurely closed report can never silently swallow new work.',
     parameters: {
       report: { type: 'string', required: true, description: 'Report id to close.' },
       note: { type: 'string', description: 'Why it is finished, or what concluded it. Recorded on the hop.' },

@@ -168,6 +168,28 @@ check('a recipient may not close a report', refusedToClose.includes('may not clo
 check('the refusal names who may close it', refusedToClose.includes('session-a'), refusedToClose)
 check('the refusal explains the rule', refusedToClose.includes("owner's act"), refusedToClose)
 
+// A zero-contribution report cannot be concluded silently. The ledger cannot tell
+// who was handed the work, so it refuses the one shape that hides the most:
+// nothing written into the report AND nothing said at the end. Checked before any
+// checkout side effect, so a refusal can never release a lease on its way out.
+const silentTarget = await service.author({
+  subject: 'nothing written yet', body: 'b', actor: 'session-a', to: ['session-b'],
+})
+const statusBeforeSilent = (await readReport(silentTarget.front.report))?.front.status
+let silentClose = ''
+try {
+  await service.close(silentTarget.front.report, 'session-a')
+} catch (error) {
+  silentClose = error instanceof Error ? error.message : String(error)
+}
+check('a zero-contribution close without a note is refused',
+  silentClose.includes('carries no note'), silentClose)
+check('the refusal says what the note should contain',
+  silentClose.includes('or why nothing was written'), silentClose)
+check('the refused close left the report untouched',
+  (await readReport(silentTarget.front.report))?.front.status === statusBeforeSilent,
+  `${(await readReport(silentTarget.front.report))?.front.status} vs ${statusBeforeSilent}`)
+
 const closed = await service.close(authored.front.report, 'session-a', 'matter concluded')
 check('an author may close a report', closed.front.status === 'closed', closed.front.status)
 const afterClose = await readHops(authored.front.report)
@@ -199,6 +221,20 @@ check('acking a closed report does not downgrade it to acked', ackAfterClose.fro
 const finalHops = await readHops(authored.front.report)
 check('the acknowledgement is still recorded as a hop', finalHops.filter((h) => h.action === 'acked').length >= 2)
 check('sending a closed report reopens it', (await service.send(authored.front.report, 'session-a', ['session-b'])).front.status === 'open')
+
+// The rule is deliberately narrow: a report whose path already records work needs
+// no prose at the end, because the ending is not the only place that work appears.
+const worked = await service.author({ subject: 'already worked', body: 'b', actor: 'session-a' })
+await service.contribute(worked.front.report, 'session-b', 'the work is here')
+const workedClose = await service.close(worked.front.report, 'session-a')
+check('a contributed report closes without a note', workedClose.front.status === 'closed', workedClose.front.status)
+
+// `acked` says a recipient confirmed receipt; it cannot say nobody wrote anything.
+// The co-author count can, so it has to survive into the listing row the model reads.
+const workedRow = (await service.list()).find((row) => row.report === worked.front.report)
+check('a listing row carries the co-author count', workedRow?.authors.length === 2, String(workedRow?.authors.length))
+check('the rendered row shows the count', workedRow !== undefined && renderRow(workedRow).includes('authors=2'),
+  workedRow === undefined ? 'no row' : renderRow(workedRow))
 
 // ---- 12. a hand-edited ledger must not lose records ----------------------
 const { parseReport } = await import('../src/report/frontmatter.ts')

@@ -80,6 +80,10 @@ check('protocol lists an amendment among the activities that reopen', PROTOCOL.i
 // conclusion hides; the requirement is stated here so it travels with the tool.
 check('protocol requires a closing note to account for the work',
   PROTOCOL.includes('结案时在 note 里交代'))
+// The requirement is enforced by report_close, so the protocol has to say so: a
+// model that learns about the refusal after the fact has already spent a round.
+check('protocol says a silent zero-contribution close is refused',
+  PROTOCOL.includes('这种结案会被直接拒绝'))
 
 // ---- the conversation framing is stated ----------------------------------
 check('protocol frames a co-written report as the conversation thread',

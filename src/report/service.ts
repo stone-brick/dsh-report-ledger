@@ -221,6 +221,8 @@ export interface DigestRow {
   readonly to: readonly string[]
   /** Carbon-copy recipients. */
   readonly cc: readonly string[]
+  /** Originator plus every co-author, in contribution order. */
+  readonly authors: readonly string[]
   /** Recorded hop count. */
   readonly hops: number
   /** How many of those hops were reads. */
@@ -1015,6 +1017,7 @@ export class ReportService {
       cc: front.cc,
       hops: front.hops,
       reads: front.reads,
+      authors: front.authors,
       ...(front.task === undefined ? {} : { task: front.task }),
       ...(front.worktree === undefined ? {} : { worktree: worktreeLabel(front.worktree) }),
       ...(front.last === undefined ? {} : { last: `${front.last.action}@${front.last.actor}` }),
@@ -1070,10 +1073,26 @@ export class ReportService {
     return this.#withLock(report, async () => {
       const current = await this.#load(report)
       this.#assertOwner(current.front, actor, 'close', 'closing')
+      const hops = await readHops(report)
+      // A conclusion has to say what it concludes. The ledger cannot tell who was
+      // handed the work, so it cannot demand an account from every close — but it
+      // can refuse the one shape that hides the most: nothing was ever written into
+      // the report, and the close says nothing either. That pair is exactly the
+      // "clean close with zero contributions" that a reader of the path later
+      // finds unauditable, and one sentence is a low price for a readable ending.
+      // Deliberately checked before any checkout side effect, so a refusal never
+      // leaves a lease released or a working tree removed.
+      if (!hops.some((hop) => hop.action === 'contributed') && (note ?? '').trim() === '') {
+        throw new Error(
+          `report-ledger: ${report} has no contribution and this close carries no note, so the ending would record `
+          + 'nothing. Say what was done and how it was verified, or why nothing was written '
+          + '(e.g. "nothing was done: superseded by R-0007").',
+        )
+      }
       const binding = current.front.worktree
       // A concluded report cannot be holding a checkout against anyone, so
       // closing releases the lease whatever happens to the directory next.
-      if (binding !== undefined && leaseState(await readHops(report)) === 'held') {
+      if (binding !== undefined && leaseState(hops) === 'held') {
         await this.#record(report, {
           at: Date.now(),
           actor,
@@ -1812,5 +1831,10 @@ export function renderRow(row: DigestRow): string {
   // reader scans for, and a listing that hides it forces a second call per report.
   const task = row.task === undefined ? '' : ` task=${row.task}`
   const worktree = row.worktree === undefined ? '' : ` wt=${row.worktree}`
-  return `${row.report} [${row.status}] ${row.subject}${task}${worktree} | from=${row.from} to=${row.to.length === 0 ? '-' : row.to.join(',')} cc=${row.cc.length === 0 ? '-' : row.cc.join(',')} hops=${row.hops} reads=${row.reads} last=${last}`
+  // The co-author count is rendered for the same reason the transfer path shows
+  // who wrote what: `acked` says a recipient confirmed receipt, and a row that
+  // shows one author next to three recipients says nobody actually wrote anything —
+  // the difference a receipt cannot express and a reader has to be able to see
+  // without opening the body.
+  return `${row.report} [${row.status}] ${row.subject}${task}${worktree} | from=${row.from} to=${row.to.length === 0 ? '-' : row.to.join(',')} cc=${row.cc.length === 0 ? '-' : row.cc.join(',')} authors=${row.authors.length} hops=${row.hops} reads=${row.reads} last=${last}`
 }
