@@ -18,7 +18,7 @@
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { assetsOf, mentions, type SessionAssets } from './assets.ts'
-import { listReports, readHops } from './ledger.ts'
+import { listReports, readHops, readReport } from './ledger.ts'
 import type { ReportFrontMatter, RouteHop } from './types.ts'
 import type { WorktreeRuntime } from './allocate.ts'
 import type { PeerService } from './peer.ts'
@@ -251,6 +251,88 @@ function renderPeerPermission(permission: PeerPermission | undefined): string | 
   ].filter((part): part is string => part !== undefined)
   if (parts.length === 0) return undefined
   return `permissions inherited from this session: ${parts.join(', ')}`
+}
+
+/**
+ * Start a peer whose task is an existing report.
+ *
+ * The alternative to authoring an assignment stub, and it exists because the stub
+ * duplicates a report the caller already wrote: one collaboration where each
+ * implementation line had its own report produced four assignment reports whose
+ * only content was "here is the report you should read". Handing the report over
+ * directly says the same thing in one hop, and — the part the old workaround could
+ * not express at all — the peer starts in **that report's checkout** instead of in
+ * the caller's directory.
+ *
+ * The peer contract travels in the hop note, never in the body. The body is
+ * somebody else's report: contributing to it would make the caller a co-author and
+ * therefore an owner (able to close and amend it), while the note is part of the
+ * transfer path every recipient reads on `report_read`. A peer that is handed a
+ * report is still told what it is and how to answer, without quietly acquiring
+ * authority over the report it was given.
+ * @param deps - the peer and report services.
+ * @param input - the caller, the report to hand over, the task, and an optional display name.
+ * @returns the model-facing account of what was started.
+ */
+async function startPeerOnReport(
+  deps: { peers: PeerService; service: ReportService },
+  input: { actor: string; target: string; task: string; name?: string },
+): Promise<string> {
+  const existing = await readReport(input.target)
+  if (existing === undefined) {
+    throw new Error(`report-ledger: ${input.target} does not exist, so there is nothing to hand over`)
+  }
+  if (existing.front.status === 'closed') {
+    throw new Error(
+      `report-ledger: ${input.target} is closed, and addressing it would reopen it. Contribute to it first so the `
+      + 'reopen is deliberate, or hand over a report that is still open',
+    )
+  }
+  // The checkout belongs to the report, not to the call: if the caller already
+  // authored the line report with worktree:true, that is where the peer works.
+  const cwd = existing.front.worktree?.path
+  const started = await deps.peers.start(input.actor, {
+    task: input.task,
+    ...(input.name === undefined ? {} : { name: input.name }),
+    ...(cwd === undefined ? {} : { cwd }),
+  })
+  const note = [
+    `由 ${input.actor} 开启的同伴会话：你有自己的生命周期，是同伴而不是下属。`,
+    ...(cwd === undefined
+      ? []
+      : [`你的工作目录是这份汇报绑定的检出：${cwd}；独立的是工作目录与索引，config、hooks、对象库与其它检出共享。`]),
+    '要回复或继续这个话题，用 report_contribute 追加到本汇报——它会成为我们之间的线程。',
+    `先做：${input.task}`,
+  ].join(' ')
+  let delivered: Awaited<ReturnType<ReportService['send']>>
+  try {
+    delivered = await deps.service.send(input.target, input.actor, [started.sessionId], note)
+  } catch (error) {
+    // The peer is already live and charged against the lifetime budget, so the
+    // failure is reported with what the caller still owns rather than compensated.
+    throw new Error(
+      `report-ledger: peer ${started.sessionId} exists, but ${input.target} could not be addressed to it `
+      + `(${reasonOf(error)}). The assignment was NOT delivered — hand it over with report_send `
+      + `(report="${input.target}", to=["${started.sessionId}"]).`,
+    )
+  }
+  let receipt: string | undefined
+  try {
+    receipt = describeReceipt(await deps.peers.receipt(started.sessionId, DEFAULT_RECEIPT_MS), DEFAULT_RECEIPT_MS)
+  } catch (error) {
+    receipt = `⚠ could not observe the peer's first turn: ${reasonOf(error)}`
+  }
+  return [
+    `opened peer ${started.sessionId}${started.name === undefined ? '' : ` (name=${started.name})`}`,
+    started.cwd === undefined ? '' : `cwd=${started.cwd}`,
+    renderPeerPermission(started.permission),
+    `peers you have started: ${started.started}`,
+    `assignment: ${input.target} — handed over as it is; nothing new was authored`,
+    renderMutation(delivered.front, delivered.outcomes),
+    receipt === undefined ? '' : receipt,
+    renderWorkspace(started.workspace),
+    `Address this peer later with report_send / report_cc to=${started.sessionId}, or see everyone with peer_list.`,
+  ].filter((line) => line !== '').join('\n')
 }
 
 /**
@@ -833,20 +915,40 @@ export function registerReportTools(
 
   disposers.push(ctx.tools.register(defineTool({
     name: 'peer_start',
-    description: 'Open a new independent agent session — a peer, not a subordinate. A peer is a root session with its own lifecycle that outlives this turn, so it is the right move when the work is long-running, when you want a partner that keeps its own context across days, or when a task should not be nested under you. This creates the session, records that you started it (which is what later lets you address it directly), and hands it the task as a REPORT — so the assignment is durable and traceable, and the peer can answer by contributing to that same report. The peer inherits your composition, model route, and current permission state (sandbox mode, approval policy, preset), and the output reports the permission state it actually got. The output also reports what became of the peer\'s first turn (running, already ended, or failed): a delivered digest proves only that the peer is resident, never that work started. Do not use this as a cheaper subagent: for a bounded subtask, delegation is the right tool.',
+    description: 'Open a new independent agent session — a peer, not a subordinate. A peer is a root session with its own lifecycle that outlives this turn, so it is the right move when the work is long-running, when you want a partner that keeps its own context across days, or when a task should not be nested under you. This creates the session, records that you started it (which is what later lets you address it directly), and hands it the task as a REPORT — so the assignment is durable and traceable, and the peer can answer by contributing to that same report. Pass `report` to hand over a report you already wrote instead: nothing new is authored, and the peer starts in that report\'s checkout when it has one — the alternative to the duplicate assignment stub. Pass `parent` to hang a new assignment report under an existing one. The peer inherits your composition, model route, and current permission state (sandbox mode, approval policy, preset), and the output reports the permission state it actually got. The output also reports what became of the peer\'s first turn (running, already ended, or failed): a delivered digest proves only that the peer is resident, never that work started. Do not use this as a cheaper subagent: for a bounded subtask, delegation is the right tool.',
     parameters: {
-      task: { type: 'string', required: true, description: 'What this peer is for and what it should do first. It becomes the opening report body.' },
+      task: { type: 'string', required: true, description: 'What this peer is for and what it should do first. It becomes the opening report body, or the task line of the hand-off when `report` is given.' },
       name: { type: 'string', description: 'Optional short display name for the peer (60 characters or fewer).' },
+      report: { type: 'string', description: 'Hand this existing report over as the peer\'s assignment instead of authoring a new one. The peer is addressed to it (one `sent` hop) and starts in its checkout when it has one; a closed report is refused, because addressing it would reopen it.' },
+      parent: { type: 'string', description: 'When a new assignment report is authored, hang it under this report id — a tree instead of a thread. Ignored when `report` is given, and the two together are refused.' },
       ...worktreeParam(worktree, 'Give the peer its own git checkout, on a branch named after the assignment report, and start it there instead of in your directory. Only the working directory and index are private; config, hooks and the object store are shared with every other checkout.'),
     },
     output: stringOutput,
     execute: async (args, exec) => {
-      const input = args as { task: string; name?: string; worktree?: boolean }
+      const input = args as { task: string; name?: string; report?: string; parent?: string; worktree?: boolean }
       const actor = actorOf(exec as ExecLike)
       // The name is normalized here as well as in PeerService because the
       // subject is derived from it: a whitespace-only name would otherwise turn
       // into a bare ": " prefix on the report title.
       const name = input.name?.trim() || undefined
+      const target = input.report?.trim() || undefined
+      const parent = input.parent?.trim() || undefined
+      if (target !== undefined && parent !== undefined) {
+        throw new Error(
+          'report-ledger: peer_start takes either `report` (hand an existing report over) or `parent` '
+          + '(hang the new assignment under one), never both — a report that already exists is not a new tree node',
+        )
+      }
+      if (target !== undefined) {
+        if (input.worktree === true) {
+          throw new Error(
+            `report-ledger: ${target} already decides its own checkout — the peer starts in it when it has one. `
+            + 'To give it one, author the report with worktree:true (or claim a checkout with report_lease) and then '
+            + 'hand it over without worktree',
+          )
+        }
+        return await startPeerOnReport({ peers, service }, { actor, target, task: input.task, ...(name === undefined ? {} : { name }) })
+      }
       const subject = subjectFrom(input.task, name)
       // The checkout has to exist before the peer does, because the peer's
       // working directory is the checkout's path and a session is born with the
@@ -897,6 +999,7 @@ export function registerReportTools(
           actor,
           to: [started.sessionId],
           task: started.name,
+          ...(parent === undefined ? {} : { parent }),
           ...(provisioned === undefined
             ? {}
             : { reportId: provisioned.report, worktree: provisioned.prepared.binding }),

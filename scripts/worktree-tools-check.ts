@@ -225,6 +225,80 @@ check('the peer is warned that hooks and config are shared',
 check('the assignment report is bound to the peer checkout',
   peerDigest?.worktree !== undefined && started?.cwd !== undefined && w.samePath(peerDigest.worktree.path, started.cwd))
 
+// ---- 3b. handing an existing report over to a peer -------------------------
+// The assignment stub exists because a peer needs a report to be addressed to.
+// When the caller already wrote that report, authoring another one duplicates it —
+// and the checkout belongs to the ORIGINAL report, so that is where the peer has
+// to start. This is the flow the old surface made callers assemble by hand.
+const lineOut = await call('report_author', { subject: 'line report for a peer', body: 'b', worktree: true })
+const lineDigest = (await ledger.listReports()).find((front) => front.subject === 'line report for a peer')
+check('the line report owns a checkout', lineDigest?.worktree !== undefined, lineOut.slice(0, 120))
+
+const reportsBeforeHandover = (await ledger.listReports()).length
+const peersBeforeHandover = created.length
+const handedOut = await call('peer_start', { task: 'do the line work', report: lineDigest?.report ?? '' })
+const handoverPeer = created[created.length - 1]
+check('handing a report over starts exactly one peer', created.length === peersBeforeHandover + 1,
+  String(created.length - peersBeforeHandover))
+check('handing a report over authors nothing new',
+  (await ledger.listReports()).length === reportsBeforeHandover,
+  `${reportsBeforeHandover} -> ${(await ledger.listReports()).length}`)
+check('the peer starts in the handed-over report\'s checkout',
+  handoverPeer?.cwd !== undefined && lineDigest?.worktree !== undefined
+    && w.samePath(handoverPeer.cwd, lineDigest.worktree.path),
+  `${String(handoverPeer?.cwd)} vs ${String(lineDigest?.worktree?.path)}`)
+const handoverSent = (await ledger.readHops(lineDigest?.report ?? '')).find((hop) => hop.action === 'sent')
+check('the report is addressed to the peer',
+  handoverSent?.to.includes(handoverPeer?.sessionId ?? '') === true, JSON.stringify(handoverSent?.to))
+// The peer contract rides in the hop note because the body is the caller's report:
+// contributing to it would make the caller a co-author, and therefore an owner.
+check('the peer contract travels in the hop note',
+  (handoverSent?.note ?? '').includes('同伴') && (handoverSent?.note ?? '').includes('report_contribute'),
+  String(handoverSent?.note))
+check('the output says nothing new was authored', handedOut.includes('nothing new was authored'), handedOut)
+
+let reportAndParent = ''
+try {
+  await call('peer_start', { task: 'x', report: lineDigest?.report ?? '', parent: lineDigest?.report ?? '' })
+} catch (error) {
+  reportAndParent = error instanceof Error ? error.message : String(error)
+}
+check('report and parent together are refused', reportAndParent.includes('never both'), reportAndParent)
+
+let worktreeWithReport = ''
+try {
+  await call('peer_start', { task: 'x', report: lineDigest?.report ?? '', worktree: true })
+} catch (error) {
+  worktreeWithReport = error instanceof Error ? error.message : String(error)
+}
+check('worktree:true with an existing report is refused, because the report decides',
+  worktreeWithReport.includes('decides its own checkout'), worktreeWithReport)
+
+let missingReport = ''
+try {
+  await call('peer_start', { task: 'x', report: 'R-9999' })
+} catch (error) {
+  missingReport = error instanceof Error ? error.message : String(error)
+}
+check('a report that does not exist is refused', missingReport.includes('does not exist'), missingReport)
+
+await call('report_close', { report: lineDigest?.report ?? '', note: 'fixture: the line report is done' })
+let closedReport = ''
+try {
+  await call('peer_start', { task: 'x', report: lineDigest?.report ?? '' })
+} catch (error) {
+  closedReport = error instanceof Error ? error.message : String(error)
+}
+check('a closed report is refused rather than silently reopened', closedReport.includes('is closed'), closedReport)
+
+// The other half of the old complaint: when a stub IS authored, it can at least
+// hang under the report it dispatches, so the tree shows the collaboration shape.
+const stubOut = await call('peer_start', { task: 'a stub under a parent', parent: authoredDigest?.report ?? '' })
+const stubDigest = (await ledger.listReports()).find((front) => front.subject === 'a stub under a parent')
+check('a parented assignment records its parent', stubDigest?.parent === authoredDigest?.report,
+  `${String(stubDigest?.parent)} vs ${String(authoredDigest?.report)}`)
+check('the parented stub is still a normal assignment', stubOut.includes('assignment report:'), stubOut)
+
 // A directory no workspace owns is not a problem to report: the peer is simply
 // ungrouped, and a warning line here would train callers to ignore the one case
 // that IS a defect — a registration that was attempted and failed.
