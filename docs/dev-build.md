@@ -91,6 +91,8 @@ pnpm check        # 以上三者的合并，也就是完整的本地门禁
 ## 兼容性与依赖契约
 
 - **DSH 0.2.0-rc.2 对齐**：构建产物与该版本的平台模块表逐条比对一致，类型检查、构建与全部确定性断言均通过（套数与数量见上面的命令注释）。0.1.5-rc.3 已不再支持：那个 shell 的图标导出带画板尺寸后缀（如 `IconCopyOutline16`），0.2.0 改成尺寸中立的 `…Regular` / `…Medium` 成对导出，尺寸交给 `size` prop。
+- **DSH 0.2.1-rc.2 已实测（host 半）**：在隔离 prefix（`npm i @deepseek-ai/dsh@0.2.1-rc.2 --prefix <scratch>`）+ 隔离 `DSH_HOME` + 从模板生成的 `headless` profile 里跑通了工具注册与调用、投递、对非驻留会话的挂账、`peer_wake` 经 `ctx.agents.resume` 恢复会话并补投、权限继承；`dsh-tools`/`dsh-workspace`/`dsh-session` 的类型面（`defineTool`、`realpathNormalize`、`SESSION_FORMAT_VERSION = 4`）逐字比对未变。**没测**的是浏览器半（`dsh-client-ui-primitives` 的冻结模块表），它要在隔离 `DSH_HOME` 里另起一个 web profile 才能验。
+  - ⚠️ **那套实测踩到了部署坑，值得记住**：在 profile 里再装一份 `@deepseek-ai/dsh-tools` 会让所有工具调用失败（报 `Cannot read properties of undefined (reading 'prepare')`）。原因是调度器挂在 `Symbol("@deepseek-ai/dsh-tools.scheduler")` 这个**模块内** Symbol 上，两份 copy 的 Symbol 不相等，agent loop 找不到调度器。**官方包只能由 harness 自己那一份提供**；插件缺 `dsh-tools`/`dsh-workspace` 时应该把它们指向 harness 的 copy（例如在插件目录里 junction 到 harness 的 `node_modules/@deepseek-ai`），而不是在 profile 里另装一份。
 - **宿主半的运行时外部依赖有三条**：`@deepseek-ai/dsh-tools` 与 `@deepseek-ai/dsh-workspace`（都由 profile 提供，**不在 package.json 里声明**），以及 `yaml`（声明在 `dependencies` 里，由包管理器安装；front matter 的 YAML 编解码用它）。`lib/` 随源码提交，固定 Commit 里就带着可运行的构建产物。
 - **浏览器半 require** `react`、`react/jsx-runtime` 与 `@deepseek-ai/dsh-client-ui-primitives`（面板里的按钮、芯片、悬停、状态点、输入框与正文渲染全部用它，与内置的 Chat / 轨迹视图同一套），其余全部内联。宿主半在 headless profile 里同样可用（没有 web server 时只是少了那三个只读端点）。
 - ⚠️ 于是浏览器半多了一条硬依赖：**shell 的冻结模块表里必须有 `dsh-client-ui-primitives`**。它自带的对话视图就依赖它，所以缺了它意味着那个 shell 本身已经坏了；真缺的话失败模式是「汇报标签页不出现」而不是整个 GUI 崩。

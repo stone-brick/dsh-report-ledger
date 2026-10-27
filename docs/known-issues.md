@@ -14,8 +14,7 @@
 | 2 | 10k 深链递归导致 `RangeError` | 未修；低频 |
 | 3 | 画布 emoji 折行劈代理对、帧 hover 按 index | 未修 |
 | 4 | 视图跳转后焦点丢失、点击无声、`pane` 死代码 | 未修；V9 已单独修 |
-| 5 | 兼容性 records（`dsh.compatibility` / `dshOperations`） | 未决策 |
-| 6 | publish 只确认版本可见，不校验 shasum/provenance | 未修 |
+| 5 | publish 只确认版本可见，不校验 shasum/provenance | 未修 |
 
 ## 1. 测试脚本的 scratch 目录没有统一的 `try/finally`
 
@@ -61,17 +60,7 @@
   - 删除 `pane`/`paneHead`/`paneBody`/`onClose`，模块头改成「就地面板」，同步 `docs/ui.md` 的相关句子。
 - **状态**：未修。V9（会话页复制读路径）已由 `R-0061` 修复；V10（`getJson` 无 abort/超时）已在 `R-0059` 修复；这四项仍开放。
 
-## 5. 兼容性 records
-
-- **证据**：`R-0055` S3「兼容性元数据窗口」；`R-0056`；`R-0059` deferred。
-- **当前值**：`package.json` 的 `dsh.compatibility.dsh` 为 `>=0.2.0-rc.2 <0.3.0`；`dshReleases` 只有 `0.2.0-rc.2: compatible`；没有 `dshOperations`。
-- **影响**：
-  - semver 范围允许 stable `0.2.1`，但只实测过 `0.2.0-rc.2`；这是「声明支持未验证版本」。
-  - 若投 DSH STORE，可能需要 `dshOperations` 记录；没有它，提交会被要求补材料。
-- **建议修法**：先定 0.2.4 的目标 DSH。只支持 `0.2.0-rc.2` 就写精确范围/说明；要支持 `0.2.1-rc`/stable 就补测并扩展 `dshReleases`；投 STORE 前补 `dshOperations`。
-- **状态**：未决策。这是兼容性声明问题，不是运行时缺陷；需要产品决定。
-
-## 6. publish 只确认版本可见，不校验 shasum/provenance
+## 5. publish 只确认版本可见，不校验 shasum/provenance
 
 - **证据**：`R-0026` S3-7；`R-0055` S3；`R-0059` deferred。
 - **当前代码**：`.github/workflows/publish.yml` 的 `Verify the published version` 会在最多约 5 分钟内轮询 `npm view dsh-report-ledger@<version> version`；成功后打印 `dist.shasum` / `dist.integrity`，但**不做比较**，也不断言 provenance。
@@ -88,7 +77,8 @@
 - **孤儿检出警告**：`R-0064` 覆盖 `report_close`；`R-0065` 覆盖 `report_release` 与 `report_handover`。都只警告、不阻塞。
 - **V10 `getJson` 无 abort/超时**：已在 `R-0059` S3 批次修复。
 - **相邻箭头、`fittedTransform`、`pick` 1px 边框、`blur()` 死分支**：已在 `R-0059` S3 批次修复。
+- **兼容性 records（原第 5 项）**：`dshReleases` 已补 `0.2.1-rc.2`——在一套隔离 prefix + 隔离 `DSH_HOME` 里装了 `@deepseek-ai/dsh@0.2.1-rc.2`，host 半逐条实测通过：工具注册与调用（`report_author` 真的落盘并回显 `hops/reads`）、`report_send` 对非驻留会话的挂账、`peer_wake` 经 `ctx.agents.resume` 真的把它加载回来并补投、权限继承照旧、`SESSION_FORMAT_VERSION` 仍是 4（投递消息的 producer source kind 未变）。`dshOperations` 仍缺，但那只在投 DSH STORE 时才是材料缺口，不是运行时缺陷。
 
 ## 相关但不在本清单的项
 
-审计里还有性能窗口化、`Config` 运行时 schema、文档计数漂移等项；它们要么影响面更小，要么已经被后续提交顺手修掉，不在「已确认、有证据、但暂缓」的这六项里。若需要完整审计原文，按上面的报告 ID 查账本。
+审计里还有性能窗口化、`Config` 运行时 schema、文档计数漂移等项；它们要么影响面更小，要么已经被后续提交顺手修掉，不在「已确认、有证据、但暂缓」的这五项里。若需要完整审计原文，按上面的报告 ID 查账本。

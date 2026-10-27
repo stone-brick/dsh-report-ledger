@@ -181,7 +181,7 @@ web profile 里多两处：
 - **`fromName` 是会话标题**，即"会话名"而非"代理名"。
 - **汇报页无法隐藏 composer。** `conversation.view` 的契约没有 composer 可见性维度，外壳在视图下方无条件渲染输入区，所以汇报页底部始终有输入框。视图侧唯一能整块替换它的是 `conversation.composer` 链（审批/提问面板用的同一机制），拿它隐藏属于偏用：该页会同时失去输入、发送、停止、模型/权限控件与队列/待办 dock。等上游给 view 定义提供正式开关后再做。
 
-工作区相关的限制（默认关闭，未开启时都不适用）见 [工作区](docs/worktree.md)。审计中已确认、但有意暂缓的六项（脚本清理、10k 深链、画布 emoji/帧 hover、视图焦点/无声点击/pane、兼容性 records、publish shasum 断言）见 [已知未修问题](docs/known-issues.md)。
+工作区相关的限制（默认关闭，未开启时都不适用）见 [工作区](docs/worktree.md)。审计中已确认、但有意暂缓的五项（脚本清理、10k 深链、画布 emoji/帧 hover、视图焦点/无声点击/pane、publish shasum 断言）见 [已知未修问题](docs/known-issues.md)。
 
 ## 文档
 
