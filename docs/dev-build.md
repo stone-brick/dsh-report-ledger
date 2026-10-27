@@ -88,6 +88,18 @@ pnpm check        # 以上三者的合并，也就是完整的本地门禁
 - 补丁语法：插新行用 `- insert:`；**按 id 修改已有行必须写成顶层 `- id:`**，把已有行放进 `insert` 会新建一条同 id 的行并报 `duplicate loader entry id`。
 
 
+## 升级本机 DSH
+
+全局安装是唯一"跑着的"那份；`~/.dsh/profiles/node_modules` 只是一层**扁平的 junction 映射**，每条指向全局安装里的嵌套包（`…\@deepseek-ai\dsh\node_modules\…`）。所以升级全局安装就等于升级这一层——junction 按路径跟随，不需要重建。四步：
+
+1. **先关 GUI。** 运行中的 harness 持着 `lib/bin.js`，Windows 下 npm 无法替换那个目录（报 `Access is denied`）。因此这一步在会话内部做不到：会话本身就跑在那个目录上。
+2. `npm i -g @deepseek-ai/dsh@<版本>`。两个坑：npm 12 默认拦 install scripts，而它需要 `--allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs`（spawn helper、node-pty 的 prebuild、koffi 的原生构建都在这张表里）；这台机器的 registry 连接在大流量下会 `ECONNRESET`，加 `--fetch-retries 10 --fetch-timeout 120000 --maxsockets 3` 才稳。
+3. **验证要新起进程**（不是 GUI）：`dsh --version` 是目标版本；`dsh --profile web --dump-config` 能组合且含 `id: report-ledger`；`<global>\@deepseek-ai\dsh\node_modules\{dsh-tools,dsh-workspace,dsh-mcp-client,yaml}` 都还在——前三个分别是插件 host 半的运行时外部依赖与 web 补丁里的绝对路径。
+4. 再开 GUI：`dsh web`。**回滚**就是把版本号换回旧的再跑一遍。
+
+升级后 `profiles/node_modules` 里会留下目标已消失的 junction（rc.2 预演里约 100 条，属于历史依赖的残迹）。它们是死链接，不会被任何解析命中，可以留着也可以删。本机有一份把上面四步 + 校验 + 剪枝做在一起的脚本：`~/.dsh/upgrade-dsh.ps1`（支持 `-DryRun` / `-Version` / `-PruneLayer`；它在本机、不入库）。
+
+
 ## 兼容性与依赖契约
 
 - **DSH 0.2.0-rc.2 对齐**：构建产物与该版本的平台模块表逐条比对一致，类型检查、构建与全部确定性断言均通过（套数与数量见上面的命令注释）。0.1.5-rc.3 已不再支持：那个 shell 的图标导出带画板尺寸后缀（如 `IconCopyOutline16`），0.2.0 改成尺寸中立的 `…Regular` / `…Medium` 成对导出，尺寸交给 `size` prop。
