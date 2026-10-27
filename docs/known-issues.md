@@ -77,7 +77,7 @@
 - **孤儿检出警告**：`R-0064` 覆盖 `report_close`；`R-0065` 覆盖 `report_release` 与 `report_handover`。都只警告、不阻塞。
 - **V10 `getJson` 无 abort/超时**：已在 `R-0059` S3 批次修复。
 - **相邻箭头、`fittedTransform`、`pick` 1px 边框、`blur()` 死分支**：已在 `R-0059` S3 批次修复。
-- **兼容性 records（原第 5 项）**：`dshReleases` 已补 `0.2.1-rc.2`——在一套隔离 prefix + 隔离 `DSH_HOME` 里装了 `@deepseek-ai/dsh@0.2.1-rc.2`，host 半逐条实测通过：工具注册与调用（`report_author` 真的落盘并回显 `hops/reads`）、`report_send` 对非驻留会话的挂账、`peer_wake` 经 `ctx.agents.resume` 真的把它加载回来并补投、权限继承照旧、`SESSION_FORMAT_VERSION` 仍是 4（投递消息的 producer source kind 未变）。`dshOperations` 仍缺，但那只在投 DSH STORE 时才是材料缺口，不是运行时缺陷。
+- **兼容性 records（原第 5 项）**：`dshReleases` 已补 `0.2.1-rc.2` / `rc.3` / `rc.4`——每个版本都在隔离 prefix + 隔离 `DSH_HOME` 里装 `@deepseek-ai/dsh@<ver>` 实测。宿主半：工具调用与落盘、投递、非驻留挂账、`peer_wake` 经 `ctx.agents.resume` 恢复并补投、权限继承；浏览器半：隔离 web profile 里「汇报」标签页与「汇报画布」胶囊都正常渲染（含 `reads` 的显示）。类型面另逐字核过：`defineTool`、`realpathNormalize`、`SESSION_FORMAT_VERSION = 4`（投递消息的 producer source kind 未变）、`agents.resume` 整块未动。`dshOperations` 仍缺，但那只在投 DSH STORE 时才是材料缺口，不是运行时缺陷。
 
 ## 相关但不在本清单的项
 
