@@ -63,17 +63,44 @@ check('protocol points at report_amend instead of re-authoring', PROTOCOL.includ
 check('protocol says only owners may amend', PROTOCOL.includes('只有发起者或共写者'))
 check('protocol distinguishes append from replace for the body', PROTOCOL.includes('replace_body'))
 check('protocol tells the agent not to fear leaving a correction trail', PROTOCOL.includes('别怕留痕'))
+// The one activity a reader of the close line would otherwise miss: an amendment
+// reopens a concluded report exactly like a contribution does, and a caller that
+// only retitled a report left it open without being told.
+check('protocol says an amendment reopens a closed report', PROTOCOL.includes('只改摘要字段'))
+check('protocol says a reopened report must be concluded again', PROTOCOL.includes('路径上多一条 reopened'))
 
 // ---- the lifecycle distinction is stated ---------------------------------
 check('protocol separates a receipt from a conclusion', PROTOCOL.includes('是两件事'))
 check('protocol restricts closing to owners', PROTOCOL.includes('只有发起者或共写者'))
 check('protocol says a closed report reopens on activity', PROTOCOL.includes('自动重开'))
+// The close line enumerates what reopens a report; an omission there is what
+// makes a retitled-but-reopened report invisible to a reader who trusted it.
+check('protocol lists an amendment among the activities that reopen', PROTOCOL.includes('转呈／修正'))
+// Closing without accounting for the work is the failure mode a zero-contribution
+// conclusion hides; the requirement is stated here so it travels with the tool.
+check('protocol requires a closing note to account for the work',
+  PROTOCOL.includes('结案时在 note 里交代'))
 
 // ---- the conversation framing is stated ----------------------------------
 check('protocol frames a co-written report as the conversation thread',
   PROTOCOL.includes('就是你们之间的对话线程'))
+// Two shapes are legitimate — accumulate into one report, or a tree of reports
+// linked by parent — and a protocol that recommends both without a rule leaves
+// the choice to chance.
+check('protocol gives the thread-versus-tree decision rule', PROTOCOL.includes('跨阶段的里程碑'))
+check('protocol gives a contribution granularity', PROTOCOL.includes('每完成一个可验收项'))
 check('protocol tells the agent an absent recipient is not a refusal',
   PROTOCOL.includes('收件方不在线不是错误'))
+// The half the old text left out: the ledger holds the hand-off but cannot make
+// the session resident, so "wait for it to come back" is not a plan an agent can
+// execute on its own.
+check('protocol says no tool can bring an absent session back',
+  PROTOCOL.includes('没有工具能让一个非驻留会话回来'))
+check('protocol names who can make it resident again', PROTOCOL.includes('宿主 resume'))
+check('protocol says peer_start cannot recall an existing session',
+  PROTOCOL.includes('唤不回已存在的会话'))
+check('protocol says an absent recipient means smaller scope or a takeover',
+  PROTOCOL.includes('切到一轮能交付'))
 check('protocol says untracked word-of-mouth never enters the path',
   PROTOCOL.includes('绕过工具的口信不会进入路径'))
 check('protocol announces six behavior conventions', PROTOCOL.includes('六条行为约定'))
