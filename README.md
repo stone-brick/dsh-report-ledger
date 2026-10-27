@@ -63,7 +63,7 @@ Reports are first-class agent-to-agent messages with a persisted ledger: front m
 report_author(subject="重构读路径缓存", body="...", to=["<session-id>"], task="read-path")
 ```
 
-收件方立刻被唤醒（`steer`）。对方不在线不是错误：投递留在账本里，等它重新驻留时自动送达。
+收件方驻留时立刻被唤醒（`steer`）。对方不在线不是错误：投递留在账本里，等它重新驻留时自动送达。但**账本没有工具能让一个非驻留会话回来**——`peer_start` 只新建，唤醒只发生在人或宿主把那个会话重新恢复之后；所以派活时把范围切到一轮能交付，或者准备接手（`report_transfer` / `report_handover`）。
 
 **回执 → 共写 → 结案**：
 
