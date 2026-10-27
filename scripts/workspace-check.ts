@@ -500,7 +500,8 @@ check('apply registers the three read-only endpoints',
   wired.registered.join() === [REPORT_PATH, TIMELINE_PATH, WORKTREES_PATH].join(), wired.registered.join())
 check('each registered endpoint carries its handler', wired.routes.size === 3, String(wired.routes.size))
 check('the model tools include the peer surface',
-  wired.tools.includes('report_author') && wired.tools.includes('peer_list') && wired.tools.includes('peer_start'),
+  wired.tools.includes('report_author') && wired.tools.includes('peer_list') && wired.tools.includes('peer_start')
+    && wired.tools.includes('peer_wake'),
   wired.tools.join(','))
 check('the lease tool stays hidden while the worktree feature is off',
   !wired.tools.includes('report_lease'), wired.tools.join(','))

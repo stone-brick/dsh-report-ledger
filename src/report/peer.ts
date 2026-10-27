@@ -60,12 +60,30 @@
  * up `$DSH_HOME/report-ledger/peers.jsonl`, delete the lines of peers that are
  * truly finished, and the budget is available again.
  *
+ * **Waking is the half the delivery path cannot supply.** The ledger's mailbox is
+ * durable precisely because it is passive: a `steer` to a session this process is
+ * not holding has nowhere to go, so a peer that finished its turn and went absent
+ * is unreachable through the ledger until something loads it again. Nothing about
+ * the hand-off machinery can do that — which is why {@link PeerService.wake}
+ * exists, and why it belongs here rather than in the delivery module: it resumes
+ * the session through the host, and then the ordinary flush delivers what was
+ * already owed.
+ *
+ * Its authority is the narrowest one that is still useful: the session that
+ * started the peer, and nobody else. Resuming is closer to creating than to
+ * messaging — the agent comes back running with the authority recorded on its own
+ * log — so the rule follows `peer_start`'s authority story (the caller started it,
+ * so the caller may bring it back) rather than `report_send`'s open-door one. A
+ * wake spends no peer budget: it loads a session that already exists and already
+ * holds its slot, and making "reuse the peer you have" the expensive option would
+ * reverse the budget's whole purpose.
+ *
  * @module dsh-report-ledger/report/peer
  */
 
 import { randomUUID } from 'node:crypto'
 import type { OutboundMessage } from './deliver.ts'
-import { appendPeer, buildRoster, holdsChannelTo, readPeers, type PeerRow, type RosterInput } from './roster.ts'
+import { appendPeer, buildRoster, holdsChannelTo, readPeers, type PeerRecord, type PeerRow, type RosterInput } from './roster.ts'
 import type { SessionRecordLike } from './timeline.ts'
 import type { ReportFrontMatter } from './types.ts'
 
@@ -215,6 +233,30 @@ export interface PeerHost {
    */
   createPeer(input: { sessionId: string; startedBy: string; cwd?: string }): Promise<{ id: string; steer(message: OutboundMessage): void; permission?: PeerPermission }>
   /**
+   * Load a persisted peer session and resume an agent on it.
+   *
+   * The counterpart to {@link PeerHost.createPeer} for a session that already
+   * exists, and it carries the same obligation: a resumed root agent is just as
+   * composition-less as a fresh one, so the host must join it to the starter's
+   * live preset and hand it a model route. `startedBy` is what makes that
+   * possible — without a live starter there is nothing to compose it from, and a
+   * resumed peer whose every turn dies at step 1 is worse than a refusal.
+   *
+   * What must NOT be repeated is permission inheritance. The state was written
+   * onto the peer's own log when it was created, and a warm resume restores it
+   * from there; re-capturing the starter's current state here would overwrite a
+   * later switch made in that session, which is exactly the promise
+   * {@link PeerHost.createPeer} makes about inheriting rather than pinning.
+   *
+   * A host without resume support (an older harness, a deployment with no session
+   * persistence) must throw with the reason rather than resolve: a wake that
+   * silently did nothing would leave the hand-offs owed and the caller believing
+   * they had been delivered.
+   * @param input - the persisted session to load, and the live starter to compose it from.
+   * @returns the resumed session id.
+   */
+  resumePeer(input: { sessionId: string; startedBy: string }): Promise<{ id: string }>
+  /**
    * Put a freshly created peer session into the workspace group that owns its
    * directory, so the GUI lists it under that workspace instead of leaving it
    * ungrouped forever.
@@ -245,6 +287,40 @@ export interface PeerHost {
    * @returns the observation, or `undefined` when the peer is not resident at all.
    */
   confirmPeer(sessionId: string, timeoutMs: number): Promise<PeerReceipt | undefined>
+}
+
+/**
+ * What one wake attempt found and did.
+ *
+ * Reported as a value rather than inferred by the caller: "it was already there"
+ * and "I loaded it again" are different facts about the session's lifecycle, and
+ * a caller that cannot tell them apart ends up describing a no-op as a wake.
+ */
+export interface WokenPeer {
+  /** The session the caller asked about. */
+  readonly sessionId: string
+  /** The session that started it — the only one allowed to wake it. */
+  readonly startedBy: string
+  /** The display name its starter gave it, when any. */
+  readonly name?: string
+  /** Whether it was resident before this call. */
+  readonly resident: boolean
+  /** Whether this call resumed it. Always false when it was already resident. */
+  readonly resumed: boolean
+}
+
+/** Options for {@link PeerService.wake}. */
+export interface WakeOptions {
+  /**
+   * Whether a non-resident peer is actually resumed.
+   *
+   * `false` answers the two questions a caller has to settle before a wake is
+   * worth a turn — "may I?" and "is it here?" — without touching the host, which
+   * is the only order that works: nothing un-resumes a session, so the decision
+   * to load one has to be made from ledger state before the host is asked.
+   * @default true
+   */
+  readonly resume?: boolean
 }
 
 /** Options for {@link PeerService.start}. */
@@ -467,5 +543,84 @@ export class PeerService {
       ...(created.permission === undefined ? {} : { permission: created.permission }),
       ...(workspace === undefined ? {} : { workspace }),
     }
+  }
+
+  /**
+   * Bring one of the caller's peers back, or say plainly why it cannot be.
+   *
+   * The authority rule is the point of this method, so it is checked before any
+   * side effect: only the session whose roster line started the peer may wake it,
+   * and a refusal names that session so the caller can hand the job over instead
+   * of retrying. Two refusals are deliberately not errors of the same kind:
+   *
+   *  - **no roster line at all** means the plugin never started it (a subagent, a
+   *    GUI session, a session from another deployment). Waking those is the
+   *    harness's business; here the answer is the ledger's other tools.
+   *  - **somebody else's line** means the relationship exists, it just is not the
+   *    caller's. Naming the starter turns a dead end into a hand-off.
+   *
+   * A resume failure is wrapped rather than passed through: the host's message is
+   * kept verbatim, but the caller also needs to know that nothing was delivered
+   * and that the obligation is still owed — otherwise a failed wake reads exactly
+   * like a queue that will be delivered later, which is the misunderstanding this
+   * whole capability exists to end.
+   * @param self - the calling session id.
+   * @param sessionId - the peer to wake.
+   * @param options - whether to actually resume it; see {@link WakeOptions}.
+   * @returns what was found and what was done.
+   * @throws when the target is not one of the caller's peers, or cannot be resumed.
+   */
+  async wake(self: string, sessionId: string, options: WakeOptions = {}): Promise<WokenPeer> {
+    const target = sessionId.trim()
+    if (target === '') throw new Error('report-ledger: peer_wake needs a session id')
+    if (target === self) {
+      throw new Error(
+        'report-ledger: a session cannot wake itself — it is already resident. Pick the peer you mean with peer_list.',
+      )
+    }
+
+    // Last line wins: the log is append-only and human-editable, so a peer that was
+    // recorded twice is attributed by its most recent line rather than its first.
+    const peers = await readPeers()
+    let record: PeerRecord | undefined
+    for (let index = peers.length - 1; index >= 0; index -= 1) {
+      const candidate = peers[index]
+      if (candidate !== undefined && candidate.sessionId === target) {
+        record = candidate
+        break
+      }
+    }
+    if (record === undefined) {
+      throw new Error(
+        `report-ledger: ${target} has no line in the peer log, so this plugin did not start it and there is `
+        + 'nothing here to resume it with. Waking a session somebody else created is the harness\'s job: address it '
+        + 'with report_send (the hand-off is held until it returns), or move the obligation with report_transfer / '
+        + 'report_handover.',
+      )
+    }
+    if (record.startedBy !== self) {
+      throw new Error(
+        `report-ledger: ${target} was started by ${record.startedBy}, and only that session may wake it. `
+        + `Address it with report_send (the hand-off is held until it returns), or ask ${record.startedBy} to wake it.`,
+      )
+    }
+
+    const name = record.name === undefined ? {} : { name: record.name }
+    const resident = this.#host.liveIds().has(target)
+    if (resident || options.resume === false) {
+      return { sessionId: target, startedBy: record.startedBy, resident, resumed: false, ...name }
+    }
+
+    try {
+      await this.#host.resumePeer({ sessionId: target, startedBy: self })
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      throw new Error(
+        `report-ledger: ${target} could not be resumed (${reason}). Nothing was delivered — the hand-offs are `
+        + 'still owed to it. If it is not coming back, move them with report_transfer (to a session that is '
+        + 'resident) or retire it with report_handover.',
+      )
+    }
+    return { sessionId: target, startedBy: record.startedBy, resident: false, resumed: true, ...name }
   }
 }

@@ -44,7 +44,7 @@ for (const tool of [
   'report_author', 'report_contribute', 'report_send', 'report_cc',
   'report_forward', 'report_read', 'report_list', 'report_ack', 'report_amend', 'report_close',
   'report_release', 'report_lease', 'report_transfer', 'report_handover',
-  'peer_list', 'peer_start',
+  'peer_list', 'peer_start', 'peer_wake',
 ]) {
   check(`protocol documents ${tool}`, PROTOCOL.includes(tool))
 }
@@ -91,12 +91,15 @@ check('protocol gives the thread-versus-tree decision rule', PROTOCOL.includes('
 check('protocol gives a contribution granularity', PROTOCOL.includes('每完成一个可验收项'))
 check('protocol tells the agent an absent recipient is not a refusal',
   PROTOCOL.includes('收件方不在线不是错误'))
-// The half the old text left out: the ledger holds the hand-off but cannot make
-// the session resident, so "wait for it to come back" is not a plan an agent can
-// execute on its own.
-check('protocol says no tool can bring an absent session back',
-  PROTOCOL.includes('没有工具能让一个非驻留会话回来'))
-check('protocol names who can make it resident again', PROTOCOL.includes('宿主 resume'))
+// A wake is the one capability that can end the wait, so the protocol has to say
+// who holds it and what makes it worth doing. The old text promised the opposite —
+// that no tool could bring an absent session back — which is now false.
+check('protocol says only the starter can wake a peer',
+  PROTOCOL.includes('只有开启它的会话能用 peer_wake'))
+check('protocol says a wake is only meaningful while the ledger owes it something',
+  PROTOCOL.includes('仅当账本还欠它投递'))
+check('protocol names who else can make it resident again', PROTOCOL.includes('人或宿主把它恢复'))
+check('protocol says a wake spends no peer budget', PROTOCOL.includes('不占同伴名额'))
 check('protocol says peer_start cannot recall an existing session',
   PROTOCOL.includes('唤不回已存在的会话'))
 check('protocol says an absent recipient means smaller scope or a takeover',

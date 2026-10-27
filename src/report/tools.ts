@@ -1,10 +1,11 @@
 /**
  * The model-facing tools of the report ledger.
  *
- * Fifteen tools are registered by default and sixteen when the worktree
+ * Sixteen tools are registered by default and seventeen when the worktree
  * feature is on: author, co-author, address, copy, forward, read, list,
- * acknowledge, amend, close and release, plus discovery (peer_list) and creation
- * (peer_start) — and report_lease, which exists only with the feature.
+ * acknowledge, amend, close and release, plus discovery (peer_list), creation
+ * (peer_start) and revival (peer_wake) — and report_lease, which exists only with
+ * the feature.
  * `report_transfer` and `report_handover` are the retirement half: a hand-off that
  * would otherwise stay owed forever, and the act of moving a departing session's
  * assets to a successor. The
@@ -936,6 +937,72 @@ export function registerReportTools(
         renderWorkspace(started.workspace),
         `Address this peer later with report_send / report_cc to=${started.sessionId}, or see everyone with peer_list.`,
       ].filter((line) => line !== '').join('\n')
+    },
+  })))
+
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'peer_wake',
+    description: 'Bring back a peer you started after it went non-resident, and hand it what the ledger still owes: the session is resumed through the host, then every held hand-off is delivered, so the work continues instead of sitting in a durable inbox until someone opens that session by hand. Only the session that started the peer may wake it (peer_list shows the ones you started), and the wake spends no peer budget. It refuses when nothing is owed — loading a partner to deliver nothing spends its context and demonstrates nothing — and when the resume itself fails it says so instead of queueing silently: the hand-offs stay owed, and report_transfer / report_handover are how to take them over.',
+    parameters: {
+      session: { type: 'string', required: true, description: 'Session id of the peer to wake — the id peer_list shows for a peer you started.' },
+    },
+    output: stringOutput,
+    execute: async (args, exec) => {
+      const input = args as { session: string }
+      const actor = actorOf(exec as ExecLike)
+      const target = input.session.trim()
+      // Settlement before side effects: authority and residency are answered
+      // without resuming anything, because whether a wake is warranted at all
+      // depends on what the ledger still owes that session. The order matters —
+      // nothing un-resumes a session, so a conditional wake cannot be done after
+      // the resume.
+      const found = await peers.wake(actor, target, { resume: false })
+      const owed = await service.pendingFor(target)
+      if (owed.length === 0) {
+        throw new Error(
+          `report-ledger: nothing is owed to ${target}, so a wake would load a session with nothing to do. `
+          + (found.resident
+            ? 'It is resident already, so report_send addresses it directly.'
+            : 'Address it with report_send first — the hand-off is held until it is resident again — or leave it absent.'),
+        )
+      }
+      const woke = found.resident ? found : await peers.wake(actor, target)
+      const outcomes = await service.flushForAgent(target)
+      // Re-read rather than infer: a delivery sweep is exactly the place where
+      // "asked for" and "landed" can differ, and the caller must not be told a
+      // hand-off was delivered because a call returned without throwing.
+      const left = await service.pendingFor(target)
+      const leftIds = new Set(left.map((one) => one.report))
+      const delivered = owed.map((one) => one.report).filter((report) => !leftIds.has(report))
+      // A carbon copy is delivered without opening a turn, so the receipt would
+      // report "nothing is working on it" as a warning for something working as
+      // designed. Ask only when the hand-off actually requested a turn.
+      const asked = owed.some((one) => one.mode === 'wakeup')
+      const gone = outcomes.filter((outcome) => outcome.status === 'queued').map((outcome) => outcome.targetId)
+      let receipt: string | undefined
+      if (asked) {
+        try {
+          receipt = describeReceipt(await peers.receipt(target, DEFAULT_RECEIPT_MS), DEFAULT_RECEIPT_MS)
+        } catch (error) {
+          receipt = `⚠ could not observe the peer's first turn: ${reasonOf(error)}`
+        }
+      }
+      return [
+        woke.resumed
+          ? `woke ${target}${woke.name === undefined ? '' : ` (name=${woke.name})`}: it was not resident, and the host resumed it`
+          : `${target}${woke.name === undefined ? '' : ` (name=${woke.name})`}: already resident, so there was nothing to resume`,
+        delivered.length === 0
+          ? `the ledger owed it ${owed.length} hand-off(s), but none of them landed`
+          : `delivered (${delivered.length}): ${delivered.join(', ')}`,
+        ...(left.length === 0
+          ? []
+          : [`still held (${left.length}): ${left.map((one) => one.report).join(', ')} — the delivery did not land`]),
+        ...(gone.length === 0 ? [] : [`⚠ the session was gone again before its delivery: ${gone.join(', ')}`]),
+        ...(asked
+          ? [receipt]
+          : ['the held hand-off was a carbon copy, so no turn was opened — a quiet copy does not wake anyone']),
+        'waking spends no peer budget; address it later with report_send or report_cc',
+      ].filter((line): line is string => line !== undefined).join('\n')
     },
   })))
 

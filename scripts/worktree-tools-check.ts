@@ -118,6 +118,11 @@ const peerHost: PeerHost = {
     created.push(input)
     return { id: input.sessionId, steer: () => {} }
   },
+  // This fixture never wakes a peer; the stub exists so the host shape stays
+  // honest, and a wake that reached it would throw rather than pass silently.
+  async resumePeer() {
+    throw new Error('fixture: no peer is resumed in this check')
+  },
   // A deployment with a workspace registry: the peer's directory is looked up
   // after creation and the peer is accounted under whatever owns it.
   async attachToWorkspace(input: { sessionId: string; cwd?: string }) {

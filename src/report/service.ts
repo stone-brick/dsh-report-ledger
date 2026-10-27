@@ -20,6 +20,7 @@
 
 import { existsSync } from 'node:fs'
 import { basename } from 'node:path'
+import { mentions } from './assets.ts'
 import { planAllocation, type StaleBinding, type WorktreeSettings } from './allocate.ts'
 import type { AgentLike } from './deliver.ts'
 import { deliver, pendingMode, pendingTargets, type DeliveryOutcome } from './deliver.ts'
@@ -30,7 +31,7 @@ import {
   unmergedCommitCount,
 } from './worktree.ts'
 import type { RepoLocation } from './worktree.ts'
-import type { DeliveryMode, Report, ReportFrontMatter, ReportWorktree, RouteHop } from './types.ts'
+import type { DeliveryMode, Report, ReportFrontMatter, ReportStatus, ReportWorktree, RouteHop } from './types.ts'
 
 /** Body size above which `report_read` returns a paged pointer instead of everything. */
 const BODY_INLINE_LIMIT = 8000
@@ -324,6 +325,23 @@ function projectRoute(hops: readonly RouteHop[]): Pick<ReportFrontMatter, 'to' |
     hops: hops.length,
     ...(tail === undefined ? {} : { last: { at: tail.at, action: tail.action, actor: tail.actor } }),
   }
+}
+
+/**
+ * One hand-off the ledger still owes a session.
+ *
+ * The mode is carried because the two answers are not interchangeable: an
+ * addressed hand-off will open a turn when it lands, while a carbon copy will
+ * not. A caller that is about to resume a session (and spend its context) needs
+ * to know which one it is holding before it decides the wake is worth anything.
+ */
+export interface PendingHandoff {
+  /** The report the obligation belongs to. */
+  readonly report: string
+  /** That report's current status, because a concluded report changes what is left to do. */
+  readonly status: ReportStatus
+  /** Whether delivering it requests a turn or only adds context. */
+  readonly mode: DeliveryMode
 }
 
 /** The report service. */
@@ -1541,6 +1559,35 @@ export class ReportService {
       const front = await this.#record(report, { at: Date.now(), actor, action: 'amended', to: [], note: summary })
       return { front, outcomes: [] }
     })
+  }
+
+  /**
+   * The hand-offs the ledger still owes one session.
+   *
+   * Derived from the hop stream, like every other pending answer, so it can
+   * neither invent an obligation nor lose one to a half-written digest. The
+   * digest prefilter is the same one a handover uses: only a report that names
+   * the session can owe it anything, so the scan stays proportional to that
+   * session's collaboration instead of to the whole ledger.
+   *
+   * This is the question a wake has to ask first. Resuming a session with
+   * nothing owed loads a partner, spends its context on an empty inbox, and
+   * demonstrates nothing — the answer here is what turns that into a refusal the
+   * caller can act on instead of a silent no-op.
+   * @param session - the session that may be owed a delivery.
+   * @returns the outstanding hand-offs, oldest report first, with their wake policy.
+   */
+  async pendingFor(session: string): Promise<PendingHandoff[]> {
+    const target = session.trim()
+    if (target === '') return []
+    const pending: PendingHandoff[] = []
+    for (const front of await listReports()) {
+      if (!mentions(front, target)) continue
+      const hops = await readHops(front.report)
+      if (!pendingTargets(hops).includes(target)) continue
+      pending.push({ report: front.report, status: front.status, mode: pendingMode(hops, target) })
+    }
+    return pending
   }
 
   /**

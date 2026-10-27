@@ -27,7 +27,7 @@ dsh plugin --profile web remove dsh-report-ledger
 - 对齐 **DSH 0.2.0-rc.2**（0.1.5-rc.3 及更早不再支持）；运行产物要求 Node ≥ 20。
 - 账本是**本机文件**：`$DSH_HOME/report-ledger/`（可用 `DSH_REPORT_LEDGER_ROOT` 覆盖），不上传任何地方。
 - 浏览器读数据走三个 **GET 只读端点**，只放行 loopback；所有写操作仍然只经模型工具，那是唯一会记录跳的路径。
-- `peer_start` 是唯一会**新增活代理**的能力，受 `maxPeersPerAgent`（默认 8）约束，每次创建都记进名册日志。
+- `peer_start` 是唯一会**新增活代理**的能力，受 `maxPeersPerAgent`（默认 8）约束，每次创建都记进名册日志；`peer_wake` 只加载**已有**会话，既不新增也不占名额，而且只有开启者能唤。
 - 工作区（git 检出）功能**默认关闭**，关闭时不出现 `report_lease` 与各工具的 `worktree` 参数。
 
 ### 国内镜像（Gitee）
@@ -63,7 +63,7 @@ Reports are first-class agent-to-agent messages with a persisted ledger: front m
 report_author(subject="重构读路径缓存", body="...", to=["<session-id>"], task="read-path")
 ```
 
-收件方驻留时立刻被唤醒（`steer`）。对方不在线不是错误：投递留在账本里，等它重新驻留时自动送达。但**账本没有工具能让一个非驻留会话回来**——`peer_start` 只新建，唤醒只发生在人或宿主把那个会话重新恢复之后；所以派活时把范围切到一轮能交付，或者准备接手（`report_transfer` / `report_handover`）。
+收件方驻留时立刻被唤醒（`steer`）。对方不在线不是错误：投递留在账本里，等它重新驻留时自动送达。但**它不会自己回来**——只有开启它的会话能用 `peer_wake` 把它叫回来（宿主重新加载该会话，账本随即把还欠着的投递送进去），而且只在账本还欠它投递时才有意义；其余情况要靠人或宿主把它恢复。所以派活时把范围切到一轮能交付，或者准备接手（`report_transfer` / `report_handover`）。
 
 **回执 → 共写 → 结案**：
 
@@ -120,7 +120,7 @@ reports/R-0001.route.jsonl   append-only 传递路径，一行一跳
 | `report_transfer` | 把一笔**尚未送达**的投递从欠它的会话转给另一个会话——义务仍然存在，只是换了人欠；**不记为送达** |
 | `report_handover` | 退役/接管：枚举一个会话名下的一切，能搬的搬、能关的关，并落一份 `task: handover` 记录。它转移的是**账本资产**（未结汇报、检出占用、待送达），**不回收同伴名额** |
 
-另有 `peer_list` / `peer_start` 两个同伴工具（见 [同伴](docs/peers.md)），以及只在 `devMode` 下出现的 `dev_*` 三个（见 [开发者模式](docs/dev-agents.md)）。工具背后完整的语义——投递怎么落、修正与结案为什么这样设计、退役怎么转移资产——在 [设计](docs/design.md) 里。
+另有 `peer_list` / `peer_start` / `peer_wake` 三个同伴工具（发现、创建、唤醒；见 [同伴](docs/peers.md)），以及只在 `devMode` 下出现的 `dev_*` 三个（见 [开发者模式](docs/dev-agents.md)）。工具背后完整的语义——投递怎么落、修正与结案为什么这样设计、退役怎么转移资产——在 [设计](docs/design.md) 里。
 
 ## 状态、修正与交接
 

@@ -441,6 +441,184 @@ try {
 check('a release refusal about ownership is not decorated with the feature note',
   ownerError.includes('may not release') && !ownerError.includes('has not enabled git worktree support'), ownerError)
 
+// ---------------------------------------------------------------------------
+// Waking: the capability that ends the wait.
+//
+// A hand-off is delivered by steering a live agent, so a peer that finished its
+// turn and went absent is unreachable through the ledger until something loads
+// its session. That "something" is the wake, and its authority is the roster line
+// rather than the ledger's open addressing: resuming an agent is closer to
+// creating one than to messaging one, so only the session that started it may.
+// ---------------------------------------------------------------------------
+const resumes: { sessionId: string; startedBy: string }[] = []
+const wakeHost = {
+  ...host,
+  // Two resident sessions: one is the peer that is already here, the other is
+  // absent on purpose, which is the state a wake exists for.
+  liveIds: () => new Set([SELF, 'session-here']),
+  resumePeer: async (input: { sessionId: string; startedBy: string }) => {
+    resumes.push(input)
+    return { id: input.sessionId }
+  },
+}
+const waking = new PeerService(wakeHost as never, 100)
+await appendPeer({ sessionId: 'session-away', startedBy: SELF, startedAt: at(50), name: 'away-one' })
+await appendPeer({ sessionId: 'session-here', startedBy: SELF, startedAt: at(51) })
+await appendPeer({ sessionId: 'session-foreign', startedBy: 'session-other', startedAt: at(52) })
+
+const woke = await waking.wake(SELF, 'session-away')
+check('a wake resumes a peer that is not resident', woke.resumed && !woke.resident, JSON.stringify(woke))
+check('the wake asks the host for exactly that session', resumes.length === 1 && resumes[0]?.sessionId === 'session-away')
+check('the wake names the starter the host composes it from', resumes[0]?.startedBy === SELF)
+check('a wake reports the name its starter gave it', woke.name === 'away-one', String(woke.name))
+
+const already = await waking.wake(SELF, 'session-here')
+check('a resident peer is not resumed again', already.resident && !already.resumed, JSON.stringify(already))
+check('no resume is spent on a peer that is already here', resumes.length === 1, String(resumes.length))
+
+const looked = await waking.wake(SELF, 'session-away', { resume: false })
+check('resume:false answers without touching the host',
+  looked.resumed === false && looked.resident === false && resumes.length === 1, JSON.stringify(looked))
+
+let foreignError = ''
+try {
+  await waking.wake(SELF, 'session-foreign')
+} catch (error) {
+  foreignError = error instanceof Error ? error.message : String(error)
+}
+check('only the starter may wake a peer', foreignError.includes('session-other'), foreignError)
+check('the refusal names the starter as the way forward', foreignError.includes('ask session-other'), foreignError)
+
+let unknownError = ''
+try {
+  await waking.wake(SELF, 'session-nobody')
+} catch (error) {
+  unknownError = error instanceof Error ? error.message : String(error)
+}
+check('a session the plugin never started cannot be woken',
+  unknownError.includes('no line in the peer log'), unknownError)
+
+let selfError = ''
+try {
+  await waking.wake(SELF, SELF)
+} catch (error) {
+  selfError = error instanceof Error ? error.message : String(error)
+}
+check('a session cannot wake itself', selfError.includes('cannot wake itself'), selfError)
+
+const neverHost = {
+  ...wakeHost,
+  resumePeer: async () => { throw new Error('fixture: the session log is unreadable') },
+}
+let resumeError = ''
+try {
+  await new PeerService(neverHost as never, 100).wake(SELF, 'session-away')
+} catch (error) {
+  resumeError = error instanceof Error ? error.message : String(error)
+}
+check('a failed resume names its reason', resumeError.includes('session log is unreadable'), resumeError)
+check('a failed resume says nothing was delivered', resumeError.includes('Nothing was delivered'), resumeError)
+check('a failed resume leaves the obligation with an owner',
+  resumeError.includes('report_transfer') && resumeError.includes('report_handover'), resumeError)
+
+const wakesBefore = await waking.startedCount(SELF)
+await waking.wake(SELF, 'session-away')
+check('waking spends no peer budget', (await waking.startedCount(SELF)) === wakesBefore)
+
+// ---- peer_wake at the tool layer ------------------------------------------
+/** A read of one report's outstanding hand-offs, as the tool asks for it. */
+interface PendingLike {
+  readonly report: string
+  readonly status: string
+  readonly mode: 'wakeup' | 'quiet'
+}
+
+const wakeSurface = (
+  owed: readonly PendingLike[],
+  options: { resident?: boolean; receiptThrows?: boolean } = {},
+): { tools: Map<string, ToolLike>; calls: { resume: boolean[]; flushed: string[]; observed: number } } => {
+  const calls = { resume: [] as boolean[], flushed: [] as string[], observed: 0 }
+  let pendingCalls = 0
+  const service = {
+    // First read is what the ledger owes; the second is what is still owed after
+    // the sweep, so an empty second answer is a delivery that landed.
+    pendingFor: async () => {
+      pendingCalls += 1
+      return pendingCalls === 1 ? owed : []
+    },
+    flushForAgent: async (session: string) => {
+      calls.flushed.push(session)
+      return [{ targetId: session, status: 'delivered' }]
+    },
+  }
+  const peerService = {
+    wake: async (_self: string, target: string, wakeOptions: { resume?: boolean } = {}) => {
+      calls.resume.push(wakeOptions.resume !== false)
+      return {
+        sessionId: target,
+        startedBy: SELF,
+        resident: options.resident === true,
+        resumed: wakeOptions.resume !== false && options.resident !== true,
+        name: 'away-one',
+      }
+    },
+    receipt: async () => {
+      calls.observed += 1
+      if (options.receiptThrows === true) throw new Error('fixture: no session snapshot')
+      return { kind: 'running' as const }
+    },
+  }
+  return { tools: toolSurface(service, peerService, undefined), calls }
+}
+
+const { tools: noOwedTools } = wakeSurface([])
+let nothingOwed = ''
+try {
+  await noOwedTools.get('peer_wake')?.execute({ session: 'session-away' }, { agent: { id: SELF } })
+} catch (error) {
+  nothingOwed = error instanceof Error ? error.message : String(error)
+}
+check('peer_wake exists as a tool', noOwedTools.has('peer_wake'))
+check('a wake with nothing owed is refused', nothingOwed.includes('nothing is owed'), nothingOwed)
+check('the refusal says what to do instead', nothingOwed.includes('report_send'), nothingOwed)
+
+const owedRun = wakeSurface([{ report: 'R-0050', status: 'open', mode: 'wakeup' }])
+const owedOutput = await owedRun.tools.get('peer_wake')?.execute({ session: 'session-away' }, { agent: { id: SELF } }) ?? ''
+check('a wake with something owed resumes the session',
+  owedRun.calls.resume.length === 2 && owedRun.calls.resume[0] === false && owedRun.calls.resume[1] === true,
+  JSON.stringify(owedRun.calls.resume))
+check('the wake sweeps the deliveries it was asked for', owedRun.calls.flushed.includes('session-away'))
+check('the output names the report that landed', owedOutput.includes('R-0050'), owedOutput)
+check('the output reports the resumed session', owedOutput.includes('woke session-away'), owedOutput)
+check('the output observes the first turn a wakeup hand-off asked for',
+  owedRun.calls.observed === 1 && owedOutput.includes('first turn is running'), owedOutput)
+check('the output states that no budget was spent', owedOutput.includes('no peer budget'), owedOutput)
+
+const hereRun = wakeSurface([{ report: 'R-0051', status: 'open', mode: 'wakeup' }], { resident: true })
+const hereOutput = await hereRun.tools.get('peer_wake')?.execute({ session: 'session-here' }, { agent: { id: SELF } }) ?? ''
+check('a resident peer is not resumed by the tool', hereRun.calls.resume.length === 1 && hereRun.calls.resume[0] === false,
+  JSON.stringify(hereRun.calls.resume))
+check('a resident wake still delivers what is owed', hereOutput.includes('already resident') && hereOutput.includes('R-0051'),
+  hereOutput)
+
+// A carbon copy does not open a turn, so the receipt would report "nothing is
+// working on it" as a warning for something behaving exactly as designed.
+const quietRun = wakeSurface([{ report: 'R-0052', status: 'open', mode: 'quiet' }])
+const quietOutput = await quietRun.tools.get('peer_wake')?.execute({ session: 'session-away' }, { agent: { id: SELF } }) ?? ''
+check('a quiet-only wake does not ask for a turn', quietRun.calls.observed === 0, String(quietRun.calls.observed))
+check('a quiet-only wake says so', quietOutput.includes('carbon copy'), quietOutput)
+
+const receiptDown = wakeSurface([{ report: 'R-0053', status: 'open', mode: 'wakeup' }], { receiptThrows: true })
+let receiptDownFailed = ''
+let receiptDownOutput = ''
+try {
+  receiptDownOutput = await receiptDown.tools.get('peer_wake')?.execute({ session: 'session-away' }, { agent: { id: SELF } }) ?? ''
+} catch (error) {
+  receiptDownFailed = error instanceof Error ? error.message : String(error)
+}
+check('an unobservable first turn does not fail the wake', receiptDownFailed === '', receiptDownFailed)
+check('an unobservable first turn is reported', receiptDownOutput.includes('could not observe'), receiptDownOutput)
+
 let failed = 0
 for (const [label, ok, detail] of checks) {
   if (!ok) failed++

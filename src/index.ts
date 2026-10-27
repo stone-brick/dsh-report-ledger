@@ -7,7 +7,7 @@
  *  1. the report service, which owns the durable ledger under
  *     `$DSH_HOME/report-ledger`;
  *  2. the model-facing tools: thirteen `report_*` rows (fourteen once the
- *     worktree feature is enabled) plus `peer_list` / `peer_start`;
+ *     worktree feature is enabled) plus `peer_list` / `peer_start` / `peer_wake`;
  *  3. the delivery pump — when a session becomes resident again, every hand-off
  *     the ledger is still holding for it is delivered, and one deferred sweep
  *     does the same for sessions that were already resident when this row
@@ -397,6 +397,17 @@ export interface PeerHostContext {
      * @returns the handle for the created agent.
      */
     create(options: PeerCreateOptions): Promise<{ readonly agent: PeerCallerAgent }>
+    /**
+     * Resume one persisted session.
+     *
+     * Optional in this shape for the same reason the workspace hook is: a harness
+     * build without the entry, or a deployment that composes no persistence, has
+     * to surface as a named refusal at the tool instead of as a crash inside the
+     * adapter. The peer bundle treats an absent entry as exactly that refusal.
+     * @param options - the persisted identity, the route, and the composition.
+     * @returns the handle for the resumed agent.
+     */
+    resume?(options: PeerResumeOptions): Promise<{ readonly agent: PeerCallerAgent }>
   }
   /**
    * Read one optional service off the registry.
@@ -466,6 +477,30 @@ export interface PeerCreateOptions {
    * @param created - the unpublished agent, whose session log may be appended to.
    */
   setup(agentCtx: Context, created?: PeerAppendTarget): void
+}
+
+/** The harness request one peer resume makes. */
+export interface PeerResumeOptions {
+  /** The persisted session id to load. */
+  readonly resumeSessionId: never
+  /**
+   * The route the resumed agent runs on.
+   *
+   * A resumed root agent is as composition-less as a fresh one: without a route
+   * the prompt's `{{model}}` cannot resolve and its first turn dies at step 1.
+   */
+  readonly agentOptions: never
+  /**
+   * Compose the resumed agent: join its starter's live composition.
+   *
+   * Permission inheritance is deliberately absent. The state was written onto the
+   * peer's own log when it was created and a warm resume restores it from there;
+   * re-capturing the starter's current state on every wake would overwrite a
+   * later switch made in that session, which is the difference this plugin draws
+   * between inheriting and pinning.
+   * @param agentCtx - the resumed agent's scope context.
+   */
+  setup(agentCtx: Context): void
 }
 
 /** The model route a peer inherits from its starter. */
@@ -1115,6 +1150,58 @@ export function buildPeerHost(ctx: PeerHostContext, host: HostBundle): PeerHost 
         // what authority the peer actually got instead of inferring it from silence.
         ...(Object.keys(inherited).length === 0 ? {} : { permission: inherited }),
       }
+    },
+    /**
+     * Load a peer back into this process.
+     *
+     * The mirror of `createPeer`, and it exists because nothing else in the plugin
+     * can do this: a hand-off is delivered by `steer` to a live agent, so an absent
+     * peer is unreachable until something loads its session. `ctx.agents.resume`
+     * is that something, and it carries the same composition obligation — the
+     * resumed agent is a fresh root agent, so without the starter's live preset and
+     * route its very first turn dies at step 1, silently.
+     *
+     * Deliberately missing from the setup callback: permission inheritance. The
+     * state was captured onto the peer's own log at creation and a warm resume
+     * restores it from there. Re-capturing the starter's current state on every
+     * wake would overwrite whatever the peer switched to since — which is exactly
+     * the difference this plugin draws between inheriting and pinning.
+     *
+     * Each precondition is stated rather than left to fail deeper: an unresolvable
+     * `ctx.agents.resume`, a deployment with no persistence, and a starter that is
+     * no longer resident all produce the same outer symptom (a peer that never
+     * comes back), and naming which one it was is the difference between a fixable
+     * report and a retry loop.
+     * @param input - the persisted session, and the live starter to compose it from.
+     * @returns the resumed session id.
+     */
+    async resumePeer(input: { sessionId: string; startedBy: string }): Promise<{ id: string }> {
+      const starter = ctx.agents.get(input.startedBy as never)
+      if (starter === undefined) {
+        throw new Error(
+          `the session that started it (${input.startedBy}) is no longer resident, so the peer has no composition `
+          + 'and no model route to be resumed under',
+        )
+      }
+      const resume = ctx.agents.resume
+      if (typeof resume !== 'function') {
+        throw new Error(
+          'this harness build exposes no agent-resume entry (ctx.agents.resume), so a non-resident session cannot be loaded',
+        )
+      }
+      if (ctx.get('sessionPersistence') === undefined) {
+        throw new Error(
+          'this deployment composes no session persistence, so a non-resident session cannot be loaded from disk',
+        )
+      }
+      const handle = await resume.call(ctx.agents, {
+        resumeSessionId: input.sessionId as never,
+        agentOptions: peerRoute(starter, defaultModel()) as never,
+        setup: (agentCtx: Context) => {
+          presets()?.composeFrom(agentCtx, starter.ctx)
+        },
+      })
+      return { id: String(handle.agent.id) }
     },
     /**
      * Put the new peer into the workspace group that owns its directory.
