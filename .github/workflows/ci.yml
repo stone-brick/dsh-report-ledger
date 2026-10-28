@@ -55,6 +55,12 @@ jobs:
       - name: Build
         run: pnpm build
 
+      # 打包边界：tarball 不得携带 dev/（开发者名册）。devMode 是**贡献者入口**，
+      # 靠「包里没有 dev/agents.yml」落地——`files` 一旦被改宽，这道门就退化成开关，
+      # 使用者设 devMode: true 就会拿到开发工具。断言清单见脚本头部与 docs/publishing.md。
+      - name: Release boundary (no developer roster in the tarball)
+        run: node scripts/release-boundary-check.ts
+
       # lib/ 随源码提交（DSH STORE 的固定源检查要求 main/exports 指向的运行产物
       # 出现在固定 Commit 里）。这一步保证提交的产物与源码一致：改了 src 忘了
       # build、或构建不可重现，都会在这里变红。

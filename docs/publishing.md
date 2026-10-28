@@ -1,6 +1,6 @@
 # 发布（维护者）
 
-分发形态、产物清单、可信发布、CI 分工与 Gitee 镜像。**只与维护者有关。**
+分发形态、产物清单、开发者模式边界、可信发布、CI 分工与 Gitee 镜像。**只与维护者有关。**
 
 ## 产物形态与清单
 
@@ -31,6 +31,39 @@ dsh --profile demo --dump-config                  # 应出现 `# == dsh-report-l
 ```
 
 `dsh plugin add` 会因包声明了 `dsh.bundle` 而**自动**把包名追加进 `dsh.profile.bundles`，用户不需要手改配置。
+
+## 开发者模式不能随包出去
+
+`devMode` 是**给复刻仓库的贡献者**准备的开发期回路，不是给安装包使用者的功能。门不在开关上，而在包里有没有
+`dev/agents.yml`：`installDevMode` 先看 roster 在不在，不在就直接返回空 disposer；而 `files` 不含 `dev/`，
+所以安装出来的包无论 config 怎么写都拿不到开发者代理。**复刻仓库才是门。**
+
+`devMode: true` 只多三样东西：工具 `dev_agent_start` / `dev_agents_reload` / `dev_archive`、提示词 section
+`plugin:report-ledger:dev`，以及 `$DSH_HOME/report-ledger/dev-agents.json` 里的绑定。早先版本把它们注册成
+harness 预设，是反面教材：预设是部署层面的事实，开发产物会进所有使用者的选择器。
+
+打包侧**已自动化**：`node scripts/release-boundary-check.ts` 就地打一次包（`npm pack --ignore-scripts`，
+与发布同一套规则），断言产物里没有 `dev/`（也没有 `src/`、`scripts/`、`node_modules/`、`.pnpm-store/`）、
+安装需要的条目都在（`package.json`、`lib/index.js`、`lib/client.js`、`cordis.patch.yml`）、打进包里的
+`files` 不点名 `dev`、`dsh.bundle.patch` 仍指向 `./cordis.patch.yml`、包里的 bundle patch 没把 `devMode` 打开。
+
+`ci.yml` 与 `publish.yml` 都跑它（发布前那一步在 Publish 之前），所以「改宽 `files`」会在 PR 上变红，
+而不是在下一个版本发出去之后。想核一个已下载的产物（例如 Gitee 附件）：
+`node scripts/release-boundary-check.ts --tarball <路径>`。
+
+它不启动宿主，所以运行时那一半仍需手工：
+
+```sh
+# 1) 默认安装：report-ledger 行的 config 应只有 announceToAgent: true
+dsh --profile demo --dump-config
+
+# 2) 反向：把 devMode: true 写进该 profile 的补丁再启动，工具清单仍不应出现
+#    dev_agent_start / dev_agents_reload / dev_archive —— roster 不在产物里，开关无对象可开。
+#    工具清单入口：cordis_inspect_query Tool.listTools（或 设置 → 内置插件 → 插件清单，只读）。
+```
+
+本机的现场口径（沙箱 `EPERM`、`--dump-config` 会重写 profile 根、pnpm 偶发不退出等）在
+`PUBLISHING.local.md` §7.2.1；那份文件不入库，能跟着仓库走的只有本节。
 
 ## CI 发布（可信发布 OIDC）
 

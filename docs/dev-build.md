@@ -43,18 +43,33 @@ pnpm check        # 以上三者的合并，也就是完整的本地门禁
 
 ## 安装到 profile
 
-本仓库已这么装好：包经 junction 出现在 `~/.dsh/profiles/node_modules/dsh-report-ledger`，并在 profile 的 `cordis.patch.yml` 中有一行：
+两条路，区别只在**要不要被登记成 bundle**。
+
+**接成 bundle（推荐；本仓库现在就是这么装的）**：profile 的 `package.json` 加依赖与 bundles 项，
+
+```json
+"dependencies": { "dsh-report-ledger": "link:D:/Projects/dsh-report-ledger" },
+"dsh": { "profile": { "bundles": ["…", "dsh-report-ledger"] } }
+```
+
+行由包自带的 `cordis.patch.yml`（`dsh.bundle.patch`）插入，profile 补丁里**不要**再写 `insert`（同 id 会报 `duplicate loader entry id`）；要改 config 就按 id 覆盖，补丁**替换整段 config**，字段要给全：
 
 ```yaml
-- insert:
-    - id: report-ledger
-      name: 'dsh-report-ledger'
-      config:
-        announceToAgent: true
-        # 可选：打开工作区支持（见 docs/worktree.md）
-        # worktree:
-        #   enabled: true
+- id: report-ledger
+  config:
+    announceToAgent: true
+    # 贡献者：见 docs/dev-agents.md —— 只有检出（link:/junction）挂进来的包才有 dev/ 名单
+    devMode: true
+    # 可选：打开工作区支持（见 docs/worktree.md）
+    worktree:
+      enabled: true
 ```
+
+这样侧边栏「插件」页有卡片、行开关与 Remove；`link:` 指向检出，HMR 照旧监视 `lib/`。
+
+**不登记 bundle（旧接法，仍可用）**：包经 junction 出现在 `~/.dsh/profiles/node_modules/dsh-report-ledger`，再在 profile 补丁里手写一行 `insert`（内容同上，但 `insert` 里新建行）。代价是「插件」页看不到它，也没有行开关。
+
+⚠️ 想让 `devMode` 真的生效，包必须来自**检出**（`link:` 或 junction）：`dsh plugin add <git URL>`、npm、tgz 装出来的包是按 `files` 白名单打的，里面没有 `dev/`，开发者模式对它们永远是关的——这是设计，不是故障（见 [开发者模式](dev-agents.md)）。
 
 ## 开发回路
 
