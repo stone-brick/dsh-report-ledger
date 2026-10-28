@@ -87,6 +87,8 @@ npm trust github dsh-report-ledger --file publish.yml \
 ```
 
 `--file` 必须与工作流文件名完全一致。之后发版就是 `pnpm version patch && git push origin main --follow-tags`。
+发版时把 `dev/bundle/package.json` 的 `version` 也抬到同一个值：附加包不发布，但「插件」页会显示它的版本，
+`scripts/release-boundary-check.ts` 会断言两者一致（见下节）。
 `publish.yml` 在 tag 与 `package.json` 的 version 不一致时会直接失败（`workflow_dispatch` 仍保留给新包名的手工首发）。
 注意 CI 只跑 `pnpm test` + 构建，**不跑 typecheck、也不跑 `pnpm test:tools`**：两者的原因相同——都需要
 profile 的官方包层（见 [开发、构建与验证](dev-build.md) 的 junction 一节），CI 里没有这一层；把官方包装成 devDependency 反而会在工作区

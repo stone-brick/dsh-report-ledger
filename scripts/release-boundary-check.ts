@@ -198,6 +198,18 @@ try {
 
 check('the packed version is the one declared in package.json', version !== '0.0.0', version)
 
+// ---- 6. the developer add-on tracks the release version ------------------
+// It is never packed, so this reads the checkout: the add-on is not published, but
+// its version is what the Plugins page shows, and a bump that forgets it leaves the
+// developer card lying about which release it belongs to.
+try {
+  const addon = JSON.parse(readFileSync(join(root, 'dev/bundle/package.json'), 'utf8')) as { version?: unknown }
+  check('the developer add-on tracks the release version', addon.version === version,
+    `${String(addon.version)} vs ${version}`)
+} catch (error) {
+  check('the developer add-on tracks the release version', false, String(error))
+}
+
 let failed = 0
 for (const [label, ok, detail] of checks) {
   if (!ok) failed++
