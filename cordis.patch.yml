@@ -1,9 +1,21 @@
-# Bundle patch for dsh-report-ledger: inserts its plugin row into whichever
-# profile roster composes this package (the `dsh.bundle.patch` manifest field).
+# Bundle patch for dsh-report-ledger: the release row only.
 #
-# The host half is a single row. The client half needs no row of its own: the
-# loader scans enabled rows for the package's `dsh.client` manifest and serves
-# the built `lib/client.js` over /plugins/<entryId>/client.js.
+# The developer-mode row deliberately does NOT live here. It is contributed by
+# `dev/bundle/` — an add-on bundle that exists only inside the checkout and is not
+# in `files`, so a published artifact carries no developer-mode configuration at
+# all. Two gates keep "only a clone can enable it":
+#
+#   1. the add-on is not published (it is part of `dev/`, which `files` excludes);
+#   2. even a copied add-on is inert: `dev/agents.yml` is not in `files`, so
+#      `installDevMode` returns early on every installed package.
+#
+# Switching between release and developer mode is the Plugins page's bundle switch:
+# enable the add-on and disable this bundle (or leave both on — `claimInstanceSlot`
+# in src/index.ts lets exactly one instance start and makes the other wait).
+#
+# The client half needs no row of its own: the loader scans enabled rows for the
+# package's `dsh.client` manifest and serves the built `lib/client.js` over
+# /plugins/<entryId>/client.js.
 - insert:
     - id: report-ledger
       name: 'dsh-report-ledger'

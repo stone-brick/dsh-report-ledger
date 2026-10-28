@@ -1,0 +1,18 @@
+# Developer-mode add-on for the dsh-report-ledger checkout.
+#
+# This bundle is the part a release artifact does not carry: it exists only in the
+# repository (`dev/` is outside `files`), it is not published, and enabling it on an
+# installed package does nothing — `installDevMode` returns early because
+# `dev/agents.yml` is absent there.
+#
+# It contributes one row that mounts the same implementation with `devMode: true`.
+# Exactly one instance runs per process (`claimInstanceSlot` in src/index.ts), so
+# leaving both this row and the release row enabled is safe: the second one waits.
+- insert:
+    - id: report-ledger-dev
+      name: 'dsh-report-ledger'
+      config:
+        announceToAgent: true
+        devMode: true
+        worktree:
+          enabled: true

@@ -168,15 +168,20 @@ try {
   )
 
   // ---- 4. the shipped bundle patch must not switch devMode on -------------
+  // The developer-mode row is contributed by the add-on bundle in `dev/bundle/`,
+  // which `files` excludes: a release patch carrying it at all is a regression, and
+  // so is a `devMode: true` config on the one row that remains.
   const patchEntry = find('package/cordis.patch.yml')
   const patch = patchEntry === undefined
     ? undefined
     : parseYaml(patchEntry.body.toString('utf8')) as { insert?: { id?: unknown; name?: unknown; config?: { devMode?: unknown } }[] }[]
-  const row = Array.isArray(patch)
-    ? patch.flatMap((layer) => layer.insert ?? []).find((inserted) => inserted.id === 'report-ledger')
-    : undefined
+  const rows = Array.isArray(patch) ? patch.flatMap((layer) => layer.insert ?? []) : []
+  const row = rows.find((inserted) => inserted.id === 'report-ledger')
   check('shipped patch inserts the report-ledger row', row !== undefined)
-  check('shipped patch does not switch devMode on', row?.config?.devMode !== true, String(row?.config?.devMode))
+  check('shipped patch carries exactly one row (no developer-mode row)', rows.length === 1,
+    rows.map((inserted) => String(inserted.id)).join(', '))
+  check('shipped patch never switches devMode on', rows.every((inserted) => inserted.config?.devMode !== true),
+    rows.map((inserted) => `${String(inserted.id)}=${String(inserted.config?.devMode)}`).join(', '))
 } finally {
   if (cleanup !== undefined) rmSync(cleanup, { recursive: true, force: true })
 }

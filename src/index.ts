@@ -1263,12 +1263,72 @@ export function buildPeerHost(ctx: PeerHostContext, host: HostBundle): PeerHost 
   }
 }
 
+/** Process-wide count of mounted host halves; see {@link claimInstanceSlot}. */
+const LIVE_INSTANCES = Symbol.for('dsh-report-ledger.liveInstances')
+
+/** How often a row waiting for the single-instance slot retries, in milliseconds. */
+const INSTANCE_WAIT_MS = 250
+
+/**
+ * Claim the one mounted-instance slot, registering its release on unload.
+ *
+ * A profile can compose two rows of this package — the release row and the
+ * developer-mode row (see `cordis.patch.yml`) — and the Plugins page can switch
+ * them independently. Two instances would each own a mutex table for the same
+ * ledger files, which the single-writer invariant does not cover: the README's
+ * single-process assumption stops at *two processes*, and in-process duplicates
+ * are worse than the last-writer-wins case those two would get.
+ *
+ * The slot lives on `globalThis` rather than in module scope so it survives a
+ * module eviction: HMR disposes the old fiber and imports the module again, and a
+ * module-local counter would be reset to zero by the import while the disposer
+ * that decrements it still refers to the old copy.
+ * @param ctx - the plugin context, used to release the slot on unload.
+ * @returns whether the slot was free and is now held by this fiber.
+ */
+function claimInstanceSlot(ctx: Context): boolean {
+  const scope = globalThis as unknown as Record<symbol, number | undefined>
+  if ((scope[LIVE_INSTANCES] ?? 0) > 0) return false
+  scope[LIVE_INSTANCES] = 1
+  ctx.effect(() => () => {
+    scope[LIVE_INSTANCES] = Math.max(0, (scope[LIVE_INSTANCES] ?? 1) - 1)
+  }, 'report-ledger: single instance')
+  return true
+}
+
 /**
  * Apply the host half.
+ *
+ * A second row of this package does not start a second instance: it waits, inert,
+ * until the row holding the slot is disabled, then mounts. Throwing instead would
+ * leave the profile with both rows enabled and neither mounted — a rejected
+ * activation is not retried by a recomposition that does not touch its own row —
+ * and the Plugins page's two-row switch is exactly the case that must stay safe
+ * in either click order.
  * @param ctx - the plugin context (`tools`, `systemPrompt`, `agents` injected).
  * @param config - resolved plugin config from the composition row.
  */
 export function apply(ctx: Context, config?: Config): void {
+  if (claimInstanceSlot(ctx)) {
+    start(ctx, config)
+    return
+  }
+  ctx.logger?.warn?.('report-ledger: another row of dsh-report-ledger is already mounted; '
+    + 'this row waits until it is disabled (keep exactly one of report-ledger / report-ledger-dev on).')
+  const timer = setInterval(() => {
+    if (!claimInstanceSlot(ctx)) return
+    clearInterval(timer)
+    start(ctx, config)
+  }, INSTANCE_WAIT_MS)
+  ctx.effect(() => () => clearInterval(timer), 'report-ledger: wait for the single-instance slot')
+}
+
+/**
+ * Mount the host half — the body of {@link apply} once the instance slot is held.
+ * @param ctx - the plugin context (`tools`, `systemPrompt`, `agents` injected).
+ * @param config - resolved plugin config from the composition row.
+ */
+function start(ctx: Context, config?: Config): void {
   const host = buildHost(ctx)
   const service = new ReportService(host)
   const peers = new PeerService(buildPeerHost(ctx, host), config?.maxPeersPerAgent ?? DEFAULT_MAX_PEERS)
