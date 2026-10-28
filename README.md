@@ -24,7 +24,7 @@ dsh plugin --profile web remove dsh-report-ledger
 
 **要求与边界**
 
-- 对齐 **DSH 0.2.0-rc.2**（0.1.5-rc.3 及更早不再支持）；运行产物要求 Node ≥ 20。
+- 对齐 **DSH 0.2.0-rc.2 与 0.2.1 线**（`0.2.1-rc.2/rc.3/rc.4` 已实测，见 [兼容性](docs/dev-build.md#兼容性与依赖契约)；0.1.5-rc.3 及更早不再支持）；运行产物要求 Node ≥ 20。
 - 账本是**本机文件**：`$DSH_HOME/report-ledger/`（可用 `DSH_REPORT_LEDGER_ROOT` 覆盖），不上传任何地方。
 - 浏览器读数据走三个 **GET 只读端点**，只放行 loopback；所有写操作仍然只经模型工具，那是唯一会记录跳的路径。
 - `peer_start` 是唯一会**新增活代理**的能力，受 `maxPeersPerAgent`（默认 8）约束，每次创建都记进名册日志；`peer_wake` 只加载**已有**会话，既不新增也不占名额，而且只有开启者能唤。
@@ -198,7 +198,7 @@ web profile 里多两处：
 | [开发、构建与验证](docs/dev-build.md) | 构建、测试分层、HMR 开发回路、隔离 profile |
 | [开发者模式](docs/dev-agents.md) | 开发期陪跑代理：名单、增减、退役、归档 |
 | [发布](docs/publishing.md) | 维护者：产物清单、可信发布、CI 分工、Gitee 镜像 |
-| [已知未修问题](docs/known-issues.md) | 审计确认、但有意暂缓的六项：证据报告、影响、建议修法、状态 |
+| [已知未修问题](docs/known-issues.md) | 审计确认、但有意暂缓的五项：证据报告、影响、建议修法、状态 |
 
 ## 开发
 
@@ -213,3 +213,4 @@ pnpm check        # 完整本地门禁：typecheck + test + test:tools
 ## 许可
 
 MIT。第三方声明见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
+
