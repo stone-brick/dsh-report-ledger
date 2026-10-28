@@ -36,7 +36,13 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth: 0 是必需的，不是保险：默认的浅检出只把 tag 当成一个指向提交的
+      # 轻量引用，于是下面「Create the GitHub release」里的
+      # `git for-each-ref --format='%(contents)' refs/tags/<tag>` 拿到的是**提交**说明
+      # 而不是 tag 说明——v0.2.5 第一次自动发 release 时正文就因此拿错了。
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
       - uses: pnpm/action-setup@v4
         with:
