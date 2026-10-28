@@ -34,7 +34,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { Storage } from '@deepseek-ai/dsh-storage'
 import * as StorageJson from '@deepseek-ai/dsh-storage-json'
 import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
-import DefaultPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import { apply as applyPersistence } from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { realpathNormalize, WorkspaceRegistry } from '@deepseek-ai/dsh-workspace'
 import { buildPeerHost } from '../src/index.ts'
 
@@ -53,7 +53,9 @@ StorageJson.apply(ctx, { root: join(home, 'storages') })
 // awaiting it is what guarantees the domain service exists before the registry's
 // init hook reaches for it.
 await StorageDomain.apply(ctx, { backend: 'json' })
-new DefaultPersistence(ctx, { root: sessionsRoot })
+// The persistence package is a plugin, not a class: it registers itself through
+// `apply` and is awaited for the same reason as the domain above.
+await applyPersistence(ctx, { root: sessionsRoot })
 const registry = new WorkspaceRegistry(ctx)
 // Off-harness there is no Loader to run the service's init hook, so the probe runs
 // it explicitly — the same body a deployment runs, in the same order. The symbol is

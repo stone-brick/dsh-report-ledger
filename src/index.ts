@@ -1248,14 +1248,22 @@ export function buildPeerHost(ctx: PeerHostContext, host: HostBundle): PeerHost 
   }
 }
 
-/** Process-wide count of mounted host halves; see {@link claimInstanceSlot}. */
+/**
+ * One mounted-instance slot per composition root; see {@link claimInstanceSlot}.
+ *
+ * The WeakMap key is the Cordis root context (`ctx.root`), not the process: two rows
+ * of this package in one composition share that root and must not both mount, while
+ * two independent roots in one process (tests, an embedded harness) are unrelated
+ * compositions and may each mount their own instance.
+ */
 const LIVE_INSTANCES = Symbol.for('dsh-report-ledger.liveInstances')
 
 /** How often a row waiting for the single-instance slot retries, in milliseconds. */
 const INSTANCE_WAIT_MS = 250
 
 /**
- * Claim the one mounted-instance slot, registering its release on unload.
+ * Claim the one mounted-instance slot for this composition, registering its release
+ * on unload.
  *
  * A profile can compose two rows of this package — the release row and the
  * developer-mode row (see `cordis.patch.yml`) — and the Plugins page can switch
@@ -1267,16 +1275,24 @@ const INSTANCE_WAIT_MS = 250
  * The slot lives on `globalThis` rather than in module scope so it survives a
  * module eviction: HMR disposes the old fiber and imports the module again, and a
  * module-local counter would be reset to zero by the import while the disposer
- * that decrements it still refers to the old copy.
+ * that decrements it still refers to the old copy. It also keeps the add-on
+ * bundle's separately inlined copy of this function and the release copy looking at
+ * the same table — hence a `Symbol.for` key.
+ *
+ * A test fixture passes a plain object instead of a Cordis context; with no `root`
+ * to share, the context object itself is the key, so each fixture is its own
+ * composition.
  * @param ctx - the plugin context, used to release the slot on unload.
  * @returns whether the slot was free and is now held by this fiber.
  */
 function claimInstanceSlot(ctx: Context): boolean {
-  const scope = globalThis as unknown as Record<symbol, number | undefined>
-  if ((scope[LIVE_INSTANCES] ?? 0) > 0) return false
-  scope[LIVE_INSTANCES] = 1
+  const scope = globalThis as unknown as { [LIVE_INSTANCES]?: WeakMap<object, number> }
+  const slots = scope[LIVE_INSTANCES] ?? (scope[LIVE_INSTANCES] = new WeakMap<object, number>())
+  const key = (ctx.root as object | undefined) ?? (ctx as unknown as object)
+  if ((slots.get(key) ?? 0) > 0) return false
+  slots.set(key, 1)
   ctx.effect(() => () => {
-    scope[LIVE_INSTANCES] = Math.max(0, (scope[LIVE_INSTANCES] ?? 1) - 1)
+    slots.set(key, Math.max(0, (slots.get(key) ?? 1) - 1))
   }, 'report-ledger: single instance')
   return true
 }
@@ -1288,11 +1304,11 @@ export interface HostHalf {
 }
 
 /**
- * Run `mount` once this process has no other mounted host half, queueing otherwise.
+ * Run `mount` once this composition has no other mounted host half, queueing otherwise.
  *
  * Both the release row and the developer-mode row go through this, so exactly one
- * instance owns the ledger's mutex table per process. A second row waits instead of
- * throwing: a rejected activation is not retried by a recomposition that does not
+ * instance owns the ledger's mutex table per composition. A second row waits instead
+ * of throwing: a rejected activation is not retried by a recomposition that does not
  * touch its own row, which would leave two rows enabled and neither mounted. Waiting
  * makes the switch self-healing in either click order.
  * @param ctx - the plugin context, used to release the slot and to cancel a wait.
