@@ -12,7 +12,9 @@
 
 ## 开关与门槛
 
-**没有配置开关。** 开发者模式是一个独立的附加 bundle：主包只发 release 行，附加包的 patch 插入 `report-ledger-dev`，它通过 `mountHost` 挂载同一个宿主半，再加装下面这些工具与提示词段。侧边栏「插件」页因此有两张卡，开哪张就是哪种行为；两张都开也安全——进程内只允许一个实例，另一个排队，占用者关闭后自动接管。
+**没有配置开关。** 开发者模式是一个独立的附加 bundle：主包只发 release 行，附加包的 patch 插入 `report-ledger-dev`，**并把 release 行 `disabled: true`**——所以只要附加包被选中，跑的就是它；关掉这张卡，release 行自然回来。不需要先关主 bundle，也不会有两个实例并存的瞬间。
+
+附加包是**覆盖层**，不是独立部署：它调用 release 包的 `mountHost`（按构建产物路径导入同一个模块，不复制宿主代码），只在此刻的 profile 仍选中 `dsh-report-ledger` 时挂载；一旦主 bundle 被取消选中，它就把宿主半整体卸下、进入排队，每 500ms 重读一次 profile manifest，主 bundle 回来就自动恢复。所以开发者模式永远不可能脱离主 bundle 单独运行。
 
 **真正的门槛是仓库**：`installDevMode` 先看 `dev/agents.yml` 在不在，不在就返回空 disposer、什么都不注册。名单只在检出里、且不在 npm 包的 `files` 白名单里，加上附加包本身也不发布——所以装了 tarball 的部署拿不到开发代理，复刻仓库才可用。
 

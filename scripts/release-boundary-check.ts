@@ -210,6 +210,18 @@ try {
   check('the developer add-on tracks the release version', false, String(error))
 }
 
+// ---- 7. the developer add-on overlays the release module, not a copy --------
+// The add-on imports the built host entry by path; inlining it again would bring
+// back a second copy of the service classes, which is exactly what the split
+// removed. A stale or absent build would hide that from the type checker.
+try {
+  const addonBundle = readFileSync(join(root, 'dev/bundle/lib/index.js'), 'utf8')
+  check('the developer add-on imports the release entry by path', /lib[\\/]index\.js/.test(addonBundle))
+  check('the developer add-on does not inline the host half', !addonBundle.includes('class ReportService'))
+} catch (error) {
+  check('the developer add-on is built', false, String(error))
+}
+
 let failed = 0
 for (const [label, ok, detail] of checks) {
   if (!ok) failed++

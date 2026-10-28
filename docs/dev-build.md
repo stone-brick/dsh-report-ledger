@@ -56,7 +56,9 @@ pnpm check        # 以上三者的合并，也就是完整的本地门禁
 "dsh": { "profile": { "bundles": ["…", "dsh-report-ledger", "dsh-report-ledger-dev"] } }
 ```
 
-附加包自己是一个插件包（构建到 `dev/bundle/lib/`），它的 patch 只插一行 `report-ledger-dev`（`name: dsh-report-ledger-dev`，config 带 `worktree.enabled`），挂载同一个宿主半并加装 dev 工具。所以侧边栏「插件」页有**两张卡**：开哪张就是哪种行为；两张同时开也安全——进程内只允许一个实例，另一个排队，占用者关掉后自动接管（`claimInstanceSlot`）。
+附加包自己是一个插件包（构建到 `dev/bundle/lib/`，约 60 KB）：它按路径导入主包的 `lib/index.js` 里的 `mountHost`，不复制宿主代码；patch 插一行 `report-ledger-dev`（`name: dsh-report-ledger-dev`），并**把 release 行 `disabled: true`**。所以两张卡都选中时只有 dev 行存在——附加包是覆盖层，关掉它就回到 release 行，不需要先关主 bundle。
+
+附加包只在 profile 仍选中 `dsh-report-ledger` 时挂载：它每 500ms 重读一次 profile manifest，主 bundle 一旦被取消选中就整体卸载并排队，回来时自动恢复。`claimInstanceSlot` 仍在，作为「永远只有一个实例」的最后一道保险。
 
 行由包自带的 `cordis.patch.yml`（`dsh.bundle.patch`）插入，profile 补丁里**不要**再写 `insert`（同 id 会报 `duplicate loader entry id`）；要改 config 就按 id 覆盖，补丁**替换整段 config**，字段要给全。
 

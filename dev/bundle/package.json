@@ -9,7 +9,10 @@
       "default": "./lib/index.js"
     }
   },
-  "description": "Developer-mode add-on bundle for dsh-report-ledger: mounts the host half and adds the developer tools. Not published and excluded from the release package (it lives under dev/, outside files), and inert outside a clone because dev/agents.yml is not in the package.",
+  "description": "Developer-mode add-on bundle for dsh-report-ledger: an overlay that mounts the release package's host half and adds the developer tools. Not published and excluded from the release package (it lives under dev/, outside files); it only runs while the release bundle stays selected, and inert outside a clone because dev/agents.yml is not in the package.",
+  "peerDependencies": {
+    "dsh-report-ledger": "*"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"

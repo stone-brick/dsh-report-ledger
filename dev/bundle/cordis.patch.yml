@@ -6,9 +6,12 @@
 # `dev/agents.yml` is absent there. The release entry does not even import its code:
 # the add-on is built separately into `dev/bundle/lib/`.
 #
-# It mounts the whole host half through the shared single-instance queue and then
-# installs this checkout's developer tools, so exactly one instance runs per process:
-# leaving both this row and the release row enabled is safe, the second one waits.
+# Layering (this bundle sits after `dsh-report-ledger` in `dsh.profile.bundles`):
+# while the add-on is selected it disables the release row, so the two can never run
+# side by side even momentarily — the add-on is an overlay, and turning it off is the
+# switch that brings the release row back. The add-on's own entry also refuses to
+# mount while the profile no longer selects the release bundle, so developer mode can
+# never become the deployment on its own.
 - insert:
     - id: report-ledger-dev
       name: 'dsh-report-ledger-dev'
@@ -16,3 +19,5 @@
         announceToAgent: true
         worktree:
           enabled: true
+- id: report-ledger
+  disabled: true

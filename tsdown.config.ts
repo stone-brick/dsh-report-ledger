@@ -88,7 +88,9 @@ const host: UserConfig = {
   platform: 'node',
   target: 'es2024',
   fixedExtension: false,
-  dts: false,
+  // The developer-mode add-on imports this module by path and reads its types; the
+  // declaration file is what makes that import type-check without a package name.
+  dts: true,
   // Off on purpose: a clean pass would race the client config, which emits
   // lib/client.js into the same directory.
   clean: false,
@@ -152,10 +154,10 @@ const dev: UserConfig = {
   fixedExtension: false,
   dts: false,
   clean: false,
-  // Same externals as the host half: the add-on mounts `mountHost` from this
-  // package's source, so the harness packages must stay external or the service
-  // identity breaks. `dev/` is outside `files`, so this artifact never ships.
-  external: ['@deepseek-ai/cordis', /^@deepseek-ai\/dsh-/, 'yaml'],
+  // Same externals as the host half, plus the host module itself: the add-on is an
+  // overlay that imports `mountHost` from the release package's built entry by path,
+  // so that module must stay external — one module instance, one set of classes.
+  external: ['@deepseek-ai/cordis', /^@deepseek-ai\/dsh-/, 'yaml', /lib[\\/]index\.js$/],
 }
 
 export default [host, client, dev]

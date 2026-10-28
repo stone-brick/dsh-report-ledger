@@ -30,16 +30,20 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import type { Context } from '@deepseek-ai/cordis'
+import type { Context, Fiber } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 // Type-only, and load-bearing: it is what adds `agent` to `AssembleContext`, so the
 // section provider can read the assembling session at all. Erased at build time.
 import type {} from '@deepseek-ai/dsh-agent'
 import type { AssembleContext } from '@deepseek-ai/dsh-system-prompt'
-import { mountHost, mountWhenFree, type Config, type HostHalf } from '../../../src/index.ts'
+import { mountHost, mountWhenFree, type Config, type HostHalf } from '../../../lib/index.js'
 import { ledgerRoot, listReports, readReport } from '../../../src/report/ledger.ts'
-import type { PeerService } from '../../../src/report/peer.ts'
-import type { ReportService } from '../../../src/report/service.ts'
+// The live services come from the release package's built entry, so the add-on must
+// type them from that same declaration — deriving from `HostHalf` keeps one identity
+// instead of mixing the package's classes with the checkout's source types (their
+// `#private` members would make the two nominally incompatible).
+type HostPeers = HostHalf['peers']
+type HostService = HostHalf['service']
 import {
   MAX_ARCHIVE_BYTES,
   MAX_INDEX_LINES,
@@ -140,7 +144,7 @@ interface DevState {
  * @param service - the report service, used to hand the new session its task.
  * @returns a disposer that removes every registration.
  */
-export function installDevMode(ctx: Context, peers: PeerService, service: ReportService): () => void {
+export function installDevMode(ctx: Context, peers: HostPeers, service: HostService): () => void {
   const root = packageRoot()
   const rosterPath = join(root, ROSTER_FILE)
   const bindingsPath = join(ledgerRoot(), BINDINGS_FILE)
@@ -463,19 +467,97 @@ export function installDevMode(ctx: Context, peers: PeerService, service: Report
 /** The host services this add-on needs from the harness, like the release entry. */
 export const inject = ['tools', 'systemPrompt', 'agents']
 
+/** How often the add-on re-reads the profile manifest, in milliseconds. */
+const MANIFEST_POLL_MS = 500
+
+/** The release bundle's name in `dsh.profile.bundles`. */
+const RELEASE_BUNDLE = 'dsh-report-ledger'
+
+/**
+ * Whether this profile still selects the release bundle.
+ *
+ * Developer mode is an overlay on the released plugin, not a standalone deployment:
+ * the add-on only runs while that bundle is still selected. A profile row's
+ * `baseUrl` points at the profile directory as a file URL, which is where the
+ * manifest lives.
+ * @param ctx - the plugin context.
+ * @returns true/false, or undefined when the manifest cannot be read — a checkout
+ *   always can, so undefined is treated as "proceed" rather than blocking a
+ *   contributor whose profile is laid out unexpectedly.
+ */
+function releaseBundleSelected(ctx: Context): boolean | undefined {
+  if (ctx.baseUrl === undefined) return undefined
+  try {
+    const directory = fileURLToPath(new URL('.', ctx.baseUrl))
+    const manifest = JSON.parse(readFileSync(join(directory, 'package.json'), 'utf8')) as {
+      dsh?: { profile?: { bundles?: unknown } }
+    }
+    const bundles = manifest.dsh?.profile?.bundles
+    return Array.isArray(bundles) && bundles.includes(RELEASE_BUNDLE)
+  } catch {
+    return undefined
+  }
+}
+
 /**
  * Developer-mode plugin entry.
  *
- * It mounts the host half through the shared single-instance queue and then installs
- * this checkout's developer tools on the live services. The release plugin never
- * imports this module; the add-on is a separate bundle under `dev/`, outside `files`,
- * so a published artifact carries no developer-mode code.
+ * The add-on mounts the release package's host half through the shared
+ * single-instance queue and installs this checkout's developer tools on the live
+ * services. It is an *overlay*: while the profile stops selecting the release
+ * bundle, the mounted half is torn down and the add-on waits, re-checking the
+ * manifest, so developer mode can never become the deployment on its own.
+ *
+ * The teardown goes through a child plugin fiber: everything `mountHost` registers
+ * belongs to that fiber, so disposing it unmounts exactly the host half — including
+ * the single-instance slot and any pending wait — without unloading this row.
  * @param ctx - the plugin context (`tools`, `systemPrompt`, `agents` injected).
  * @param config - the add-on row's config (announce, peer budget, worktree).
  */
 export function apply(ctx: Context, config?: Config): void {
-  mountWhenFree(ctx, () => {
-    const host: HostHalf = mountHost(ctx, config)
-    ctx.effect(() => installDevMode(ctx, host.peers, host.service), 'report-ledger-dev: developer mode')
-  })
+  let fiber: Fiber | undefined
+  let settling = false
+
+  function hostHalf(sub: Context): void {
+    mountWhenFree(sub, () => {
+      const host: HostHalf = mountHost(sub, config)
+      sub.effect(() => installDevMode(sub, host.peers, host.service), 'report-ledger-dev: developer mode')
+    })
+  }
+
+  const stop = (): void => {
+    if (fiber === undefined) return
+    settling = true
+    const stopping = fiber.dispose()
+    fiber = undefined
+    void stopping.finally(() => { settling = false })
+  }
+
+  const start = (): void => {
+    if (fiber !== undefined || settling) return
+    fiber = ctx.plugin(hostHalf)
+  }
+
+  const tick = (): void => {
+    if (releaseBundleSelected(ctx) === false) {
+      if (fiber !== undefined) {
+        ctx.logger?.warn?.('report-ledger-dev: the dsh-report-ledger bundle is not selected; '
+          + 'developer mode waits until it is enabled again.')
+      }
+      stop()
+      return
+    }
+    start()
+  }
+
+  tick()
+  const timer = setInterval(tick, MANIFEST_POLL_MS)
+  ctx.effect(() => () => {
+    clearInterval(timer)
+    if (fiber !== undefined) {
+      const stopping = fiber.dispose()
+      fiber = undefined
+      void stopping
+    }
+  }, 'report-ledger-dev: manifest watch')
 }
