@@ -71,7 +71,7 @@ dsh plugin --profile web add dsh-report-ledger
 
 ## 要求
 
-- DSH 0.2.0-rc.2（实测）
+- DSH 0.2.0-rc.2 与 0.2.1 线（0.2.1-rc.2 / rc.3 / rc.4 实测）
 - 账本落在 \`\$DSH_HOME/report-ledger/\`，是本机文件，不上传任何地方
 - 浏览器半在会话头部新增一个「汇报」标签页，右栏另有「汇报画布」标签页
 - 发布说明与完整文档见仓库 README

@@ -90,6 +90,9 @@ npm trust github dsh-report-ledger --file publish.yml \
 发版时把 `dev/bundle/package.json` 的 `version` 也抬到同一个值：附加包不发布，但「插件」页会显示它的版本，
 `scripts/release-boundary-check.ts` 会断言两者一致（见下节）。
 `publish.yml` 在 tag 与 `package.json` 的 version 不一致时会直接失败（`workflow_dispatch` 仍保留给新包名的手工首发）。
+**GitHub release 现在也由这一次运行创建**（`Create the GitHub release` 步，在 npm 版本确认可见之后）：
+正文取该 tag 自己的说明（annotated tag message），附件是从该 tag 打出来的 tarball，与 Gitee 附件同一套规则；
+页已存在则只补附件，所以可以重跑（v0.2.3 / v0.2.4 缺少 release 页那次，是这一步还不存在）。
 注意 CI 只跑 `pnpm test` + 构建，**不跑 typecheck、也不跑 `pnpm test:tools`**：两者的原因相同——都需要
 profile 的官方包层（见 [开发、构建与验证](dev-build.md) 的 junction 一节），CI 里没有这一层；把官方包装成 devDependency 反而会在工作区
 复制服务注册表、破坏实例同一性。`scripts/workspace-check.ts` 需要 `@deepseek-ai/dsh-workspace`，所以它在

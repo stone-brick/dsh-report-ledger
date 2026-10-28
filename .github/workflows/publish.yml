@@ -29,7 +29,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write # 创建 GitHub release（最后一步）需要它；发布 npm 本身不需要
   id-token: write # OIDC：可信发布与 provenance 的前提，缺它一定失败
 
 jobs:
@@ -135,3 +135,30 @@ jobs:
           done
           echo "::error::dsh-report-ledger@${version} was accepted by the registry but never became visible"
           exit 1
+
+      # 标签推送除了发 npm，还要在 GitHub 上留一页 release —— 与 Gitee 镜像对称。
+      # 这一步此前一直是手工的：v0.2.3 / v0.2.4 的 tag 在、release 页不在，原因不是
+      # 发布失败（两个 workflow 都是 success），而是没有任何东西去写那一页。
+      # 放在 Verify 之后：release 页声称「这个版本可用」，那就要等它真的可见。
+      # 幂等：页已存在就只补附件（--clobber），重跑不报错。
+      - name: Create the GitHub release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#v}"
+          tgz="dsh-report-ledger-${version}.tgz"
+          # 与 Gitee 附件同一套规则：从该 tag 的检出打 tarball（files 白名单，不含 dev/）
+          npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP"
+          test -f "$RUNNER_TEMP/${tgz}"
+          # 正文取该 tag 自己的说明（annotated tag message）；轻量 tag 没有正文时退回自动生成
+          notes="$(git for-each-ref --format='%(contents)' "refs/tags/${TAG}")"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release ${TAG} already exists; uploading the tarball"
+            gh release upload "$TAG" "$RUNNER_TEMP/${tgz}" --clobber
+          elif [ -n "${notes}" ]; then
+            gh release create "$TAG" --title "$TAG" --notes "${notes}" "$RUNNER_TEMP/${tgz}"
+          else
+            gh release create "$TAG" --title "$TAG" --generate-notes "$RUNNER_TEMP/${tgz}"
+          fi

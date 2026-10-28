@@ -1,6 +1,6 @@
 {
   "name": "dsh-report-ledger",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "Report-and-ledger plugin for DSH: front-matter 汇报 as the first-class agent-to-agent interaction primitive, with upward/downward delivery, co-authorship, CC, and a complete transfer-path audit trail; plus a conversation timeline tab.",
   "type": "module",
   "main": "lib/index.js",
