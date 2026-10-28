@@ -3,16 +3,16 @@
 # This bundle is the part a release artifact does not carry: it exists only in the
 # repository (`dev/` is outside `files`), it is not published, and enabling it on an
 # installed package does nothing — `installDevMode` returns early because
-# `dev/agents.yml` is absent there.
+# `dev/agents.yml` is absent there. The release entry does not even import its code:
+# the add-on is built separately into `dev/bundle/lib/`.
 #
-# It contributes one row that mounts the same implementation with `devMode: true`.
-# Exactly one instance runs per process (`claimInstanceSlot` in src/index.ts), so
-# leaving both this row and the release row enabled is safe: the second one waits.
+# It mounts the whole host half through the shared single-instance queue and then
+# installs this checkout's developer tools, so exactly one instance runs per process:
+# leaving both this row and the release row enabled is safe, the second one waits.
 - insert:
     - id: report-ledger-dev
-      name: 'dsh-report-ledger'
+      name: 'dsh-report-ledger-dev'
       config:
         announceToAgent: true
-        devMode: true
         worktree:
           enabled: true

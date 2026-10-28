@@ -3,7 +3,8 @@
 本仓库的开发回路、测试分层与本地门禁。安装到 profile 的细节也在本文；发布流程见 [发布](publishing.md)。
 
 ```sh
-pnpm build        # 产出 lib/index.js（host 半）与 lib/client.js（client 半）
+pnpm build        # 三个产物：lib/index.js（host 半）、lib/client.js（client 半）、
+                  # dev/bundle/lib/index.js（开发者附加包，不发布、不在 files 白名单里）
 pnpm test         # 十六套确定性检查共 1117 项断言：账本内核与生命周期 135 + 提示词角色分流 64
                   # + 开发者名册 59 + 开发者归档 29 + 退役交接 29
                   # + 读路径（前缀读/签名缓存/单趟投递）39
@@ -55,13 +56,13 @@ pnpm check        # 以上三者的合并，也就是完整的本地门禁
 "dsh": { "profile": { "bundles": ["…", "dsh-report-ledger", "dsh-report-ledger-dev"] } }
 ```
 
-附加包的 patch 只插一行 `report-ledger-dev`（`devMode: true` + `worktree.enabled`），所以侧边栏「插件」页有**两张卡**：开哪张就是哪种行为；两张同时开也安全——进程内只允许一个实例，另一个排队，占用者关掉后自动接管（`claimInstanceSlot`）。
+附加包自己是一个插件包（构建到 `dev/bundle/lib/`），它的 patch 只插一行 `report-ledger-dev`（`name: dsh-report-ledger-dev`，config 带 `worktree.enabled`），挂载同一个宿主半并加装 dev 工具。所以侧边栏「插件」页有**两张卡**：开哪张就是哪种行为；两张同时开也安全——进程内只允许一个实例，另一个排队，占用者关掉后自动接管（`claimInstanceSlot`）。
 
 行由包自带的 `cordis.patch.yml`（`dsh.bundle.patch`）插入，profile 补丁里**不要**再写 `insert`（同 id 会报 `duplicate loader entry id`）；要改 config 就按 id 覆盖，补丁**替换整段 config**，字段要给全。
 
 **不登记 bundle（旧接法，仍可用）**：包经 junction 出现在 `~/.dsh/profiles/node_modules/dsh-report-ledger`，再在 profile 补丁里手写一行 `insert`。代价是「插件」页看不到它，也没有卡片开关。
 
-⚠️ **开发者模式只有检出能开**：`dev/agents.yml` 不在 `files` 白名单里，npm / tgz / git 装出来的包没有名册；附加包即使被复制到别处，插进来的行也会因 `installDevMode` 早退而什么都不注册。这是设计，不是故障（见 [开发者模式](dev-agents.md)）。
+⚠️ **开发者模式只有检出能开**：`dev/agents.yml` 不在 `files` 白名单里，npm / tgz / git 装出来的包没有名册；附加包即使被复制到别处，它的模块仍会加载并挂上宿主半，但 `installDevMode` 找不到名册就只返回空 disposer——dev 工具一个都不注册。这是设计，不是故障（见 [开发者模式](dev-agents.md)）。
 
 ## 开发回路
 

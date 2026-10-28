@@ -28,7 +28,7 @@
  */
 
 import { parse as parseYaml } from 'yaml'
-import type { ReportFrontMatter } from '../types.ts'
+import type { ReportFrontMatter } from '../../../src/report/types.ts'
 
 /** One report as the archive reads it. */
 export interface ArchiveSource {

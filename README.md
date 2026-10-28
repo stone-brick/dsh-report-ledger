@@ -121,7 +121,7 @@ reports/R-0001.route.jsonl   append-only 传递路径，一行一跳
 | `report_transfer` | 把一笔**尚未送达**的投递从欠它的会话转给另一个会话——义务仍然存在，只是换了人欠；**不记为送达** |
 | `report_handover` | 退役/接管：枚举一个会话名下的一切，能搬的搬、能关的关，并落一份 `task: handover` 记录。它转移的是**账本资产**（未结汇报、检出占用、待送达），**不回收同伴名额** |
 
-另有 `peer_list` / `peer_start` / `peer_wake` 三个同伴工具（发现、创建、唤醒；见 [同伴](docs/peers.md)），以及只在 `devMode` 下出现的 `dev_*` 三个（见 [开发者模式](docs/dev-agents.md)）。工具背后完整的语义——投递怎么落、修正与结案为什么这样设计、退役怎么转移资产——在 [设计](docs/design.md) 里。
+另有 `peer_list` / `peer_start` / `peer_wake` 三个同伴工具（发现、创建、唤醒；见 [同伴](docs/peers.md)），以及只由检出里的附加 bundle（`dev/bundle`，不发布）提供的 `dev_*` 三个（见 [开发者模式](docs/dev-agents.md)）。工具背后完整的语义——投递怎么落、修正与结案为什么这样设计、退役怎么转移资产——在 [设计](docs/design.md) 里。
 
 ## 状态、修正与交接
 
@@ -148,7 +148,6 @@ reports/R-0001.route.jsonl   append-only 传递路径，一行一跳
       config:
         announceToAgent: true    # 默认 true；false 则不向任何 agent 注入提示词段
         maxPeersPerAgent: 8      # 一个会话终身的同伴名额
-        devMode: false           # 必须是字面量 true；只在克隆的仓库里可用
         worktree:
           enabled: false         # 总开关；关闭时相关工具与参数都不出现
 ```
@@ -157,7 +156,6 @@ reports/R-0001.route.jsonl   append-only 传递路径，一行一跳
 |---|---|---|
 | `announceToAgent` | `true` | 是否注入两段 `systemPrompt`（账本协议 + 伙伴契约，见 [设计](docs/design.md)） |
 | `maxPeersPerAgent` | `8` | `peer_start` 的终身额度；超限是明确的工具错误，不是静默拒绝 |
-| `devMode` | `false` | 严格：只有字面量 `true` 才算打开，其余值全部关闭 |
 | `worktree.enabled` | `false` | 开启后一份汇报可拥有自己的 git 检出，见 [工作区](docs/worktree.md) |
 | `worktree.root` | 仓库同级 `.dsh-worktrees/<仓库名>/` | 检出根目录 |
 | `worktree.onClose` | `keep` | 结案处置：`keep` \| `remove-if-clean` |

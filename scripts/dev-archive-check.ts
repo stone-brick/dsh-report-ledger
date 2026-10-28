@@ -29,7 +29,7 @@ const {
   renderIndexBlock,
   sectionsOf,
   topicSlug,
-} = await import('../src/report/dev/archive.ts')
+} = await import('../dev/bundle/src/archive.ts')
 
 const checks: [string, boolean, string][] = []
 const check = (label: string, ok: boolean, detail = ''): void => { checks.push([label, ok, detail]) }

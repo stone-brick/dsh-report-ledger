@@ -1,7 +1,7 @@
 /**
  * Standalone tsdown config for dsh-report-ledger.
  *
- * Two artifacts, mirroring how the DSH web shell loads a plugin:
+ * Three artifacts:
  *
  *  - `lib/index.js`  — the HOST half (ESM, node). Loaded by the profile's
  *    cordis Loader from the `report-ledger` row in cordis.patch.yml. The cordis
@@ -15,6 +15,11 @@
  *    shell's frozen module table. That is why the format is `cjs`, why the
  *    platform modules are external, and why everything else is inlined — a
  *    `require()` the table cannot answer is a guaranteed runtime throw.
+ *
+ *  - `dev/bundle/lib/index.js` — the DEVELOPER-MODE add-on. It lives under `dev/`,
+ *    which `files` excludes, and is never published: the release host bundle must
+ *    carry no developer code at all. It mounts the host half through the shared
+ *    single-instance queue and adds the developer tools.
  *
  * Unlike the dsh-web-ui family preset this config is self-contained: no shared
  * repo root, no CSS-module pipeline (styles are inserted by the client half
@@ -136,4 +141,21 @@ const client: UserConfig = {
   },
 }
 
-export default [host, client]
+/** Developer-mode add-on bundle: checkout-only, never published. */
+const dev: UserConfig = {
+  name: `${ID}-dev`,
+  entry: ['dev/bundle/src/index.ts'],
+  outDir: 'dev/bundle/lib',
+  format: ['esm'],
+  platform: 'node',
+  target: 'es2024',
+  fixedExtension: false,
+  dts: false,
+  clean: false,
+  // Same externals as the host half: the add-on mounts `mountHost` from this
+  // package's source, so the harness packages must stay external or the service
+  // identity breaks. `dev/` is outside `files`, so this artifact never ships.
+  external: ['@deepseek-ai/cordis', /^@deepseek-ai\/dsh-/, 'yaml'],
+}
+
+export default [host, client, dev]

@@ -90,20 +90,6 @@ const PRESET_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/
 const ORDER_STEP = 10
 
 /**
- * Whether the composition asked for developer mode.
- *
- * Strict on purpose: only the literal boolean `true` enables it. A string
- * `"false"` from a hand-edited YAML scalar must not read as truthy, and a
- * published deployment that never sets the field must keep today's behaviour
- * byte for byte.
- * @param config - resolved plugin config, if the composition row passed one.
- * @returns true only for the literal boolean `true`.
- */
-export function devModeEnabled(config: { readonly devMode?: unknown } | undefined): boolean {
-  return config?.devMode === true
-}
-
-/**
  * The prompt one preset id receives.
  * @param agents - the roster currently in effect.
  * @param presetId - the preset the assembling agent runs, when it has one.

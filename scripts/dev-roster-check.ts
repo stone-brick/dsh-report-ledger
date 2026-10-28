@@ -8,9 +8,9 @@ export {}
  *
  * Two things are worth pinning here, and neither needs a harness:
  *
- *  - **The gate.** `devModeEnabled` is what decides whether a published deployment
- *    gains a prompt section at all, so "a string `"true"` does not count" is a
- *    behavioural assertion, not a style preference.
+ *  - **The parser.** The roster is branch data read from the checkout, and this is
+ *    the same parser the add-on bundle loads it with — the committed `dev/agents.yml`
+ *    is checked against it rather than against a hand-written expectation.
  *  - **Row-level failure isolation.** The roster is hand-edited while the plugin is
  *    developed; a typo must cost one agent, never the list. Each way a row can be
  *    unusable is asserted to report the row and leave its neighbours in place.
@@ -27,13 +27,12 @@ import { fileURLToPath } from 'node:url'
 
 const {
   DEV_SECTION_ORDER,
-  devModeEnabled,
   parseBindings,
   parseRoster,
   promptFor,
   serializeBindings,
   signatureOf,
-} = await import('../src/report/dev/roster.ts')
+} = await import('../dev/bundle/src/roster.ts')
 const { PARTNERSHIP_SECTION_ORDER, SECTION_ORDER } = await import('../src/report/guidance.ts')
 
 const checks: [string, boolean, string][] = []
@@ -51,13 +50,7 @@ const read = (path: string): string | undefined => files[path]
 /** Parse a document with the map reader. */
 const parse = (text: string) => parseRoster(text, read)
 
-// ---- the switch is strict ------------------------------------------------
-check('no config means not developer mode', devModeEnabled(undefined) === false)
-check('an empty config means not developer mode', devModeEnabled({}) === false)
-check('devMode: false is off', devModeEnabled({ devMode: false }) === false)
-check('the string "true" is NOT developer mode', devModeEnabled({ devMode: 'true' }) === false)
-check('the number 1 is NOT developer mode', devModeEnabled({ devMode: 1 }) === false)
-check('the literal boolean true turns it on', devModeEnabled({ devMode: true }) === true)
+// ---- the roster is the gate, and the add-on is where it lives --------------
 check('a namespaced id with a slash is accepted', parse('agents:\n  - id: a/b\n    prompt: x\n').agents.length === 1)
 
 // ---- the section sits after the shipped pair -----------------------------

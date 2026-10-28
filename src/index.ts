@@ -51,8 +51,6 @@ import { pendingTargets } from './report/deliver.ts'
 import { PARTNERSHIP_SECTION_ORDER, PROTOCOL, SECTION_ORDER, partnershipText } from './report/guidance.ts'
 import { listReports, readHops, readReport, reportPath } from './report/ledger.ts'
 import { resolveWorktree, type WorktreeConfig, type WorktreeRuntime } from './report/allocate.ts'
-import { installDevMode } from './report/dev/index.ts'
-import { devModeEnabled } from './report/dev/roster.ts'
 import { buildWorktreeReport } from './report/maintenance.ts'
 import { DEFAULT_MAX_PEERS, PeerService, type PeerHost, type PeerPermission, type PeerReceipt, type WorkspaceRegistration } from './report/peer.ts'
 import { REPORT_PATH, TIMELINE_PATH, WORKTREES_PATH, createReportHandler, createTimelineHandler, createWorktreesHandler, type ReportDetail } from './report/route.ts'
@@ -67,19 +65,6 @@ export interface Config {
    * Set false to keep prompts untouched.
    */
   announceToAgent?: boolean
-  /**
-   * Developer mode: start agents from the checkout's `dev/agents.yml` as this
-   * plugin's own sessions, and give only those sessions an extra prompt section.
-   *
-   * Off by default, and the field is strict: only the literal boolean `true`
-   * enables it. Nothing is published to the harness — no preset, no picker entry —
-   * and with it off nothing is registered at all, so a published deployment's
-   * prompt stays byte-identical. The roster lives in the checkout and is excluded
-   * from the package, so cloning the repository is what makes developer agents
-   * available in the first place.
-   * @default false
-   */
-  devMode?: boolean
   /**
    * Cap on independent peer sessions one session may start. Peer creation is the
    * one capability here that adds live agents rather than records, so it is
@@ -1296,39 +1281,60 @@ function claimInstanceSlot(ctx: Context): boolean {
   return true
 }
 
+/** The live services a mounted host half owns. */
+export interface HostHalf {
+  readonly service: ReportService
+  readonly peers: PeerService
+}
+
 /**
- * Apply the host half.
+ * Run `mount` once this process has no other mounted host half, queueing otherwise.
  *
- * A second row of this package does not start a second instance: it waits, inert,
- * until the row holding the slot is disabled, then mounts. Throwing instead would
- * leave the profile with both rows enabled and neither mounted — a rejected
- * activation is not retried by a recomposition that does not touch its own row —
- * and the Plugins page's two-row switch is exactly the case that must stay safe
- * in either click order.
- * @param ctx - the plugin context (`tools`, `systemPrompt`, `agents` injected).
- * @param config - resolved plugin config from the composition row.
+ * Both the release row and the developer-mode row go through this, so exactly one
+ * instance owns the ledger's mutex table per process. A second row waits instead of
+ * throwing: a rejected activation is not retried by a recomposition that does not
+ * touch its own row, which would leave two rows enabled and neither mounted. Waiting
+ * makes the switch self-healing in either click order.
+ * @param ctx - the plugin context, used to release the slot and to cancel a wait.
+ * @param mount - the half to mount once the slot is free.
  */
-export function apply(ctx: Context, config?: Config): void {
+export function mountWhenFree(ctx: Context, mount: () => void): void {
   if (claimInstanceSlot(ctx)) {
-    start(ctx, config)
+    mount()
     return
   }
-  ctx.logger?.warn?.('report-ledger: another row of dsh-report-ledger is already mounted; '
-    + 'this row waits until it is disabled (keep exactly one of report-ledger / report-ledger-dev on).')
+  ctx.logger?.warn?.('report-ledger: another row of report-ledger is already mounted; '
+    + 'this row waits until it is disabled (keep exactly one of the release and developer-mode rows on).')
   const timer = setInterval(() => {
     if (!claimInstanceSlot(ctx)) return
     clearInterval(timer)
-    start(ctx, config)
+    mount()
   }, INSTANCE_WAIT_MS)
   ctx.effect(() => () => clearInterval(timer), 'report-ledger: wait for the single-instance slot')
 }
 
 /**
- * Mount the host half — the body of {@link apply} once the instance slot is held.
+ * Apply the host half: the release plugin's entry point.
  * @param ctx - the plugin context (`tools`, `systemPrompt`, `agents` injected).
  * @param config - resolved plugin config from the composition row.
  */
-function start(ctx: Context, config?: Config): void {
+export function apply(ctx: Context, config?: Config): void {
+  mountWhenFree(ctx, () => { mountHost(ctx, config) })
+}
+
+/**
+ * Mount the host half — services, model tools, the delivery pump, the read endpoints
+ * and the prompt sections — and hand the live services back.
+ *
+ * Developer mode is deliberately NOT part of this function: it lives in the add-on
+ * bundle under `dev/bundle/`, which calls this function and installs its own tools on
+ * the returned services. A release artifact therefore carries no developer-mode code
+ * at all, and an installed package has no roster to enable it with.
+ * @param ctx - the plugin context (`tools`, `systemPrompt`, `agents` injected).
+ * @param config - resolved plugin config from the composition row.
+ * @returns the live services, for a caller that mounts an extension on top.
+ */
+export function mountHost(ctx: Context, config?: Config): HostHalf {
   const host = buildHost(ctx)
   const service = new ReportService(host)
   const peers = new PeerService(buildPeerHost(ctx, host), config?.maxPeersPerAgent ?? DEFAULT_MAX_PEERS)
@@ -1452,18 +1458,7 @@ function start(ctx: Context, config?: Config): void {
     })
   })
 
-  // Developer mode, when the composition row asks for it.
-  //
-  // Placed before the `announceToAgent` early return on purpose: the switch is
-  // independent of whether the ledger announces itself. Nothing is published to the
-  // harness — the roster, the bindings and the section are this plugin's own state
-  // — and with the switch off no registration happens at all, which is what keeps a
-  // published deployment's prompt byte-identical.
-  if (devModeEnabled(config)) {
-    ctx.effect(() => installDevMode(ctx, peers, service), 'report-ledger: developer mode')
-  }
-
-  if ((config?.announceToAgent ?? true) === false) return
+  if ((config?.announceToAgent ?? true) === false) return { service, peers }
 
   // The protocol is a plain string, byte-identical for every agent, so the
   // shared part of the prompt stays a stable prefix in every scope.
@@ -1487,4 +1482,6 @@ function start(ctx: Context, config?: Config): void {
     }),
     'report-ledger: partnership section',
   )
+
+  return { service, peers }
 }

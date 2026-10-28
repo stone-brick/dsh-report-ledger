@@ -34,14 +34,16 @@ dsh --profile demo --dump-config                  # 应出现 `# == dsh-report-l
 
 ## 开发者模式不能随包出去
 
-`devMode` 是**给复刻仓库的贡献者**准备的开发期回路，不是给安装包使用者的功能。门不在开关上，而在包里有没有
-`dev/agents.yml`：`installDevMode` 先看 roster 在不在，不在就直接返回空 disposer；而 `files` 不含 `dev/`，
-所以安装出来的包无论 config 怎么写都拿不到开发者代理。**复刻仓库才是门。**
+`devMode` 是**给复刻仓库的贡献者**准备的开发期回路，不是给安装包使用者的功能。它在发布包之外有两个层面的隔离：
 
-开发者模式那一行**也不在发布包里**：它由检出里的附加 bundle `dev/bundle/` 提供（`dev/` 不在 `files` 白名单里，
-也不发布），所以发布 patch 只有 release 一行。附加包即使被复制到别处，安装包里没有名册，插进来的行也只是死配置。
+- **配置**：发布 patch 只有 release 一行，没有 dev 行、没有 `devMode` 字段；
+- **代码**：dev 半整体搬到了检出里的附加 bundle `dev/bundle/`，单独构建到 `dev/bundle/lib/`，发布包的主入口根本不 import 它。
+  `lib/index.js` 里不含任何 dev 工具标识。
 
-`devMode: true` 只多三样东西：工具 `dev_agent_start` / `dev_agents_reload` / `dev_archive`、提示词 section
+门仍然只有一道且没变：`installDevMode` 先看包里有没有 `dev/agents.yml`，没有就返回空 disposer；`files` 不含 `dev/`，
+所以安装出来的包即便有人手工塞进附加包，也只挂宿主半、不注册任何开发工具。**复刻仓库才是门。**
+
+`devMode` 那套只有三样东西：工具 `dev_agent_start` / `dev_agents_reload` / `dev_archive`、提示词 section
 `plugin:report-ledger:dev`，以及 `$DSH_HOME/report-ledger/dev-agents.json` 里的绑定。早先版本把它们注册成
 harness 预设，是反面教材：预设是部署层面的事实，开发产物会进所有使用者的选择器。
 
@@ -49,10 +51,11 @@ harness 预设，是反面教材：预设是部署层面的事实，开发产物
 与发布同一套规则），断言产物里没有 `dev/`（也没有 `src/`、`scripts/`、`node_modules/`、`.pnpm-store/`）、
 安装需要的条目都在（`package.json`、`lib/index.js`、`lib/client.js`、`cordis.patch.yml`）、打进包里的
 `files` 不点名 `dev`、`dsh.bundle.patch` 仍指向 `./cordis.patch.yml`、包里的 bundle patch **只有 release 一行**
-且没有把 `devMode` 打开。
+且没有把 `devMode` 打开、**宿主 bundle 里没有 `dev_agent_start` / `dev_agents_reload` / `dev_archive` /
+`plugin:report-ledger:dev` 任何一个标识**。
 
-`ci.yml` 与 `publish.yml` 都跑它（发布前那一步在 Publish 之前），所以「改宽 `files`」会在 PR 上变红，
-而不是在下一个版本发出去之后。想核一个已下载的产物（例如 Gitee 附件）：
+`ci.yml` 与 `publish.yml` 都跑它（发布前那一步在 Publish 之前），所以「改宽 `files`」或「把 dev 半挪回主入口」
+都会在 PR 上变红，而不是在下一个版本发出去之后。想核一个已下载的产物（例如 Gitee 附件）：
 `node scripts/release-boundary-check.ts --tarball <路径>`。
 
 它不启动宿主，所以运行时那一半仍需手工：
@@ -61,19 +64,14 @@ harness 预设，是反面教材：预设是部署层面的事实，开发产物
 # 1) 默认安装：report-ledger 行的 config 应只有 announceToAgent: true
 dsh --profile demo --dump-config
 
-# 2) 反向：把 devMode: true 写进该 profile 的补丁再启动，工具清单仍不应出现
-#    dev_agent_start / dev_agents_reload / dev_archive —— roster 不在产物里，开关无对象可开。
-#    工具清单入口：cordis_inspect_query Tool.listTools（或 设置 → 内置插件 → 插件清单，只读）。
+# 2) 运行时边界：工具清单里没有 dev_agent_start / dev_agents_reload / dev_archive。
+#    （附加包不在产物里，所以这条只需确认「没装就不该有」；工具清单入口：
+#     cordis_inspect_query Tool.listTools，或 设置 → 内置插件 → 插件清单，只读。）
 ```
 
-**已知残留：配置干净，代码不干净。** 发布产物里没有 devMode 的配置，但 `lib/index.js` 仍含 dev 半的实现
-（三个 dev 工具、提示词段路由、名册与归档解析，源码约 45 KB / 全量 5.7%）。它不可达——`installDevMode` 先看
-`dev/agents.yml` 在不在；而 dev 半依赖主实例的 `ReportService`/`PeerService`，拆成独立入口要么引入服务注册表、
-要么造成双实例（正是单实例闸要挡的），所以不是 build 里 tree-shake 能解决的，只有两份产物（方案 D）才行。
-
-另一条边界的准确表述：门是「文件存在」，不是「包从哪来」。能往 `node_modules/dsh-report-ledger/` 写文件的人，
-可以自备 `dev/agents.yml` 并把某行 config 改成 `devMode: true` 来启用——那本来就是他自己的安装目录。
-所以能说死的是：**不修改自己安装目录与 profile 配置的人无法启用开发者模式。**
+另一条边界的准确表述：门是「文件存在」，不是「包从哪来」。能从检出里把附加包装进 profile、再自备
+`dev/agents.yml` 的人可以启用开发者模式——那本来就是贡献者的路径，前提是他有仓库。所以能说死的是：
+**只装发布包、不改自己安装目录与 profile 配置的人无法启用开发者模式。**
 
 本机的现场口径（沙箱 `EPERM`、`--dump-config` 会重写 profile 根、pnpm 偶发不退出等）在
 `PUBLISHING.local.md` §7.2.1；那份文件不入库，能跟着仓库走的只有本节。

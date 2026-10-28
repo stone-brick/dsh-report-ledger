@@ -1,6 +1,13 @@
 /**
- * Developer mode — the switch-gated half that exists only while this plugin is
- * being developed, and that the harness never sees.
+ * Developer mode — the add-on bundle's half, existing only in the checkout.
+ *
+ * This module is not imported by the release entry. It is built separately into
+ * `dev/bundle/lib/`, which `files` excludes, so a published artifact carries no
+ * developer-mode code at all — the release `lib/index.js` mounts the host half and
+ * nothing else. An installed package therefore cannot enable any of this, whatever
+ * its config says: `installDevMode` returns an empty disposer when
+ * `dev/agents.yml` is absent, and the roster is only in the repository.
+ * **Cloning the repository is the gate.**
  *
  * An earlier version published these agents as harness presets. That was wrong in
  * a way worth recording: a preset is a deployment-level fact. It appears in the
@@ -17,13 +24,7 @@
  *  - the prompt section routes by that binding, so a developer agent is identified
  *    by the plugin alone.
  *
- * Nothing here is registered when `devMode` is off — no section, no tools, no
- * file reads — so a published deployment's prompt stays byte-identical. And since
- * the roster lives in the checkout and is excluded from the package, a deployment
- * that installs the tarball cannot have developer agents at all, whatever its
- * config says: **cloning the repository is the gate**.
- *
- * @module dsh-report-ledger/report/dev
+ * @module dsh-report-ledger-dev
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
@@ -35,9 +36,10 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 // section provider can read the assembling session at all. Erased at build time.
 import type {} from '@deepseek-ai/dsh-agent'
 import type { AssembleContext } from '@deepseek-ai/dsh-system-prompt'
-import { ledgerRoot, listReports, readReport } from '../ledger.ts'
-import type { PeerService } from '../peer.ts'
-import type { ReportService } from '../service.ts'
+import { mountHost, mountWhenFree, type Config, type HostHalf } from '../../../src/index.ts'
+import { ledgerRoot, listReports, readReport } from '../../../src/report/ledger.ts'
+import type { PeerService } from '../../../src/report/peer.ts'
+import type { ReportService } from '../../../src/report/service.ts'
 import {
   MAX_ARCHIVE_BYTES,
   MAX_INDEX_LINES,
@@ -62,11 +64,11 @@ import {
 /** Name of the prompt section a developer agent receives. */
 const DEV_SECTION = 'plugin:report-ledger:dev'
 
-/** Where the roster lives inside the checkout. */
-const ROSTER_FILE = join('dev', 'agents.yml')
+/** Where the roster lives: `dev/agents.yml` beside this add-on's package root. */
+const ROSTER_FILE = join('..', 'agents.yml')
 
-/** Where the archive index lives, relative to the checkout root. */
-const ARCHIVE_DIR = join('dev', 'archive')
+/** Where the archive index lives, likewise relative to the add-on package root. */
+const ARCHIVE_DIR = join('..', 'archive')
 
 /**
  * The plugin's own record of which sessions are developer agents.
@@ -456,4 +458,24 @@ export function installDevMode(ctx: Context, peers: PeerService, service: Report
       return []
     }
   }
+}
+
+/** The host services this add-on needs from the harness, like the release entry. */
+export const inject = ['tools', 'systemPrompt', 'agents']
+
+/**
+ * Developer-mode plugin entry.
+ *
+ * It mounts the host half through the shared single-instance queue and then installs
+ * this checkout's developer tools on the live services. The release plugin never
+ * imports this module; the add-on is a separate bundle under `dev/`, outside `files`,
+ * so a published artifact carries no developer-mode code.
+ * @param ctx - the plugin context (`tools`, `systemPrompt`, `agents` injected).
+ * @param config - the add-on row's config (announce, peer budget, worktree).
+ */
+export function apply(ctx: Context, config?: Config): void {
+  mountWhenFree(ctx, () => {
+    const host: HostHalf = mountHost(ctx, config)
+    ctx.effect(() => installDevMode(ctx, host.peers, host.service), 'report-ledger-dev: developer mode')
+  })
 }

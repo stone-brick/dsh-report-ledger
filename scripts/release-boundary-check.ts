@@ -4,23 +4,24 @@
 // Emitted as nothing; it exists so `tsc` treats the file as its own module.
 export {}
 /**
- * Release boundary — the packed tarball must never carry the developer roster.
+ * Release boundary — the packed tarball must never carry developer mode.
  *
- * `devMode` is the **contributor entrance**, not a user feature: the gate is whether
- * the installed package contains `dev/agents.yml`, and `files` excludes `dev/`, so an
- * installed package cannot register developer agents whatever its config says.
- * That invariant is one `files` edit away from breaking, and the failure is silent —
- * a user who sets `devMode: true` would simply gain `dev_agent_start` and friends.
+ * Developer mode is the **contributor entrance**, not a user feature. It lives in an
+ * add-on bundle under `dev/` (`dsh-report-ledger-dev`), which `files` excludes, so a
+ * release artifact carries neither its configuration nor its code. The gate is the
+ * roster `dev/agents.yml`, also only in a checkout, so an installed package cannot
+ * register developer agents whatever its config says.
  *
  * This packs the package the way a release does and asserts the boundary:
  *   - no `dev/` entry (nor `src/`, `scripts/`, `node_modules/`, `.pnpm-store/`);
  *   - the entries a working install needs are present;
  *   - the shipped `files` list does not name `dev`;
- *   - the shipped bundle patch does not switch `devMode` on.
+ *   - the shipped bundle patch has exactly one row and never sets `devMode`;
+ *   - the shipped host bundle contains no developer tool identifier at all.
  *
  * It deliberately does **not** boot a host. The runtime half (an installed package
- * registering no `dev_*` tools even with `devMode: true`) needs the DSH package layer,
- * so it stays a manual step in docs/publishing.md §开发者模式不能随包出去.
+ * registering no `dev_*` tools) needs the DSH package layer, so it stays a manual
+ * step in docs/publishing.md §开发者模式不能随包出去.
  *
  * Run: node scripts/release-boundary-check.ts [--tarball <path>]
  */
@@ -182,6 +183,15 @@ try {
     rows.map((inserted) => String(inserted.id)).join(', '))
   check('shipped patch never switches devMode on', rows.every((inserted) => inserted.config?.devMode !== true),
     rows.map((inserted) => `${String(inserted.id)}=${String(inserted.config?.devMode)}`).join(', '))
+
+  // ---- 5. the shipped host bundle must carry no developer-mode code -------
+  // The add-on is built separately into `dev/bundle/lib`, so a release bundle that
+  // still names these identifiers means the split regressed and the code is back.
+  const hostBundle = find('package/lib/index.js')
+  const hostText = hostBundle?.body.toString('utf8') ?? ''
+  for (const identifier of ['dev_agent_start', 'dev_agents_reload', 'dev_archive', 'plugin:report-ledger:dev']) {
+    check(`shipped host bundle carries no ${identifier}`, !hostText.includes(identifier))
+  }
 } finally {
   if (cleanup !== undefined) rmSync(cleanup, { recursive: true, force: true })
 }

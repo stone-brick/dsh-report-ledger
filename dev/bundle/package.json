@@ -2,7 +2,14 @@
   "name": "dsh-report-ledger-dev",
   "version": "0.2.4",
   "private": true,
-  "description": "Developer-mode add-on bundle for dsh-report-ledger: contributes the devMode row. Not published and excluded from the release package (it lives under dev/, outside files), and inert outside a clone because dev/agents.yml is not in the package.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    }
+  },
+  "description": "Developer-mode add-on bundle for dsh-report-ledger: mounts the host half and adds the developer tools. Not published and excluded from the release package (it lives under dev/, outside files), and inert outside a clone because dev/agents.yml is not in the package.",
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
