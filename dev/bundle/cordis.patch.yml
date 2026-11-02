@@ -7,17 +7,23 @@
 # the add-on is built separately into `dev/bundle/lib/`.
 #
 # Layering (this bundle sits after `dsh-report-ledger` in `dsh.profile.bundles`):
-# while the add-on is selected it disables the release row, so the two can never run
-# side by side even momentarily — the add-on is an overlay, and turning it off is the
-# switch that brings the release row back. The add-on's own entry also refuses to
-# mount while the profile no longer selects the release bundle, so developer mode can
-# never become the deployment on its own.
+# the add-on is PURELY ADDITIVE and the release row stays enabled.
+#
+#   - the release row mounts the host half and publishes it as the `reportLedger`
+#     service; this row lists that service in its `inject` and installs the `dev_*`
+#     tools and the developer prompt section on top of it;
+#   - when the release row goes away, the service is withdrawn and Cordis unloads
+#     this row with it, so developer mode still cannot become the deployment on its
+#     own — the guarantee is carried by the service lifetime instead of by
+#     disabling the release row and polling the profile manifest;
+#   - keeping the release row enabled is also what keeps the release package's
+#     browser half served (`/plugins/dsh-report-ledger/client.js`), so developer
+#     mode gets the same 「汇报」 tab as a release install.
+#
+# Host configuration (`announceToAgent`, `maxPeersPerAgent`, `worktree`) belongs to
+# the release row now — this row has no config of its own. A patch replaces a row's
+# whole config, so a developer who wants the worktree feature adds it to the
+# release row in their profile's own patch rather than here.
 - insert:
     - id: report-ledger-dev
       name: 'dsh-report-ledger-dev'
-      config:
-        announceToAgent: true
-        worktree:
-          enabled: true
-- id: report-ledger
-  disabled: true

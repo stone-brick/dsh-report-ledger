@@ -56,15 +56,19 @@ pnpm check        # 以上三者的合并，也就是完整的本地门禁
 "dsh": { "profile": { "bundles": ["…", "dsh-report-ledger", "dsh-report-ledger-dev"] } }
 ```
 
-附加包自己是一个插件包（构建到 `dev/bundle/lib/`，约 60 KB）：它按路径导入主包的 `lib/index.js` 里的 `mountHost`，不复制宿主代码；patch 插一行 `report-ledger-dev`（`name: dsh-report-ledger-dev`），并**把 release 行 `disabled: true`**。所以两张卡都选中时只有 dev 行存在——附加包是覆盖层，关掉它就回到 release 行，不需要先关主 bundle。
+附加包自己是一个插件包（构建到 `dev/bundle/lib/`，约 60 KB）：它按路径导入主包的 `lib/index.js`，但不复制宿主代码；patch 只插一行 `report-ledger-dev`（`name: dsh-report-ledger-dev`），**不再禁用 release 行**。两张卡都选中时，release 行挂载宿主半并把 `reportLedger` 服务发布出来，dev 行在 `inject` 里等这个服务，叠加 `dev_*` 工具与提示词段——**纯附加，不是替换**。
 
-附加包只在 profile 仍选中 `dsh-report-ledger` 时挂载：它每 500ms 重读一次 profile manifest，主 bundle 一旦被取消选中就整体卸载并排队，回来时自动恢复。`claimInstanceSlot` 仍在，作为「永远只有一个实例」的最后一道保险。
+这样做的直接好处是浏览器半：客户端 bundle 由 release 行声明，dev 行禁用 release 行时整个客户端半不会被服务（页面上没有「汇报」标签页）。纯附加之后两张卡同时启用，release 行的 `lib/client.js` 照常经 `/plugins/dsh-report-ledger/client.js` 服务。
+
+关掉 release 行时，`reportLedger` 服务随它的 fiber 撤回，Cordis 连同 dev 行一起卸载，所以开发者模式仍然不可能脱离主 bundle 单独成为一个部署。`claimInstanceSlot` 仍在，作为「永远只有一个宿主实例」的最后一道保险。
 
 行由包自带的 `cordis.patch.yml`（`dsh.bundle.patch`）插入，profile 补丁里**不要**再写 `insert`（同 id 会报 `duplicate loader entry id`）；要改 config 就按 id 覆盖，补丁**替换整段 config**，字段要给全。
 
 **不登记 bundle（旧接法，仍可用）**：包经 junction 出现在 `~/.dsh/profiles/node_modules/dsh-report-ledger`，再在 profile 补丁里手写一行 `insert`。代价是「插件」页看不到它，也没有卡片开关。
 
-⚠️ **开发者模式只有检出能开**：`dev/agents.yml` 不在 `files` 白名单里，npm / tgz / git 装出来的包没有名册；附加包即使被复制到别处，它的模块仍会加载并挂上宿主半，但 `installDevMode` 找不到名册就只返回空 disposer——dev 工具一个都不注册。这是设计，不是故障（见 [开发者模式](dev-agents.md)）。
+⚠️ **开发者模式只有检出能开**：`dev/agents.yml` 不在 `files` 白名单里，npm / tgz / git 装出来的包没有名册；附加包即使被复制到别处，它也只能去注入 release 行发布的 `reportLedger` 服务，而 `installDevMode` 找不到名册就只返回空 disposer——dev 工具一个都不注册。这是设计，不是故障（见 [开发者模式](dev-agents.md)）。
+
+宿主侧配置（`announceToAgent`、`maxPeersPerAgent`、`worktree`）属于 release 行；dev 行没有 config。补丁**替换整段 config**，所以想让开发者模式带工作区功能，就在 profile 补丁里给 `report-ledger` 行补上（连同 `announceToAgent` 一起写全）。
 
 ## 开发回路
 

@@ -41,7 +41,7 @@ dsh --profile demo --dump-config                  # 应出现 `# == dsh-report-l
   `lib/index.js` 里不含任何 dev 工具标识。
 
 门仍然只有一道且没变：`installDevMode` 先看包里有没有 `dev/agents.yml`，没有就返回空 disposer；`files` 不含 `dev/`，
-所以安装出来的包即便有人手工塞进附加包，也只挂宿主半、不注册任何开发工具。**复刻仓库才是门。**
+所以安装出来的包即便有人手工塞进附加包，那个附加也只会去注入 release 行发布的 `reportLedger` 服务，名册缺失时仍一个开发工具都不注册。**复刻仓库才是门。**
 
 `devMode` 那套只有三样东西：工具 `dev_agent_start` / `dev_agents_reload` / `dev_archive`、提示词 section
 `plugin:report-ledger:dev`，以及 `$DSH_HOME/report-ledger/dev-agents.json` 里的绑定。早先版本把它们注册成

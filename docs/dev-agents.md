@@ -12,9 +12,15 @@
 
 ## 开关与门槛
 
-**没有配置开关。** 开发者模式是一个独立的附加 bundle：主包只发 release 行，附加包的 patch 插入 `report-ledger-dev`，**并把 release 行 `disabled: true`**——所以只要附加包被选中，跑的就是它；关掉这张卡，release 行自然回来。不需要先关主 bundle，也不会有两个实例并存的瞬间。
+**没有配置开关。** 开发者模式是一个独立的附加 bundle：主包只发 release 行，附加包的 patch 只插一行 `report-ledger-dev`——**不再禁用 release 行**。两张卡都选中时，release 行挂载宿主半并把 `reportLedger` 服务发布出来，dev 行在 `inject` 里等这个服务，然后把 `dev_*` 工具和提示词段叠加在上面。
 
-附加包是**覆盖层**，不是独立部署：它调用 release 包的 `mountHost`（按构建产物路径导入同一个模块，不复制宿主代码），只在此刻的 profile 仍选中 `dsh-report-ledger` 时挂载；一旦主 bundle 被取消选中，它就把宿主半整体卸下、进入排队，每 500ms 重读一次 profile manifest，主 bundle 回来就自动恢复。所以开发者模式永远不可能脱离主 bundle 单独运行。
+所以开发者模式是**纯附加**，不是替换：
+
+- 关掉 dev 卡 → `dev_*` 工具与提示词段消失，账本和 release 行不受影响；
+- 关掉 release 行 → 服务随它的 fiber 撤回，Cordis 连同 dev 行一起卸载：开发者模式仍然不可能脱离主 bundle 单独成为一个部署；
+- release 行保持启用，也意味着发布包的**浏览器半**继续被服务（`/plugins/dsh-report-ledger/client.js`）——开发者模式下同样有「汇报」标签页。
+
+宿主侧的配置（`announceToAgent`、`maxPeersPerAgent`、`worktree`）现在都属于 release 行，dev 行没有自己的 config；要用工作区功能，就在 profile 补丁里给 release 行加。
 
 **真正的门槛是仓库**：`installDevMode` 先看 `dev/agents.yml` 在不在，不在就返回空 disposer、什么都不注册。名单只在检出里、且不在 npm 包的 `files` 白名单里，加上附加包本身也不发布——所以装了 tarball 的部署拿不到开发代理，复刻仓库才可用。
 

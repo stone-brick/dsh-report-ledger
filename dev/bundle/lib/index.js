@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineTool } from "@deepseek-ai/dsh-tools";
-import { mountHost, mountWhenFree } from "../../../lib/index.js";
+import { HOST_SERVICE } from "../../../lib/index.js";
 import { mkdir, open, readFile, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { parse } from "yaml";
@@ -1099,6 +1099,15 @@ function parseRoster(text, readPromptFile) {
 * `dev/agents.yml` is absent, and the roster is only in the repository.
 * **Cloning the repository is the gate.**
 *
+* **The add-on is purely additive.** It never mounts a host half of its own: it
+* waits for the release row to publish `HOST_SERVICE` and installs its tools and
+* prompt section on top of the live services. That is what lets the release row
+* stay enabled next to it — and therefore lets the release row's *client* half keep
+* being served, so developer mode gets the same browser tab as a release install.
+* If the release row is switched off, the service disappears with its fiber and
+* Cordis unloads this row with it: developer mode can never become the deployment
+* on its own.
+*
 * An earlier version published these agents as harness presets. That was wrong in
 * a way worth recording: a preset is a deployment-level fact. It appears in the
 * preset picker next to the shipped modes, it is selectable by anyone on the
@@ -1165,11 +1174,10 @@ function renderProblem(problem) {
 /**
 * Install developer mode.
 *
-* Nothing is registered unless `config.devMode` is the literal boolean `true` —
-* the caller checks that through {@link devModeEnabled} — and nothing is published
-* to the harness at all: the section is a plugin-internal contribution, the tool
-* starts sessions this plugin owns, and the roster and bindings are files only
-* this plugin reads.
+* Nothing here is published to the harness's own registries: the section is a
+* plugin-internal contribution, the tool starts sessions this plugin owns, and the
+* roster and bindings are files only this plugin reads. The roster file is the
+* gate, not a config flag — an installed package has no `dev/agents.yml`.
 * @param ctx - the plugin context (`systemPrompt` and `tools`).
 * @param peers - the peer service, which is how a developer session is created.
 * @param service - the report service, used to hand the new session its task.
@@ -1439,92 +1447,36 @@ function installDevMode(ctx, peers, service) {
 		}
 	}
 }
-/** The host services this add-on needs from the harness, like the release entry. */
+/**
+* The services this add-on needs before it may load.
+*
+* `reportLedger` is the release host half's published service. Listing it here is
+* the whole overlay contract: Cordis starts this row only while a host half is
+* mounted, and unloads it — tools, prompt section, roster watch — the moment that
+* service is withdrawn. No manifest polling, no second host, no child fiber.
+*/
 const inject = [
 	"tools",
 	"systemPrompt",
-	"agents"
+	"agents",
+	HOST_SERVICE
 ];
-/** How often the add-on re-reads the profile manifest, in milliseconds. */
-const MANIFEST_POLL_MS = 500;
-/** The release bundle's name in `dsh.profile.bundles`. */
-const RELEASE_BUNDLE = "dsh-report-ledger";
-/**
-* Whether this profile still selects the release bundle.
-*
-* Developer mode is an overlay on the released plugin, not a standalone deployment:
-* the add-on only runs while that bundle is still selected. A profile row's
-* `baseUrl` points at the profile directory as a file URL, which is where the
-* manifest lives.
-* @param ctx - the plugin context.
-* @returns true/false, or undefined when the manifest cannot be read — a checkout
-*   always can, so undefined is treated as "proceed" rather than blocking a
-*   contributor whose profile is laid out unexpectedly.
-*/
-function releaseBundleSelected(ctx) {
-	if (ctx.baseUrl === void 0) return void 0;
-	try {
-		const directory = fileURLToPath(new URL(".", ctx.baseUrl));
-		const bundles = JSON.parse(readFileSync(join(directory, "package.json"), "utf8")).dsh?.profile?.bundles;
-		return Array.isArray(bundles) && bundles.includes(RELEASE_BUNDLE);
-	} catch {
-		return;
-	}
-}
 /**
 * Developer-mode plugin entry.
 *
-* The add-on mounts the release package's host half through the shared
-* single-instance queue and installs this checkout's developer tools on the live
-* services. It is an *overlay*: while the profile stops selecting the release
-* bundle, the mounted half is torn down and the add-on waits, re-checking the
-* manifest, so developer mode can never become the deployment on its own.
-*
-* The teardown goes through a child plugin fiber: everything `mountHost` registers
-* belongs to that fiber, so disposing it unmounts exactly the host half — including
-* the single-instance slot and any pending wait — without unloading this row.
+* Purely additive: this row contributes developer tools and a prompt section on
+* top of the host half the release row mounted. It never mounts a host itself,
+* which is exactly why the release row can stay enabled beside it — and why the
+* release row's browser half keeps being served.
 * @param ctx - the plugin context (`tools`, `systemPrompt`, `agents` injected).
-* @param config - the add-on row's config (announce, peer budget, worktree).
 */
-function apply(ctx, config) {
-	let fiber;
-	let settling = false;
-	function hostHalf(sub) {
-		mountWhenFree(sub, () => {
-			const host = mountHost(sub, config);
-			sub.effect(() => installDevMode(sub, host.peers, host.service), "report-ledger-dev: developer mode");
-		});
+function apply(ctx) {
+	const host = ctx.get(HOST_SERVICE);
+	if (host === void 0) {
+		ctx.logger?.warn?.("report-ledger-dev: the report-ledger host half is not published; developer mode stays inert until it is.");
+		return;
 	}
-	const stop = () => {
-		if (fiber === void 0) return;
-		settling = true;
-		const stopping = fiber.dispose();
-		fiber = void 0;
-		stopping.finally(() => {
-			settling = false;
-		});
-	};
-	const start = () => {
-		if (fiber !== void 0 || settling) return;
-		fiber = ctx.plugin(hostHalf);
-	};
-	const tick = () => {
-		if (releaseBundleSelected(ctx) === false) {
-			if (fiber !== void 0) ctx.logger?.warn?.("report-ledger-dev: the dsh-report-ledger bundle is not selected; developer mode waits until it is enabled again.");
-			stop();
-			return;
-		}
-		start();
-	};
-	tick();
-	const timer = setInterval(tick, MANIFEST_POLL_MS);
-	ctx.effect(() => () => {
-		clearInterval(timer);
-		if (fiber !== void 0) {
-			fiber.dispose();
-			fiber = void 0;
-		}
-	}, "report-ledger-dev: manifest watch");
+	ctx.effect(() => installDevMode(ctx, host.peers, host.service), "report-ledger-dev: developer mode");
 }
 //#endregion
 export { apply, inject, installDevMode };

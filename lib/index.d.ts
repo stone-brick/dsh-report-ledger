@@ -1567,13 +1567,31 @@ interface HostHalf {
   readonly peers: PeerService;
 }
 /**
+ * The service name a mounted host half is published under.
+ *
+ * Additive plugins — the developer-mode bundle in this checkout — mount on top of
+ * the host rather than providing a second one, so they need a stable way to reach
+ * the live services. Publishing them through the Cordis registry is what makes
+ * that compositional instead of structural:
+ *
+ *  - the service appears only while a host half is mounted, and disappears with
+ *    the fiber that provided it, so an additive row's `inject` list unloads it
+ *    automatically when the release row is switched off;
+ *  - no row needs to know which other row mounted the host, and no coordinator
+ *    has to hand the halves around.
+ *
+ * The name is exported rather than duplicated as a string literal so the two
+ * packages cannot drift.
+ */
+declare const HOST_SERVICE = "reportLedger";
+/**
  * Run `mount` once this composition has no other mounted host half, queueing otherwise.
  *
- * Both the release row and the developer-mode row go through this, so exactly one
- * instance owns the ledger's mutex table per composition. A second row waits instead
- * of throwing: a rejected activation is not retried by a recomposition that does not
- * touch its own row, which would leave two rows enabled and neither mounted. Waiting
- * makes the switch self-healing in either click order.
+ * A second *host* row waits instead of throwing: a rejected activation is not
+ * retried by a recomposition that does not touch its own row, which would leave
+ * two rows enabled and neither mounted. Waiting makes the switch self-healing in
+ * either click order. Additive rows (developer mode) never come through here —
+ * they consume the published {@link HOST_SERVICE} instead of mounting a host.
  * @param ctx - the plugin context, used to release the slot and to cancel a wait.
  * @param mount - the half to mount once the slot is free.
  */
@@ -1598,4 +1616,4 @@ declare function apply(ctx: Context, config?: Config): void;
  */
 declare function mountHost(ctx: Context, config?: Config): HostHalf;
 //#endregion
-export { Config, HostBundle, HostHalf, InheritedPermission, PeerCallerAgent, PeerCreateOptions, PeerHostContext, PeerResumeOptions, appendInheritedPermission, apply, buildPeerHost, captureInheritedPermission, inject, mountHost, mountWhenFree };
+export { Config, HOST_SERVICE, HostBundle, HostHalf, InheritedPermission, PeerCallerAgent, PeerCreateOptions, PeerHostContext, PeerResumeOptions, appendInheritedPermission, apply, buildPeerHost, captureInheritedPermission, inject, mountHost, mountWhenFree };

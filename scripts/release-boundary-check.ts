@@ -222,6 +222,28 @@ try {
   check('the developer add-on is built', false, String(error))
 }
 
+// ---- 8. developer mode is additive, never a replacement ---------------------
+// The add-on overlays the release row: it injects the `reportLedger` service that
+// row publishes and adds its tools on top. A dev patch that disables the release
+// row would break that contract twice over — no service to inject, and no release
+// row means no browser half either (the 「汇报」 tab disappears in developer mode).
+try {
+  const devPatch = parseYaml(readFileSync(join(root, 'dev/bundle/cordis.patch.yml'), 'utf8')) as
+    | ({ insert?: { id?: unknown; name?: unknown }[]; id?: unknown; disabled?: unknown })[]
+    | undefined
+  const layers = Array.isArray(devPatch) ? devPatch : []
+  const inserts = layers.flatMap((layer) => layer.insert ?? [])
+  check('the developer patch inserts the add-on row',
+    inserts.some((row) => row.id === 'report-ledger-dev'),
+    inserts.map((row) => `${String(row.id)}=${String(row.name)}`).join(', '))
+  const releaseLayers = layers.filter((layer) => layer.id === 'report-ledger')
+  check('the developer patch leaves the release row enabled',
+    releaseLayers.every((layer) => layer.disabled !== true),
+    JSON.stringify(releaseLayers))
+} catch (error) {
+  check('the developer patch is readable', false, String(error))
+}
+
 let failed = 0
 for (const [label, ok, detail] of checks) {
   if (!ok) failed++

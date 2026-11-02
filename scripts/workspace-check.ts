@@ -431,6 +431,8 @@ const wiring = (options: WiringOptions = {}) => {
   const registered: string[] = []
   const disposed: string[] = []
   const warnings: string[] = []
+  /** Services this fixture's fiber "provides", by name. */
+  const provided = new Map<string, unknown>()
   const effects: (() => void)[] = []
   const injections: ((scoped: unknown) => void)[] = []
   const webServer = {
@@ -486,9 +488,15 @@ const wiring = (options: WiringOptions = {}) => {
     },
     effect,
     inject: (_deps: string[], callback: (scoped: unknown) => void) => { injections.push(callback); return {} },
+    // Stands in for `ctx.provide`: additive rows (developer mode) consume the host
+    // half through the Cordis registry, so the publication itself is what this pins.
+    provide: (name: string, value: unknown) => {
+      provided.set(name, value)
+      return () => { provided.delete(name) }
+    },
   }
   return {
-    ctx, tools, sections, listeners, routes, registered, disposed, warnings, effects,
+    ctx, tools, sections, listeners, routes, registered, disposed, warnings, effects, provided,
     mount: (): void => { for (const injection of injections) injection(scoped) },
   }
 }
@@ -496,6 +504,13 @@ const wiring = (options: WiringOptions = {}) => {
 const wired = wiring()
 apply(wired.ctx as never, {})
 wired.mount()
+// Additive plugins (developer mode) never mount a second host: they inject the
+// service the host publishes, so its presence — and its withdrawal on unload — is
+// the whole overlay contract.
+const half = wired.provided.get('reportLedger') as { service?: unknown; peers?: unknown } | undefined
+check('apply publishes the host half as the reportLedger service',
+  half !== undefined && typeof half.service === 'object' && typeof half.peers === 'object',
+  String(half))
 check('apply registers the three read-only endpoints',
   wired.registered.join() === [REPORT_PATH, TIMELINE_PATH, WORKTREES_PATH].join(), wired.registered.join())
 check('each registered endpoint carries its handler', wired.routes.size === 3, String(wired.routes.size))

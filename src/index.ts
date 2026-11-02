@@ -1308,13 +1308,32 @@ export interface HostHalf {
 }
 
 /**
+ * The service name a mounted host half is published under.
+ *
+ * Additive plugins — the developer-mode bundle in this checkout — mount on top of
+ * the host rather than providing a second one, so they need a stable way to reach
+ * the live services. Publishing them through the Cordis registry is what makes
+ * that compositional instead of structural:
+ *
+ *  - the service appears only while a host half is mounted, and disappears with
+ *    the fiber that provided it, so an additive row's `inject` list unloads it
+ *    automatically when the release row is switched off;
+ *  - no row needs to know which other row mounted the host, and no coordinator
+ *    has to hand the halves around.
+ *
+ * The name is exported rather than duplicated as a string literal so the two
+ * packages cannot drift.
+ */
+export const HOST_SERVICE = 'reportLedger'
+
+/**
  * Run `mount` once this composition has no other mounted host half, queueing otherwise.
  *
- * Both the release row and the developer-mode row go through this, so exactly one
- * instance owns the ledger's mutex table per composition. A second row waits instead
- * of throwing: a rejected activation is not retried by a recomposition that does not
- * touch its own row, which would leave two rows enabled and neither mounted. Waiting
- * makes the switch self-healing in either click order.
+ * A second *host* row waits instead of throwing: a rejected activation is not
+ * retried by a recomposition that does not touch its own row, which would leave
+ * two rows enabled and neither mounted. Waiting makes the switch self-healing in
+ * either click order. Additive rows (developer mode) never come through here —
+ * they consume the published {@link HOST_SERVICE} instead of mounting a host.
  * @param ctx - the plugin context, used to release the slot and to cancel a wait.
  * @param mount - the half to mount once the slot is free.
  */
@@ -1358,6 +1377,17 @@ export function mountHost(ctx: Context, config?: Config): HostHalf {
   const host = buildHost(ctx)
   const service = new ReportService(host)
   const peers = new PeerService(buildPeerHost(ctx, host), config?.maxPeersPerAgent ?? DEFAULT_MAX_PEERS)
+  const half: HostHalf = { service, peers }
+  // Published before anything else is registered: an additive row (developer
+  // mode) is waiting on this service, and it should start as soon as the host
+  // exists rather than after every tool and section is in place. The disposer is
+  // owned by this fiber through `ctx.provide`, so unloading the release row
+  // withdraws the service and the additive row goes with it.
+  //
+  // Guarded because `mountHost` is also called by wiring fixtures and embedded
+  // hosts with a plain context object; there, publication is not available and
+  // nothing else needs it.
+  if (typeof ctx.provide === 'function') ctx.provide(HOST_SERVICE, half)
   // Automatic reclamation was removed. An old composition may still carry the
   // field; ignoring it silently would leave the operator believing cleanup is on.
   const legacyReclaim = (config?.worktree as Record<string, unknown> | undefined)?.reclaim
@@ -1478,7 +1508,7 @@ export function mountHost(ctx: Context, config?: Config): HostHalf {
     })
   })
 
-  if ((config?.announceToAgent ?? true) === false) return { service, peers }
+  if ((config?.announceToAgent ?? true) === false) return half
 
   // The protocol is a plain string, byte-identical for every agent, so the
   // shared part of the prompt stays a stable prefix in every scope.
@@ -1503,5 +1533,5 @@ export function mountHost(ctx: Context, config?: Config): HostHalf {
     'report-ledger: partnership section',
   )
 
-  return { service, peers }
+  return half
 }
