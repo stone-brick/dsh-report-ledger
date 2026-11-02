@@ -84,7 +84,7 @@ report_close(report="R-0007", note="已合并")               # 这件事结束�
 **汇报是两层结构。**
 
 - **front matter 是缩略**：主题、收发、抄送、共写者、跳数／其中读取数、最后一条因果动作、状态。它是唯一进入模型上下文的部分，所以长期协作的上下文开销有界。
-- **正文留在账本里**，由 `report_read` 按需打开（超长时只返回头部与文件定位，模型用 `read` 分页取余下部分）。
+- **正文留在账本里**，由 `report_read` 按需打开（正文超过 8000 字符时只返回约 1200 字符的头部与行号定位，模型用 `read` 从该行号分页取余下部分）。
 
 **传递路径是权威的。** 每次操作都追加一跳（append-only JSONL）：
 
@@ -111,7 +111,7 @@ reports/R-0001.route.jsonl   append-only 传递路径，一行一跳
 | `report_send` | 主送给更多代理（唤醒）：向上回报、向下派发 |
 | `report_cc` | 抄送给更多代理（不唤醒）：让需要知情者持有副本 |
 | `report_forward` | 转呈下去，或 `mode:"copy"` 作为参考副本分发 |
-| `report_read` | 读缩略 + 完整传递路径（开头一行按动作计数）+ 正文（读取记为 `read`，**算进 `reads`、不算进 `hops`**；不推进 `updated`、不改变列表顺序） |
+| `report_read` | 读缩略 + 完整传递路径（开头一行按动作计数）+ 正文（读取记为 `read`，计入 `hops` 也计入 `reads`，`hops - reads` 才是工作量；不推进 `updated`、不改变列表顺序） |
 | `report_list` | 只列缩略，可按 `session`、`status`、`task`、`worktree` 过滤，用于纵览长期协作；行里带 `authors=N`——回执说明有人确认收到，`authors=1` 说明**没人真的写过东西** |
 | `report_ack` | 回执，让发送方看到闭环 |
 | `report_amend` | 修正：改缩略字段或更正正文，仅发起者/共写者可改，改动会被记录 |

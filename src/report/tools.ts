@@ -475,7 +475,7 @@ export function registerReportTools(
 
   disposers.push(ctx.tools.register(defineTool({
     name: 'report_read',
-    description: 'Read one report: its digest, its COMPLETE transfer path (every hop with actor and time, and any recipient the report is still owed to), and its body. Use it when a digest told you a report exists and you need the substance, or when you need to know exactly how a report travelled and who holds copies. Reading is itself recorded — as a `read` hop, counted in `reads` rather than `hops`, because a look is an audit fact and not activity. The path opens with a per-action tally, so "how much of this was reading" never needs a pass over the ledger by hand.',
+    description: 'Read one report: its digest, its COMPLETE transfer path (every hop with actor and time, and any recipient the report is still owed to), and its body. Use it when a digest told you a report exists and you need the substance, or when you need to know exactly how a report travelled and who holds copies. Reading is itself recorded — as a `read` hop, counted in `reads` as well as in `hops`; a look is an audit fact and not activity, so the work signal is `hops - reads` and `last` never lands on a glance. The path opens with a per-action tally, so "how much of this was reading" never needs a pass over the ledger by hand.',
     parameters: {
       report: { type: 'string', required: true, description: 'Report id to read, e.g. R-0007.' },
     },
@@ -650,7 +650,7 @@ export function registerReportTools(
 
   disposers.push(ctx.tools.register(defineTool({
     name: 'report_transfer',
-    description: 'Move one hand-off the ledger is still holding from the session that owes it to another session. Use it when a recipient will never come back and the obligation must not sit unpaid forever: the delivery is still owed afterwards, just by someone else, and the transfer is recorded as a hop so the path shows both the session that handed it on and the one that took it. It is NOT an arrival — nobody has received anything yet — and it does not invent an obligation that the path does not already hold. Authority: the report\'s owners, or the session that is currently owed the hand-off (nobody else can pre-empt a delivery that already arrived).',
+    description: 'Move one hand-off the ledger is still holding from the session that owes it to another session. Use it when a recipient will never come back and the obligation must not sit unpaid forever: the delivery is still owed afterwards, just by someone else, and the transfer is recorded as a hop so the path shows both the session that handed it on and the one that took it. It is NOT itself an arrival: it moves the obligation, and the delivery is then attempted for the new holder (held if that session is absent). It does not invent an obligation that the path does not already hold. Authority: the report\'s owners, or the session that is currently owed the hand-off (nobody else can pre-empt a delivery that already arrived).',
     parameters: {
       report: { type: 'string', required: true, description: 'Report id whose outstanding hand-off should move.' },
       from: { type: 'string', required: true, description: 'The session that currently owes the hand-off — the one listed as still owed.' },
@@ -661,9 +661,16 @@ export function registerReportTools(
     execute: async (args, exec) => {
       const input = args as { report: string; from: string; to: string; note?: string }
       const result = await service.transfer(input.report, actorOf(exec as ExecLike), input.from, input.to, input.note)
+      // The obligation moved and a delivery was attempted for the new holder. A
+      // fixed "nobody has received it yet" would contradict the delivery line
+      // above it, so the outcome decides which of the two true statements is
+      // printed. Neither claims the transfer hop itself was an arrival.
+      const arrived = result.outcomes.some((outcome) => outcome.status === 'delivered')
       return [
         renderMutation(result.front, result.outcomes),
-        `moved ${input.report}'s hand-off: ${input.from} no longer owes it, ${input.to} does — nobody has received it yet`,
+        arrived
+          ? `moved ${input.report}'s hand-off: ${input.from} no longer owes it, ${input.to} does — the transfer hop is not an arrival; the delivery above is a separate, recorded arrival`
+          : `moved ${input.report}'s hand-off: ${input.from} no longer owes it, ${input.to} does — nobody has received it yet; the transfer hop is not an arrival`,
       ].join('\n')
     },
   })))
