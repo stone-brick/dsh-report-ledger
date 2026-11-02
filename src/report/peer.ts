@@ -81,6 +81,7 @@
  * @module dsh-report-ledger/report/peer
  */
 
+import { Buffer } from 'node:buffer'
 import { randomUUID } from 'node:crypto'
 import type { OutboundMessage } from './deliver.ts'
 import { appendPeer, buildRoster, holdsChannelTo, readPeers, type PeerRecord, type PeerRow, type RosterInput } from './roster.ts'
@@ -92,6 +93,71 @@ export const DEFAULT_MAX_PEERS = 8
 
 /** How long a caller waits for evidence about a peer's first turn, by default. */
 export const DEFAULT_RECEIPT_MS = 1500
+
+/**
+ * The byte budget one peer session title is truncated to.
+ *
+ * The harness's title service owns this ceiling (`maxTitleBytes`, 80 bytes in the
+ * stock composition) and normalizes every title it accepts. This plugin writes a
+ * peer's title itself — the service cannot derive one, see
+ * {@link peerSessionTitle} — so it honours the same ceiling from its own side. It
+ * cannot read that configuration, and a title shorter than the configured maximum
+ * is never wrong.
+ */
+export const PEER_TITLE_MAX_BYTES = 80
+
+/** Terminal escape and control sequences a session title must not carry. */
+const OSC_SEQUENCE = /(?:\u001B\]|\u009D)(?:(?!\u0007|\u001B\\)[\s\S])*(?:\u0007|\u001B\\|$)/gu
+const CSI_SEQUENCE = /(?:\u001B\[|\u009B)[0-?]*[ -/]*[@-~]/gu
+const ESC_SEQUENCE = /\u001B[@-_]/gu
+const CONTROL_CHARACTER = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/gu
+const DIRECTIONAL_CONTROL = /[\u200B\u200E\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF]/gu
+
+/** Truncate text to a UTF-8 byte budget without splitting a code point. */
+function truncateUtf8(input: string, maxBytes: number): string {
+  if (Buffer.byteLength(input, 'utf8') <= maxBytes) return input
+  let used = 0
+  let output = ''
+  for (const character of input) {
+    const bytes = Buffer.byteLength(character, 'utf8')
+    if (used + bytes > maxBytes) break
+    output += character
+    used += bytes
+  }
+  return output
+}
+
+/**
+ * Normalize one title this plugin is about to give a peer session.
+ *
+ * Shape mirrors the harness's own accepted-title rules (strip terminal escapes,
+ * C0/C1 controls and directional controls, collapse whitespace to one line, then
+ * truncate to the byte budget) because the value is written onto the session log
+ * directly rather than handed to the title service for normalization.
+ *
+ * The reason it is this plugin that writes it: the harness derives a session
+ * title only from `user/message` events whose source is `user`. A peer's first
+ * message is its assignment, delivered by this plugin, and no human ever types
+ * into it — so the title service has nothing to work from and the session list
+ * shows the localized "untitled" row. A starter that has just opened a partner
+ * would be unable to find it again by name.
+ * @param input - the starter's name for the peer, or its assignment subject.
+ * @returns a one-line title within the byte budget, or `undefined` when nothing printable is left.
+ */
+export function peerSessionTitle(input: string | undefined): string | undefined {
+  if (input === undefined) return undefined
+  const cleaned = input
+    .replace(OSC_SEQUENCE, '')
+    .replace(CSI_SEQUENCE, '')
+    .replace(ESC_SEQUENCE, '')
+    .replace(CONTROL_CHARACTER, '')
+    .replace(DIRECTIONAL_CONTROL, '')
+    .replace(/\s+/gu, ' ')
+    .trim()
+  if (cleaned === '') return undefined
+  const title = truncateUtf8(cleaned, PEER_TITLE_MAX_BYTES).trimEnd()
+  return title === '' ? undefined : title
+}
 
 /**
  * What actually happened to the peer's first turn.
@@ -142,6 +208,14 @@ export interface StartedPeer {
   readonly sessionId: string
   /** The display name supplied by the starter, when any. */
   readonly name?: string
+  /**
+   * The title written onto the peer's session log, when one was written.
+   *
+   * This is what the session list shows, and it is reported separately from
+   * `name` because the two are different records: the name lives in this plugin's
+   * roster, the title lives in the harness log every session-reading surface uses.
+   */
+  readonly title?: string
   /** The working directory it inherited. */
   readonly cwd?: string
   /** How many peers the starter now owns, including this one. */
@@ -228,10 +302,28 @@ export interface PeerHost {
    * they are not looking at, work the starter could already do. {@link
    * PeerService.start} therefore hands the starter's id to every implementation on
    * the assumption that it is used for all of these, not just for the route.
-   * @param input - the session id, the starter it is composed from, and the inherited directory.
+   * @param input - the session id, the starter it is composed from, the inherited
+   *   directory, and the session title to write onto the peer's log.
    * @returns the new session id, its wake channel, and the permission state it inherited.
    */
-  createPeer(input: { sessionId: string; startedBy: string; cwd?: string }): Promise<{ id: string; steer(message: OutboundMessage): void; permission?: PeerPermission }>
+  createPeer(input: { sessionId: string; startedBy: string; cwd?: string; title?: string }): Promise<{ id: string; steer(message: OutboundMessage): void; permission?: PeerPermission }>
+  /**
+   * Give an existing session a title when it has none.
+   *
+   * Optional, and asked for exactly one job: a peer started before this plugin
+   * titled its sessions — or one whose session log lost the title — still shows up
+   * as the localized "untitled" row long after creation. Naming it later is when
+   * {@link PeerService.ensureTitle} reaches for this, and the host owns the two
+   * questions a caller cannot answer: whether the session already has a title
+   * (which must be kept, whatever produced it), and whether the log is reachable
+   * at all.
+   *
+   * Must not throw: an optional courtesy that fails is a peer with no title, not a
+   * failed wake.
+   * @param input - the session to name, and the title to write when it has none.
+   * @returns whether a title was written.
+   */
+  nameSession?(input: { sessionId: string; title: string }): boolean
   /**
    * Load a persisted peer session and resume an agent on it.
    *
@@ -329,6 +421,14 @@ export interface StartPeerInput {
   readonly task: string
   /** Optional display name. */
   readonly name?: string
+  /**
+   * Session title to write onto the peer's log.
+   *
+   * Defaults to {@link StartPeerInput.name}; the tool layer passes the assignment
+   * subject instead when the starter named nothing, so a peer is never left
+   * untitled in the session list. Normalized by {@link peerSessionTitle}.
+   */
+  readonly title?: string
   /**
    * Directory to start the peer in, when it should not inherit the starter's.
    *
@@ -468,7 +568,7 @@ export class PeerService {
    * handle's `dispose()` removes the session from the store, which is exactly
    * wrong for a partner that must outlive this turn.
    * @param self - the caller's session id.
-   * @param input - the task and optional name.
+   * @param input - the task, optional name, and optional session title.
    * @returns the created peer.
    * @throws when the task is empty, the name is unusable, or the cap is reached.
    */
@@ -477,6 +577,10 @@ export class PeerService {
     if (task === '') throw new Error('report-ledger: peer_start requires a non-empty task')
     const name = input.name?.trim() || undefined
     if (name !== undefined && [...name].length > 60) throw new Error('report-ledger: peer_start name must be 60 characters or fewer')
+    // The title is what the harness's session list shows, and nothing the harness
+    // itself does would ever produce one for a peer: its title service reads only
+    // human messages, and a peer's first message is this plugin's assignment.
+    const title = peerSessionTitle(input.title ?? name)
 
     const already = await this.startedCount(self)
     if (already >= this.#maxPeers) {
@@ -496,7 +600,12 @@ export class PeerService {
     // The starter is named, not just recorded: the adapter composes the peer from
     // that live session, because a root agent has no composition, route, or standing
     // permission state of its own.
-    const created = await this.#host.createPeer({ sessionId, startedBy: self, ...(cwd === undefined ? {} : { cwd }) })
+    const created = await this.#host.createPeer({
+      sessionId,
+      startedBy: self,
+      ...(cwd === undefined ? {} : { cwd }),
+      ...(title === undefined ? {} : { title }),
+    })
 
     // Registration follows creation, never precedes it: the registry validates
     // the session against the `cwd` in its durable header, which the agent does
@@ -539,6 +648,7 @@ export class PeerService {
       sessionId: created.id,
       started: already + 1,
       ...(name === undefined ? {} : { name }),
+      ...(title === undefined ? {} : { title }),
       ...(cwd === undefined ? {} : { cwd }),
       ...(created.permission === undefined ? {} : { permission: created.permission }),
       ...(workspace === undefined ? {} : { workspace }),
@@ -622,5 +732,43 @@ export class PeerService {
       )
     }
     return { sessionId: target, startedBy: record.startedBy, resident: false, resumed: true, ...name }
+  }
+
+  /**
+   * Give one of the caller's peers a session title, or keep the title it has.
+   *
+   * Naming is deliberately not folded into {@link PeerService.wake}: waking is
+   * about making an absent session reachable, while naming is about the "untitled"
+   * row a caller sees in the session list — and those two answers disagree exactly
+   * where it matters, because a peer that never left is never woken but is still
+   * untitled if it was started before this plugin titled sessions.
+   *
+   * The host decides whether anything is written: it keeps any title the session
+   * already carries (a human rename outranks the name its starter gave it) and
+   * answers `false` for a session that is not resident. Authority follows the
+   * roster for the same reason waking does — this writes onto somebody's session
+   * log, so only the session that started the peer may do it — but a refusal here is
+   * just `false`, because naming is a courtesy and not a command.
+   * @param self - the calling session id.
+   * @param sessionId - the peer to name.
+   * @returns whether a title was written.
+   */
+  async ensureTitle(self: string, sessionId: string): Promise<boolean> {
+    const target = sessionId.trim()
+    if (target === '') return false
+    if (target === self) return false
+    const peers = await readPeers()
+    let record: PeerRecord | undefined
+    for (let index = peers.length - 1; index >= 0; index -= 1) {
+      const candidate = peers[index]
+      if (candidate !== undefined && candidate.sessionId === target) {
+        record = candidate
+        break
+      }
+    }
+    if (record === undefined || record.startedBy !== self) return false
+    const title = peerSessionTitle(record.name)
+    if (title === undefined) return false
+    return this.#host.nameSession?.({ sessionId: target, title }) === true
   }
 }

@@ -313,6 +313,77 @@ export function appendInheritedPermission(created: PeerAppendTarget | undefined,
   return true
 }
 
+/**
+ * The producer name written into a title this plugin gives a session.
+ *
+ * The title service's source vocabulary has three values, and only one of them
+ * tells the truth here: `user` would claim a human typed the name (and would pin
+ * the title against any later automatic revision), `fallback` would claim the
+ * service's own first-human-message rule produced it from a message this session
+ * does not have. `provider` says what actually happened — a producer generated
+ * this title — and the id names which producer.
+ */
+const SESSION_TITLE_PROVIDER = 'plugin:report-ledger'
+
+/** The log-only title event this plugin writes; declared by the harness's title package. */
+const SESSION_TITLE_EVENT = 'session/title'
+
+/**
+ * A live or unpublished session log, as much as a title write touches.
+ */
+interface SessionTitleTarget {
+  /**
+   * Append one log record.
+   * @param type - the event type.
+   * @param data - the event payload.
+   */
+  append?(type: string, data: Record<string, unknown>): void
+}
+
+/**
+ * Append one title snapshot to a session log.
+ *
+ * The empty citation list is deliberate: no `user/message` was read to derive this
+ * title, and the title service documents an empty list as exactly that — a title
+ * with no human input behind it.
+ * @param log - the session log, when one is reachable.
+ * @param title - the already-normalized title text.
+ * @returns whether the event was written.
+ */
+function writeSessionTitle(log: SessionTitleTarget | undefined, title: string): boolean {
+  if (log === undefined || typeof log.append !== 'function') return false
+  log.append(SESSION_TITLE_EVENT, {
+    title,
+    messageSeqs: [],
+    source: { kind: 'provider', provider: SESSION_TITLE_PROVIDER },
+  })
+  return true
+}
+
+/**
+ * Write the peer's session title onto its unpublished log.
+ *
+ * The peer's session would otherwise stay forever untitled, and the reason is a
+ * property of the harness rather than an oversight here: the title service derives
+ * titles only from `user/message` events whose source is `user`, while a peer's
+ * first message is this plugin's assignment (`source.kind:
+ * 'plugin:report-ledger'`) and no human ever types into the session. The sidebar
+ * would then show the localized "untitled" row for a session its starter has just
+ * opened — the one session the caller cannot find again by name.
+ *
+ * Written in the same creation window as the inherited permission state, for the
+ * same reason: it belongs to the peer's first stored snapshot. The text arrives
+ * already normalized by the peer service, because the service that would normally
+ * normalize a session title cannot derive this one at all.
+ * @param created - the unpublished agent, when the harness handed one over.
+ * @param title - the normalized title, or `undefined` when there is nothing to write.
+ * @returns true when a title was requested and there was a log to write it to.
+ */
+export function appendPeerTitle(created: PeerAppendTarget | undefined, title: string | undefined): boolean {
+  if (title === undefined) return false
+  return writeSessionTitle(created?.session, title)
+}
+
 /** Structural face of the optional deployment default model service. */
 interface AgentDefaultModelLike {
   /**
@@ -1088,7 +1159,7 @@ export function buildPeerHost(ctx: PeerHostContext, host: HostBundle): PeerHost 
     listSessionRecords: () => host.listSessionRecords(),
     readTitles: (ids: readonly string[]) => host.readTitles(ids),
     listReports: () => listReports(),
-    async createPeer(input: { sessionId: string; startedBy: string; cwd?: string }) {
+    async createPeer(input: { sessionId: string; startedBy: string; cwd?: string; title?: string }) {
       const caller = ctx.agents.get(input.startedBy as never)
       if (caller === undefined) {
         throw new Error(
@@ -1127,6 +1198,17 @@ export function buildPeerHost(ctx: PeerHostContext, host: HostBundle): PeerHost 
               + 'the harness handed no unpublished session to setup(); the peer runs on its own creation-time preset instead',
             )
           }
+          // The name the session list will show. A peer's title cannot come from the
+          // harness — its title service reads only human messages — so this is the
+          // one place the session can be born named. Losing it is not fatal, which is
+          // why it is reported rather than thrown: a partner with an "untitled" row
+          // still works.
+          if (!appendPeerTitle(created, input.title) && input.title !== undefined) {
+            ctx.logger?.warn?.(
+              `report-ledger: peer ${input.sessionId} could not be titled "${input.title}" — the harness handed no `
+              + 'unpublished session to setup(), so the session starts untitled and can be renamed in the GUI instead',
+            )
+          }
         },
       })
       // The handle is intentionally NOT retained. Its `dispose()` removes the
@@ -1139,6 +1221,26 @@ export function buildPeerHost(ctx: PeerHostContext, host: HostBundle): PeerHost 
         // what authority the peer actually got instead of inferring it from silence.
         ...(Object.keys(inherited).length === 0 ? {} : { permission: inherited }),
       }
+    },
+    /**
+     * Name a peer session that has no title yet, keeping any title it has.
+     *
+     * The two answers only the host can give are both here: whether the session is
+     * resident at all (an absent one has no log to append to), and whether it
+     * already carries a title. The second one is a hard rule, not a heuristic —
+     * whatever produced that title outranks the name its starter gave it: a human
+     * rename in the GUI, the harness's own first-prompt title after somebody typed
+     * in the session, or an earlier run of this plugin. A later event would win over
+     * all of them by being later, which is exactly the overwrite this check prevents.
+     * @param input - the session to name, and the title to write when it has none.
+     * @returns whether a title was written.
+     */
+    nameSession(input: { sessionId: string; title: string }): boolean {
+      const agent = ctx.agents.get(input.sessionId as never)
+      if (agent === undefined) return false
+      const current = (ctx.get('sessionTitle') as SessionTitleFaceLike | undefined)?.get(agent.session as never)
+      if (typeof current?.title === 'string' && current.title !== '') return false
+      return writeSessionTitle(agent.session as unknown as SessionTitleTarget, input.title)
     },
     /**
      * Load a peer back into this process.

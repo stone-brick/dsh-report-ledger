@@ -336,6 +336,38 @@ await bare.peerHost.createPeer({ sessionId: 'session-peer-bare', startedBy: 'ses
 check('a starter with no permission services yields no inherited events',
   bare.calls[0]?.appended.length === 0, JSON.stringify(bare.calls[0]?.appended))
 
+// ---------------------------------------------------------------------------
+// 6c. the peer's session is born titled
+// ---------------------------------------------------------------------------
+// The harness titles a session only from a human message, and a peer's first
+// message is this plugin's assignment — so the title service never produces one
+// and the session list would show an "untitled" row for the session the starter
+// just opened. The creation window is the only place this can be fixed.
+const titledPeer = captureCreation(starterCaller)
+await titledPeer.peerHost.createPeer({
+  sessionId: 'session-peer-titled',
+  startedBy: 'session-starter',
+  title: '审计-投递路径',
+})
+const titleEvent = titledPeer.calls[0]?.appended.find((event) => event.type === 'session/title')
+check('a peer session is born with the title its starter chose',
+  titleEvent?.data.title === '审计-投递路径', JSON.stringify(titleEvent))
+check('the title is attributed to a producer, not to a human prompt or the fallback rule',
+  (titleEvent?.data.source as { kind?: string; provider?: string } | undefined)?.kind === 'provider'
+  && (titleEvent?.data.source as { provider?: string } | undefined)?.provider === 'plugin:report-ledger',
+  JSON.stringify(titleEvent?.data.source))
+check('the title cites no human message, because none was read',
+  Array.isArray(titleEvent?.data.messageSeqs) && (titleEvent?.data.messageSeqs as unknown[]).length === 0,
+  JSON.stringify(titleEvent?.data.messageSeqs))
+check('a creation with no title writes no title event',
+  !(bare.calls[0]?.appended ?? []).some((event) => event.type === 'session/title'),
+  JSON.stringify(bare.calls[0]?.appended))
+
+const untitledWarnings: string[] = []
+const untitledPeer = captureCreation(starterCaller, {}, untitledWarnings)
+await untitledPeer.peerHost.createPeer({ sessionId: 'session-peer-untitled', startedBy: 'session-starter', title: '本该有名字' })
+check('a titled creation raises no warning', untitledWarnings.length === 0, untitledWarnings.join(' | '))
+
 // `custom` is the derived "matches no preset" state and is not a valid identity to
 // copy; the knobs still travel, so the peer lands in the same custom state honestly.
 const customPeer = captureCreation(starterCaller, {
@@ -391,6 +423,75 @@ await appendlessHost.createPeer({ sessionId: 'session-peer-appendless', startedB
 check('a creation window without the unpublished session is reported, not silent',
   appendlessWarnings.some((line) => line.includes('session-peer-appendless') && line.includes('inherit')),
   appendlessWarnings.join(' | '))
+await appendlessHost.createPeer({ sessionId: 'session-peer-untitleable', startedBy: 'session-starter', title: '写不进去的名字' })
+check('a title that could not be written is reported, not silent',
+  appendlessWarnings.some((line) => line.includes('session-peer-untitleable') && line.includes('untitled')),
+  appendlessWarnings.join(' | '))
+
+// ---------------------------------------------------------------------------
+// 6d. naming an existing session keeps whatever title it already has
+// ---------------------------------------------------------------------------
+// The one authority the host holds and a caller cannot: whether the session is
+// resident (no log, nothing to write) and whether it is already titled. A later
+// event would win merely by being later, so "keep what is there" has to be checked
+// here, not assumed.
+const appendedTitles: { type: string; data: Record<string, unknown> }[] = []
+const nameableAgent = {
+  id: 'session-named',
+  options: {},
+  ctx: {},
+  session: {
+    append: (type: string, data: Record<string, unknown>) => { appendedTitles.push({ type, data }) },
+    requestHeader: () => undefined,
+    snapshotEvents: () => [],
+  },
+  steer: () => {},
+  whenIdle: async () => {},
+}
+
+/**
+ * A context whose only interesting answers are "who is resident" and "is it titled".
+ * @param current - what the title service folds for that session; `undefined` means untitled.
+ * @param resident - whether the session is live; `false` models a peer that is gone.
+ * @param withTitleService - whether the deployment composes a title service at all.
+ * @returns the context stub.
+ */
+const namingContext = (
+  current: { title?: string } | undefined,
+  resident = true,
+  withTitleService = true,
+): PeerHostContext => ({
+  agents: {
+    get: () => (resident ? nameableAgent : undefined) as never,
+    list: () => [],
+    create: async () => { throw new Error('fixture: this check creates nothing') },
+  },
+  get: (name: string) => (withTitleService && name === 'sessionTitle' ? { get: () => current } : undefined),
+  logger: { warn: () => {} },
+}) as unknown as PeerHostContext
+
+const namingHost = buildPeerHost(namingContext(undefined), host())
+check('an untitled resident session is named',
+  namingHost.nameSession?.({ sessionId: 'session-named', title: '审计' }) === true,
+  JSON.stringify(appendedTitles.at(-1)))
+check('the title written is the one asked for, as a title event',
+  appendedTitles.at(-1)?.type === 'session/title' && appendedTitles.at(-1)?.data.title === '审计',
+  JSON.stringify(appendedTitles.at(-1)))
+
+const keepHost = buildPeerHost(namingContext({ title: 'human rename' }), host())
+const before = appendedTitles.length
+check('an existing title is never overwritten',
+  keepHost.nameSession?.({ sessionId: 'session-named', title: '审计' }) === false
+  && appendedTitles.length === before,
+  JSON.stringify(appendedTitles.slice(before)))
+
+const absentName = buildPeerHost(namingContext(undefined, false), host())
+check('a session that is not resident cannot be named',
+  absentName.nameSession?.({ sessionId: 'session-gone', title: '审计' }) === false)
+
+const serviceless = buildPeerHost(namingContext(undefined, true, false), host())
+check('a deployment without a title service still gets the event onto the log',
+  serviceless.nameSession?.({ sessionId: 'session-named', title: '审计' }) === true)
 
 // ---------------------------------------------------------------------------
 // 7. apply(): route registration is failure-atomic

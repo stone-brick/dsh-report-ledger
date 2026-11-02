@@ -294,6 +294,10 @@ async function startPeerOnReport(
   const started = await deps.peers.start(input.actor, {
     task: input.task,
     ...(input.name === undefined ? {} : { name: input.name }),
+    // No name given, so the session is titled after the assignment it was handed:
+    // the subject is what the session list can show, and an untitled row would make
+    // the peer the one session its starter cannot find again.
+    title: input.name ?? existing.front.subject,
     ...(cwd === undefined ? {} : { cwd }),
   })
   const note = [
@@ -324,6 +328,7 @@ async function startPeerOnReport(
   }
   return [
     `opened peer ${started.sessionId}${started.name === undefined ? '' : ` (name=${started.name})`}`,
+    started.title === undefined ? '' : `session title: ${started.title}`,
     started.cwd === undefined ? '' : `cwd=${started.cwd}`,
     renderPeerPermission(started.permission),
     `peers you have started: ${started.started}`,
@@ -915,10 +920,10 @@ export function registerReportTools(
 
   disposers.push(ctx.tools.register(defineTool({
     name: 'peer_start',
-    description: 'Open a new independent agent session — a peer, not a subordinate. A peer is a root session with its own lifecycle that outlives this turn, so it is the right move when the work is long-running, when you want a partner that keeps its own context across days, or when a task should not be nested under you. This creates the session, records that you started it (which is what later lets you address it directly), and hands it the task as a REPORT — so the assignment is durable and traceable, and the peer can answer by contributing to that same report. Pass `report` to hand over a report you already wrote instead: nothing new is authored, and the peer starts in that report\'s checkout when it has one — the alternative to the duplicate assignment stub. Pass `parent` to hang a new assignment report under an existing one. The peer inherits your composition, model route, and current permission state (sandbox mode, approval policy, preset), and the output reports the permission state it actually got. The output also reports what became of the peer\'s first turn (running, already ended, or failed): a delivered digest proves only that the peer is resident, never that work started. Do not use this as a cheaper subagent: for a bounded subtask, delegation is the right tool.',
+    description: 'Open a new independent agent session — a peer, not a subordinate. A peer is a root session with its own lifecycle that outlives this turn, so it is the right move when the work is long-running, when you want a partner that keeps its own context across days, or when a task should not be nested under you. This creates the session, records that you started it (which is what later lets you address it directly), and hands it the task as a REPORT — so the assignment is durable and traceable, and the peer can answer by contributing to that same report. Pass `report` to hand over a report you already wrote instead: nothing new is authored, and the peer starts in that report\'s checkout when it has one — the alternative to the duplicate assignment stub. Pass `parent` to hang a new assignment report under an existing one. It also names the session it creates — after `name`, or after the assignment subject when no name was given — because the harness titles sessions from human prompts only, and without this the peer would stay untitled in the session list. The peer inherits your composition, model route, and current permission state (sandbox mode, approval policy, preset), and the output reports the permission state it actually got. The output also reports what became of the peer\'s first turn (running, already ended, or failed): a delivered digest proves only that the peer is resident, never that work started. Do not use this as a cheaper subagent: for a bounded subtask, delegation is the right tool.',
     parameters: {
       task: { type: 'string', required: true, description: 'What this peer is for and what it should do first. It becomes the opening report body, or the task line of the hand-off when `report` is given.' },
-      name: { type: 'string', description: 'Optional short display name for the peer (60 characters or fewer).' },
+      name: { type: 'string', description: 'Optional short display name for the peer (60 characters or fewer). It is also the session title the session list shows; without one the assignment subject is used instead.' },
       report: { type: 'string', description: 'Hand this existing report over as the peer\'s assignment instead of authoring a new one. The peer is addressed to it (one `sent` hop) and starts in its checkout when it has one; a closed report is refused, because addressing it would reopen it.' },
       parent: { type: 'string', description: 'When a new assignment report is authored, hang it under this report id — a tree instead of a thread. Ignored when `report` is given, and the two together are refused.' },
       ...worktreeParam(worktree, 'Give the peer its own git checkout, on a branch named after the assignment report, and start it there instead of in your directory. Only the working directory and index are private; config, hooks and the object store are shared with every other checkout.'),
@@ -962,6 +967,10 @@ export function registerReportTools(
         started = await peers.start(actor, {
           task: input.task,
           ...(name === undefined ? {} : { name }),
+          // With no name to use, the session is titled after the assignment it is
+          // about to receive: the subject names what the peer is for, and an
+          // untitled session is one the caller cannot find again in the session list.
+          title: name ?? subject,
           ...(provisioned === undefined ? {} : { cwd: provisioned.prepared.binding.path }),
         })
       } catch (error) {
@@ -1030,6 +1039,7 @@ export function registerReportTools(
       }
       return [
         `opened peer ${started.sessionId}${started.name === undefined ? '' : ` (name=${started.name})`}`,
+        started.title === undefined ? '' : `session title: ${started.title}`,
         started.cwd === undefined ? '' : `cwd=${started.cwd}`,
         renderPeerPermission(started.permission),
         `peers you have started: ${started.started}`,
@@ -1069,7 +1079,15 @@ export function registerReportTools(
             : 'Address it with report_send first — the hand-off is held until it is resident again — or leave it absent.'),
         )
       }
+      // The dry run above answered "may I" and "is it here"; this is the wake that
+      // acts. A resident peer is not resumed again — there is nothing to load.
       const woke = found.resident ? found : await peers.wake(actor, target)
+      // Naming is its own step because it answers a different question: a peer
+      // started before this plugin titled sessions reads as an "untitled" row until
+      // something writes its title, and the wake is when the caller is looking right
+      // at it. The host keeps any title the session already has, so this never
+      // overwrites a human rename, and it is a courtesy: a false answer is not an error.
+      await peers.ensureTitle(actor, target)
       const outcomes = await service.flushForAgent(target)
       // Re-read rather than infer: a delivery sweep is exactly the place where
       // "asked for" and "landed" can differ, and the caller must not be told a

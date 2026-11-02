@@ -412,6 +412,14 @@ interface StartedPeer {
   readonly sessionId: string;
   /** The display name supplied by the starter, when any. */
   readonly name?: string;
+  /**
+   * The title written onto the peer's session log, when one was written.
+   *
+   * This is what the session list shows, and it is reported separately from
+   * `name` because the two are different records: the name lives in this plugin's
+   * roster, the title lives in the harness log every session-reading surface uses.
+   */
+  readonly title?: string;
   /** The working directory it inherited. */
   readonly cwd?: string;
   /** How many peers the starter now owns, including this one. */
@@ -496,18 +504,40 @@ interface PeerHost {
    * they are not looking at, work the starter could already do. {@link
    * PeerService.start} therefore hands the starter's id to every implementation on
    * the assumption that it is used for all of these, not just for the route.
-   * @param input - the session id, the starter it is composed from, and the inherited directory.
+   * @param input - the session id, the starter it is composed from, the inherited
+   *   directory, and the session title to write onto the peer's log.
    * @returns the new session id, its wake channel, and the permission state it inherited.
    */
   createPeer(input: {
     sessionId: string;
     startedBy: string;
     cwd?: string;
+    title?: string;
   }): Promise<{
     id: string;
     steer(message: OutboundMessage): void;
     permission?: PeerPermission;
   }>;
+  /**
+   * Give an existing session a title when it has none.
+   *
+   * Optional, and asked for exactly one job: a peer started before this plugin
+   * titled its sessions — or one whose session log lost the title — still shows up
+   * as the localized "untitled" row long after creation. Naming it later is when
+   * {@link PeerService.ensureTitle} reaches for this, and the host owns the two
+   * questions a caller cannot answer: whether the session already has a title
+   * (which must be kept, whatever produced it), and whether the log is reachable
+   * at all.
+   *
+   * Must not throw: an optional courtesy that fails is a peer with no title, not a
+   * failed wake.
+   * @param input - the session to name, and the title to write when it has none.
+   * @returns whether a title was written.
+   */
+  nameSession?(input: {
+    sessionId: string;
+    title: string;
+  }): boolean;
   /**
    * Load a persisted peer session and resume an agent on it.
    *
@@ -611,6 +641,14 @@ interface StartPeerInput {
   /** Optional display name. */
   readonly name?: string;
   /**
+   * Session title to write onto the peer's log.
+   *
+   * Defaults to {@link StartPeerInput.name}; the tool layer passes the assignment
+   * subject instead when the starter named nothing, so a peer is never left
+   * untitled in the session list. Normalized by {@link peerSessionTitle}.
+   */
+  readonly title?: string;
+  /**
    * Directory to start the peer in, when it should not inherit the starter's.
    *
    * A caller that allocated a working tree passes its path here, which is what
@@ -674,7 +712,7 @@ declare class PeerService {
    * handle's `dispose()` removes the session from the store, which is exactly
    * wrong for a partner that must outlive this turn.
    * @param self - the caller's session id.
-   * @param input - the task and optional name.
+   * @param input - the task, optional name, and optional session title.
    * @returns the created peer.
    * @throws when the task is empty, the name is unusable, or the cap is reached.
    */
@@ -705,6 +743,26 @@ declare class PeerService {
    * @throws when the target is not one of the caller's peers, or cannot be resumed.
    */
   wake(self: string, sessionId: string, options?: WakeOptions): Promise<WokenPeer>;
+  /**
+   * Give one of the caller's peers a session title, or keep the title it has.
+   *
+   * Naming is deliberately not folded into {@link PeerService.wake}: waking is
+   * about making an absent session reachable, while naming is about the "untitled"
+   * row a caller sees in the session list — and those two answers disagree exactly
+   * where it matters, because a peer that never left is never woken but is still
+   * untitled if it was started before this plugin titled sessions.
+   *
+   * The host decides whether anything is written: it keeps any title the session
+   * already carries (a human rename outranks the name its starter gave it) and
+   * answers `false` for a session that is not resident. Authority follows the
+   * roster for the same reason waking does — this writes onto somebody's session
+   * log, so only the session that started the peer may do it — but a refusal here is
+   * just `false`, because naming is a courtesy and not a command.
+   * @param self - the calling session id.
+   * @param sessionId - the peer to name.
+   * @returns whether a title was written.
+   */
+  ensureTitle(self: string, sessionId: string): Promise<boolean>;
 }
 //#endregion
 //#region src/report/service.d.ts
@@ -1341,6 +1399,26 @@ declare function captureInheritedPermission(ctx: PeerHostContext, session: PeerC
  */
 declare function appendInheritedPermission(created: PeerAppendTarget | undefined, inherited: InheritedPermission): boolean;
 /**
+ * Write the peer's session title onto its unpublished log.
+ *
+ * The peer's session would otherwise stay forever untitled, and the reason is a
+ * property of the harness rather than an oversight here: the title service derives
+ * titles only from `user/message` events whose source is `user`, while a peer's
+ * first message is this plugin's assignment (`source.kind:
+ * 'plugin:report-ledger'`) and no human ever types into the session. The sidebar
+ * would then show the localized "untitled" row for a session its starter has just
+ * opened — the one session the caller cannot find again by name.
+ *
+ * Written in the same creation window as the inherited permission state, for the
+ * same reason: it belongs to the peer's first stored snapshot. The text arrives
+ * already normalized by the peer service, because the service that would normally
+ * normalize a session title cannot derive this one at all.
+ * @param created - the unpublished agent, when the harness handed one over.
+ * @param title - the normalized title, or `undefined` when there is nothing to write.
+ * @returns true when a title was requested and there was a log to write it to.
+ */
+declare function appendPeerTitle(created: PeerAppendTarget | undefined, title: string | undefined): boolean;
+/**
  * The host capabilities the peer bundle reaches for, named one by one.
  *
  * Narrower than {@link Context} on purpose, and the narrowing earns two things:
@@ -1616,4 +1694,4 @@ declare function apply(ctx: Context, config?: Config): void;
  */
 declare function mountHost(ctx: Context, config?: Config): HostHalf;
 //#endregion
-export { Config, HOST_SERVICE, HostBundle, HostHalf, InheritedPermission, PeerCallerAgent, PeerCreateOptions, PeerHostContext, PeerResumeOptions, appendInheritedPermission, apply, buildPeerHost, captureInheritedPermission, inject, mountHost, mountWhenFree };
+export { Config, HOST_SERVICE, HostBundle, HostHalf, InheritedPermission, PeerCallerAgent, PeerCreateOptions, PeerHostContext, PeerResumeOptions, appendInheritedPermission, appendPeerTitle, apply, buildPeerHost, captureInheritedPermission, inject, mountHost, mountWhenFree };

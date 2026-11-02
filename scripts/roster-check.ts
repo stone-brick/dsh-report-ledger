@@ -23,7 +23,7 @@ const root = await mkdtemp(join(tmpdir(), 'report-ledger-roster-'))
 process.env.DSH_REPORT_LEDGER_ROOT = root
 
 const { buildRoster, holdsChannelTo, appendPeer, readPeers, peerLogPath } = await import('../src/report/roster.ts')
-const { PeerService } = await import('../src/report/peer.ts')
+const { PeerService, PEER_TITLE_MAX_BYTES, peerSessionTitle } = await import('../src/report/peer.ts')
 const { registerReportTools } = await import('../src/report/tools.ts')
 const { resolveWorktree } = await import('../src/report/allocate.ts')
 
@@ -135,7 +135,7 @@ check('the peer log is append-only JSONL', logText.trim().split('\n').every((lin
 // ---------------------------------------------------------------------------
 // PeerService: budget, validation, and roster integration
 // ---------------------------------------------------------------------------
-const created: { sessionId: string; startedBy?: string; cwd?: string }[] = []
+const created: { sessionId: string; startedBy?: string; cwd?: string; title?: string }[] = []
 const madeSteer: string[] = []
 const host = {
   selfCwd: () => 'D:\\Projects\\demo',
@@ -143,8 +143,13 @@ const host = {
   listSessionRecords: async () => records as never,
   readTitles: async () => new Map<string, string>(),
   listReports: async () => reports,
-  createPeer: async ({ sessionId, startedBy, cwd }: { sessionId: string; startedBy?: string; cwd?: string }) => {
-    created.push({ sessionId, ...(startedBy === undefined ? {} : { startedBy }), ...(cwd === undefined ? {} : { cwd }) })
+  createPeer: async ({ sessionId, startedBy, cwd, title }: { sessionId: string; startedBy?: string; cwd?: string; title?: string }) => {
+    created.push({
+      sessionId,
+      ...(startedBy === undefined ? {} : { startedBy }),
+      ...(cwd === undefined ? {} : { cwd }),
+      ...(title === undefined ? {} : { title }),
+    })
     return { id: sessionId, steer: (message: { content: readonly { text: string }[] }) => { madeSteer.push(message.content[0]?.text ?? '') } }
   },
   // The receipt is an observation, so the fake host answers with one directly:
@@ -167,6 +172,42 @@ check('the peer count is reported', startedOne.started >= 1)
 check('the caller now holds a channel to what it started', await loose.holdsChannel(SELF, startedOne.sessionId))
 check('the new peer appears as started in the roster',
   (await loose.roster(SELF, { scope: 'related' })).some((row) => row.sessionId === startedOne.sessionId && row.relation === 'started'))
+
+// A peer's session is titled by this plugin, because nothing else can title it: the
+// harness's title service reads only human messages and a peer's first message is
+// the assignment this plugin delivers. Without this the session list shows the
+// localized "untitled" row for the very session the caller just opened.
+check('the peer\'s session is titled after the name its starter gave it',
+  startedOne.title === 'payments', String(startedOne.title))
+check('that title reaches the host that writes it onto the log',
+  created[0]?.title === 'payments', String(created[0]?.title))
+
+const titledByCall = await new PeerService(host as never, 100).start(SELF, {
+  task: 'audit the delivery path',
+  title: '\u001b[31m  audit\n\tthe\u202E delivery  path  ',
+})
+check('an explicit title is honored and normalized to one printable line',
+  titledByCall.title === 'audit the delivery path', String(titledByCall.title))
+check('the normalized title is what the host receives, not the raw text',
+  created.at(-1)?.title === 'audit the delivery path', String(created.at(-1)?.title))
+
+const longTitle = await new PeerService(host as never, 100).start(SELF, {
+  task: 'x',
+  title: '长'.repeat(60),
+})
+check('a title is truncated to the harness byte budget without splitting a character',
+  (longTitle.title ?? '').length > 0
+  && Buffer.byteLength(longTitle.title ?? '', 'utf8') <= PEER_TITLE_MAX_BYTES
+  && !(longTitle.title ?? '').includes('\uFFFD'),
+  `${String(longTitle.title)} (${String(Buffer.byteLength(longTitle.title ?? '', 'utf8'))} bytes)`)
+
+check('a title with no printable text becomes no title at all',
+  peerSessionTitle(' \u0000\u0007 ') === undefined, String(peerSessionTitle(' \u0000\u0007 ')))
+check('an unnamed start without an explicit title writes no title',
+  (await new PeerService(host as never, 100).start(SELF, { task: 'no name, no title' })).title === undefined)
+check('whitespace inside a title collapses to single spaces',
+  peerSessionTitle('line one\n\nline   two') === 'line one line two',
+  String(peerSessionTitle('line one\n\nline   two')))
 
 // The permission state is what a peer inherits that cannot be seen from any other
 // field, and the host is the only side that can capture it. It has to survive the
@@ -480,6 +521,28 @@ const looked = await waking.wake(SELF, 'session-away', { resume: false })
 check('resume:false answers without touching the host',
   looked.resumed === false && looked.resident === false && resumes.length === 1, JSON.stringify(looked))
 
+// A peer started before this plugin titled sessions is still an "untitled" row in
+// the session list. Naming is separate from waking on purpose: a peer that never
+// left is never woken, and it is exactly the one a caller is looking at.
+const namedPeers: { sessionId: string; title: string }[] = []
+const namingHost = {
+  ...wakeHost,
+  nameSession: (input: { sessionId: string; title: string }) => { namedPeers.push(input); return true },
+}
+const naming = new PeerService(namingHost as never, 100)
+check('an untitled peer is named from the name its starter recorded',
+  await naming.ensureTitle(SELF, 'session-away') === true
+  && namedPeers.at(-1)?.sessionId === 'session-away' && namedPeers.at(-1)?.title === 'away-one',
+  JSON.stringify(namedPeers))
+check('a peer with no recorded name is left untitled rather than given a made-up one',
+  await naming.ensureTitle(SELF, 'session-here') === false && namedPeers.length === 1, JSON.stringify(namedPeers))
+check('a peer another session started is not named by this one',
+  await naming.ensureTitle(SELF, 'session-foreign') === false && namedPeers.length === 1, JSON.stringify(namedPeers))
+check('a session this plugin never started is not named',
+  await naming.ensureTitle(SELF, 'session-nobody') === false && namedPeers.length === 1, JSON.stringify(namedPeers))
+check('a host with no naming hook reports that no title was written',
+  await new PeerService(wakeHost as never, 100).ensureTitle(SELF, 'session-away') === false)
+
 let foreignError = ''
 try {
   await waking.wake(SELF, 'session-foreign')
@@ -536,8 +599,8 @@ interface PendingLike {
 const wakeSurface = (
   owed: readonly PendingLike[],
   options: { resident?: boolean; receiptThrows?: boolean } = {},
-): { tools: Map<string, ToolLike>; calls: { resume: boolean[]; flushed: string[]; observed: number } } => {
-  const calls = { resume: [] as boolean[], flushed: [] as string[], observed: 0 }
+): { tools: Map<string, ToolLike>; calls: { resume: boolean[]; flushed: string[]; observed: number; titled: string[] } } => {
+  const calls = { resume: [] as boolean[], flushed: [] as string[], observed: 0, titled: [] as string[] }
   let pendingCalls = 0
   const service = {
     // First read is what the ledger owes; the second is what is still owed after
@@ -567,6 +630,12 @@ const wakeSurface = (
       if (options.receiptThrows === true) throw new Error('fixture: no session snapshot')
       return { kind: 'running' as const }
     },
+    // Naming is a courtesy step, so the stub answers that nothing was written and
+    // records the ask: what is pinned is that the tool tries, not that a title lands.
+    ensureTitle: async (_self: string, target: string) => {
+      calls.titled.push(target)
+      return false
+    },
   }
   return { tools: toolSurface(service, peerService, undefined), calls }
 }
@@ -593,11 +662,15 @@ check('the output reports the resumed session', owedOutput.includes('woke sessio
 check('the output observes the first turn a wakeup hand-off asked for',
   owedRun.calls.observed === 1 && owedOutput.includes('first turn is running'), owedOutput)
 check('the output states that no budget was spent', owedOutput.includes('no peer budget'), owedOutput)
+check('the tool offers the peer its title as part of waking it', owedRun.calls.titled.includes('session-away'),
+  JSON.stringify(owedRun.calls.titled))
 
 const hereRun = wakeSurface([{ report: 'R-0051', status: 'open', mode: 'wakeup' }], { resident: true })
 const hereOutput = await hereRun.tools.get('peer_wake')?.execute({ session: 'session-here' }, { agent: { id: SELF } }) ?? ''
 check('a resident peer is not resumed by the tool', hereRun.calls.resume.length === 1 && hereRun.calls.resume[0] === false,
   JSON.stringify(hereRun.calls.resume))
+check('a resident peer is still offered a title, because a peer that never left is never woken',
+  hereRun.calls.titled.includes('session-here'), JSON.stringify(hereRun.calls.titled))
 check('a resident wake still delivers what is owed', hereOutput.includes('already resident') && hereOutput.includes('R-0051'),
   hereOutput)
 
