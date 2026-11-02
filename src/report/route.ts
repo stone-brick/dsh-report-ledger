@@ -30,7 +30,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { WorktreeReport } from './maintenance.ts'
-import type { TimelinePayload } from './timeline.ts'
+import type { TimelinePayload, TimelineScope } from './timeline.ts'
 import type { ReportFrontMatter, RouteHop } from './types.ts'
 
 /** Path of the subtree + digest listing. */
@@ -74,11 +74,12 @@ export interface ReportDetail {
 /** Data sources the handlers read. */
 export interface RouteDeps {
   /**
-   * Assemble the timeline payload for one root session.
-   * @param root - root session id.
+   * Assemble the timeline payload.
+   * @param scope - the whole ledger, or one session tree.
+   * @param root - root session id; ignored when the scope is the whole ledger.
    * @returns the payload.
    */
-  timeline(root: string): Promise<TimelinePayload>
+  timeline(scope: TimelineScope, root: string): Promise<TimelinePayload>
   /**
    * Read one report in full.
    * @param id - report id.
@@ -233,12 +234,24 @@ function guarded(
  */
 export function createTimelineHandler(deps: RouteDeps): (request: IncomingMessage, response: ServerResponse) => Promise<void> {
   return guarded(deps.log, async (url, response) => {
+    const requested = url.searchParams.get('scope')
+    if (requested !== null && requested !== 'tree' && requested !== 'all') {
+      refuse(response, 400, 'invalid-scope')
+      return
+    }
+    if (requested === 'all') {
+      // A global read addresses the ledger, not a session, so `root` is not read at
+      // all: requiring one would make the whole-ledger view depend on whichever
+      // session happened to be open when it was requested.
+      writeJson(response, 200, { ok: true, value: await deps.timeline('all', '') })
+      return
+    }
     const root = url.searchParams.get('root') ?? ''
     if (root === '' || root.length > MAX_ID_LENGTH || !SESSION_ID.test(root)) {
       refuse(response, 400, 'invalid-root')
       return
     }
-    writeJson(response, 200, { ok: true, value: await deps.timeline(root) })
+    writeJson(response, 200, { ok: true, value: await deps.timeline('tree', root) })
   })
 }
 

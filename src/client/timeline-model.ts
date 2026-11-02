@@ -21,6 +21,8 @@ export type Row =
     readonly title?: string
     readonly delegated: boolean
     readonly live: boolean
+    /** Working directory the session was created in; the global view's project column. */
+    readonly cwd?: string
   }
   | {
     readonly kind: 'report'
@@ -102,6 +104,7 @@ export function buildRows(payload: TimelinePayload, basis: ReportTimeBasis = 'cr
       delegated: node.delegated,
       live: node.live,
       ...(node.title === undefined ? {} : { title: node.title }),
+      ...(node.cwd === undefined ? {} : { cwd: node.cwd }),
     })
   }
   for (const front of payload.reports) {
@@ -320,6 +323,19 @@ export const LEASE_TONE: Record<LeaseState, 'success' | 'info' | 'neutral'> = {
 function lastSegment(path: string): string {
   const parts = path.split(/[\\/]/)
   return parts[parts.length - 1] || path
+}
+
+/**
+ * The project a session belongs to, for the global view's row label.
+ *
+ * A session header records an absolute working directory; the last segment is the
+ * project name a human recognizes, while the full path stays on the tooltip — a
+ * row has to stay one scannable line.
+ * @param cwd - the session's working directory.
+ * @returns the last path segment, or the original path when it ends in a separator.
+ */
+export function projectName(cwd: string): string {
+  return lastSegment(cwd)
 }
 
 /**

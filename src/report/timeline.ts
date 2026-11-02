@@ -1,5 +1,6 @@
 /**
- * Timeline assembly: the recursive session subtree plus the reports that touch it.
+ * Timeline assembly: the recursive session subtree plus the reports that touch it,
+ * and the same assembly over the whole ledger when the reader asks for it.
  *
  * Kept free of any harness object so the whole thing is unit-testable: the
  * caller adapts `ctx.sessionQuery` and the ledger into the small structural
@@ -15,12 +16,33 @@
 import { leaseState, type LeaseState } from './lease.ts'
 import type { ReportFrontMatter, RouteHop } from './types.ts'
 
+/**
+ * Which slice of the ledger a payload describes.
+ *
+ * `tree` is the session subtree a tab was opened in — the default, and the only
+ * scope that can draw a collaboration as a tree. `all` is the whole ledger: every
+ * report, whatever session wrote it and whatever project it came from.
+ */
+export type TimelineScope = 'tree' | 'all'
+
+/**
+ * The `root` a global payload carries.
+ *
+ * A global payload has no tree root, and `root` is a required field of the wire
+ * contract. A sentinel is better than an empty string: the client compares ids
+ * against it (the canvas refuses to "enter" the current root), and `''` would
+ * compare equal to a view that has no session bound yet.
+ */
+export const ALL_SCOPE_ROOT = '*'
+
 /** The session-header fields the timeline reads. */
 export interface SessionHeaderLike {
   /** Session id. */
   readonly id: string
   /** Session this one was forked from or spawned by. */
   readonly parentSession?: string
+  /** Absolute working directory the session was created in, when the harness recorded one. */
+  readonly cwd?: string
   /** Creation time, Unix epoch milliseconds. */
   readonly createdAt?: number
   /** Delegation depth; absent (zero) for a top-level session. */
@@ -43,10 +65,12 @@ export interface SessionRecordLike {
 export interface SessionNode {
   /** Session id. */
   readonly id: string
-  /** Parent session id, absent for the root. */
+  /** Parent session id, absent for the root and absent throughout a global payload. */
   readonly parentId?: string
   /** Depth relative to the requested root (the root is 0). */
   readonly depth: number
+  /** Absolute working directory the session was created in; the global view's project column. */
+  readonly cwd?: string
   /** Resolved display title, when the title service supplied one. */
   readonly title?: string
   /** Whether the session is a delegated child. */
@@ -83,13 +107,23 @@ export interface WorktreeLane {
 
 /** The complete payload the tab renders. */
 export interface TimelinePayload {
-  /** The session the timeline was requested for. */
+  /** Which slice of the ledger this payload describes. */
+  readonly scope: TimelineScope
+  /** The session the timeline was requested for; {@link ALL_SCOPE_ROOT} for a global payload. */
   readonly root: string
   /** When this payload was assembled, Unix epoch milliseconds. */
   readonly generatedAt: number
-  /** The subtree, root first, DFS pre-order. */
+  /**
+   * The subtree, root first, DFS pre-order.
+   *
+   * In a global payload there is no subtree: these are the sessions that appear
+   * somewhere in the ledger (as author, addressee, copy, or co-author), each at
+   * depth 0 and without a parent link, so a session is framed exactly when it has
+   * a report to show. A session that never touched a report is not part of the
+   * ledger and has no business in this list.
+   */
   readonly sessions: readonly SessionNode[]
-  /** Every report touching any session in the subtree, newest activity first. */
+  /** The reports in scope, newest activity first. */
   readonly reports: readonly ReportFrontMatter[]
   /** The checkouts those reports are bound to, ordered by branch then report. */
   readonly worktrees: readonly WorktreeLane[]
@@ -170,24 +204,42 @@ export function buildSubtree(
     visited.add(id)
     const record = byId.get(id)
     if (record === undefined) return
-    const header = record.header
-    const title = titles.get(id)
-    nodes.push({
-      id,
-      depth,
-      delegated: header.origin === 'subagent' || (header.delegationDepth ?? 0) > 0,
-      live: record.live === true,
-      ...(typeof header.parentSession === 'string' && header.parentSession !== ''
-        ? { parentId: header.parentSession }
-        : {}),
-      ...(title === undefined ? {} : { title }),
-      ...(typeof header.agentPreset === 'string' ? { agentPreset: header.agentPreset } : {}),
-      ...(typeof header.createdAt === 'number' ? { createdAt: header.createdAt } : {}),
-    })
+    nodes.push(sessionNode(record, depth, titles.get(id), true))
     for (const child of children.get(id) ?? []) walk(child.header.id, depth + 1)
   }
   walk(root, 0)
   return nodes
+}
+
+/**
+ * Turn one record into a renderable node.
+ *
+ * The single place the node's field set is decided, so the subtree and the global
+ * listing cannot drift: a field added for one and forgotten for the other would
+ * be a silently missing column rather than an error.
+ * @param record - the session record.
+ * @param depth - depth to render at.
+ * @param title - resolved display title, if any.
+ * @param withParent - whether the node keeps its parent link. A global payload
+ *   drops it: the parent is another frame at depth 0, so a link would describe a
+ *   hierarchy the payload deliberately does not have.
+ * @returns the node.
+ */
+function sessionNode(record: SessionRecordLike, depth: number, title: string | undefined, withParent: boolean): SessionNode {
+  const header = record.header
+  return {
+    id: header.id,
+    depth,
+    delegated: header.origin === 'subagent' || (header.delegationDepth ?? 0) > 0,
+    live: record.live === true,
+    ...(withParent && typeof header.parentSession === 'string' && header.parentSession !== ''
+      ? { parentId: header.parentSession }
+      : {}),
+    ...(title === undefined ? {} : { title }),
+    ...(typeof header.agentPreset === 'string' ? { agentPreset: header.agentPreset } : {}),
+    ...(typeof header.cwd === 'string' && header.cwd !== '' ? { cwd: header.cwd } : {}),
+    ...(typeof header.createdAt === 'number' ? { createdAt: header.createdAt } : {}),
+  }
 }
 
 /**
@@ -206,15 +258,24 @@ export function reportsForSubtree(
   subtree: readonly SessionNode[],
 ): ReportFrontMatter[] {
   const members = new Set(subtree.map((node) => node.id))
-  return reports
-    .filter((front) => front.from !== undefined && (
-      members.has(front.from)
-      || front.to.some((id) => members.has(id))
-      || front.cc.some((id) => members.has(id))
-      || front.authors.some((id) => members.has(id))
-    ))
-    .slice()
-    .sort((left, right) => right.updated - left.updated || right.report.localeCompare(left.report))
+  return newestFirst(reports.filter((front) => front.from !== undefined && (
+    members.has(front.from)
+    || front.to.some((id) => members.has(id))
+    || front.cc.some((id) => members.has(id))
+    || front.authors.some((id) => members.has(id))
+  )))
+}
+
+/**
+ * The ledger's listing order: newest activity first, report id as the tie-break.
+ *
+ * Shared by the tree and the global listing so the two cannot sort the same
+ * ledger differently — a reader switching scope should see the same order.
+ * @param reports - the digests to order.
+ * @returns a new, ordered array.
+ */
+function newestFirst(reports: readonly ReportFrontMatter[]): ReportFrontMatter[] {
+  return [...reports].sort((left, right) => right.updated - left.updated || right.report.localeCompare(left.report))
 }
 
 /** Inputs the timeline needs, injected so the assembly stays harness-free. */
@@ -260,16 +321,23 @@ export function withTitles(nodes: readonly SessionNode[], titles: ReadonlyMap<st
 }
 
 /**
- * Assemble the payload for one root session.
+ * Assemble the payload for one root session, or for the whole ledger.
  *
  * Titles are resolved only for the sessions that survive the subtree walk: on a
  * long-lived deployment the session corpus is far larger than one collaboration,
  * and a title is cosmetic while the tree is not.
  * @param deps - data sources.
- * @param root - the requested root session id.
+ * @param root - the requested root session id; ignored when `scope` is `all`.
+ * @param scope - which slice of the ledger to assemble; `tree` by default.
  * @returns the payload; `sessions` is empty when the root is unknown.
  */
-export async function buildTimeline(deps: TimelineDeps, root: string): Promise<TimelinePayload> {
+export async function buildTimeline(
+  deps: TimelineDeps,
+  root: string,
+  scope: TimelineScope = 'tree',
+): Promise<TimelinePayload> {
+  const allReports = await deps.listReports()
+  if (scope === 'all') return await buildGlobalTimeline(deps, allReports)
   const records = await deps.listSessionRecords()
   // The caller usually names the session it is looking at, not the tree it belongs
   // to. Resolve upward first: a delegated worker's reports point at its parent and
@@ -285,7 +353,6 @@ export async function buildTimeline(deps: TimelineDeps, root: string): Promise<T
     treeRoot = parent
   }
   const base = buildSubtree(records, treeRoot)
-  const allReports = await deps.listReports()
   // One hop out: a report in this tree often addresses sessions in *another* tree of
   // the same workspace (a peer the user started separately). They are real sessions,
   // so give them frames instead of piling every wire onto the out-of-tree frame; the
@@ -301,23 +368,59 @@ export async function buildTimeline(deps: TimelineDeps, root: string): Promise<T
   const extra: SessionNode[] = [...mentioned].sort().flatMap((id) => {
     const record = byId.get(id)
     if (record === undefined) return []
-    const header = record.header
-    return [{
-      id,
-      depth: baseDepth + 1,
-      delegated: header.origin === 'subagent' || (header.delegationDepth ?? 0) > 0,
-      live: record.live === true,
-      ...(typeof header.parentSession === 'string' && header.parentSession !== ''
-        ? { parentId: header.parentSession }
-        : {}),
-      ...(typeof header.agentPreset === 'string' ? { agentPreset: header.agentPreset } : {}),
-      ...(typeof header.createdAt === 'number' ? { createdAt: header.createdAt } : {}),
-    }]
+    return [sessionNode(record, baseDepth + 1, undefined, true)]
   })
   const bare = [...base, ...extra]
   const titles = bare.length === 0 ? new Map<string, string>() : await deps.readTitles(bare.map((node) => node.id))
   const sessions = withTitles(bare, titles)
   const reports = reportsForSubtree(allReports, sessions)
   const worktrees = await worktreeLanes(reports, deps.readHops)
-  return { root: treeRoot, generatedAt: Date.now(), sessions, reports, worktrees }
+  return { scope: 'tree', root: treeRoot, generatedAt: Date.now(), sessions, reports, worktrees }
+}
+
+/**
+ * Assemble the whole-ledger payload.
+ *
+ * The tree view answers "what happened in this collaboration"; this one answers
+ * "what is in the ledger", with no session subtree to anchor it. Two consequences
+ * follow, and both are deliberate:
+ *
+ *  - **Every report is listed.** A report it cannot resolve a session for is not
+ *    dropped: the ledger holds it, so the reader gets it. That is also what keeps
+ *    a report whose session was deleted from disappearing with its session.
+ *  - **Sessions are framed only when the ledger mentions them.** Listing every
+ *    session the harness knows would bury 68 reports under 264 empty frames; a
+ *    session earns a frame by participating in some report.
+ *
+ * The root is {@link ALL_SCOPE_ROOT}: there is no real root, and the canvas
+ * compares ids against it (so it must not accidentally equal a session id).
+ * @param deps - data sources.
+ * @param allReports - every digest, already read.
+ * @returns the global payload.
+ */
+async function buildGlobalTimeline(
+  deps: TimelineDeps,
+  allReports: readonly ReportFrontMatter[],
+): Promise<TimelinePayload> {
+  const records = await deps.listSessionRecords()
+  const byId = new Map(records.map((record) => [record.header.id, record]))
+  const reports = newestFirst(allReports)
+  const members = new Set<string>()
+  for (const front of reports) {
+    for (const id of [front.from, ...front.to, ...front.cc, ...front.authors]) {
+      if (id !== undefined && byId.has(id)) members.add(id)
+    }
+  }
+  const participants = [...members]
+    .flatMap((id) => {
+      const record = byId.get(id)
+      return record === undefined ? [] : [record]
+    })
+    .sort((left, right) => (left.header.createdAt ?? 0) - (right.header.createdAt ?? 0)
+      || left.header.id.localeCompare(right.header.id))
+  const nodes = participants.map((record) => sessionNode(record, 0, undefined, false))
+  const titles = nodes.length === 0 ? new Map<string, string>() : await deps.readTitles(nodes.map((node) => node.id))
+  const sessions = withTitles(nodes, titles)
+  const worktrees = await worktreeLanes(reports, deps.readHops)
+  return { scope: 'all', root: ALL_SCOPE_ROOT, generatedAt: Date.now(), sessions, reports, worktrees }
 }

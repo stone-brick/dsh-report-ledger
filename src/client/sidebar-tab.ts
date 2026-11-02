@@ -50,7 +50,7 @@ import { CardgraphView } from './CardgraphView.tsx'
 import { activateReportTab } from './report-tab.ts'
 import { selection } from './selection-bridge.ts'
 import { buildRows, sessionTitles } from './timeline-model.ts'
-import { useTimeline } from './timeline-source.ts'
+import { useLedgerScope, useTimeline } from './timeline-source.ts'
 import type { Translate } from './ReportsView.tsx'
 
 /** This type's identity in the tab system: unique, and the key both seats use. */
@@ -162,7 +162,11 @@ const stackFull: Record<string, string> = { flex: '1 1 auto', minHeight: '0' }
 function bodyFor(t: Translate): (props: TabBodyProps) => ReactElement {
   return function LedgerCanvasBody(props: TabBodyProps): ReactElement {
     const sessionId = typeof props.sessionId === 'string' ? props.sessionId : ''
-    const { payload, error } = useTimeline(sessionId)
+    // The canvas follows the same scope the list does; a docked canvas rendering a
+    // different slice from the tab beside it is the drift the shared read path
+    // exists to prevent.
+    const scope = useLedgerScope()
+    const { payload, error } = useTimeline(sessionId, scope)
     /**
      * What the list has open.
      *
@@ -203,7 +207,7 @@ function bodyFor(t: Translate): (props: TabBodyProps) => ReactElement {
       if (error !== undefined) return createElement('div', { style: muted }, t('view.error', { code: error }))
       return createElement('div', { style: muted }, t('view.loading'))
     }
-    if (reports.length === 0) return createElement('div', { style: muted }, t('view.empty'))
+    if (reports.length === 0) return createElement('div', { style: muted }, t(scope === 'all' ? 'view.emptyAll' : 'view.empty'))
 
     // One container and one child: no open/closed layout to swap in and out, so
     // the drawing keeps its zoom, pan and drill state across a click on a card —

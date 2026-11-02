@@ -38,6 +38,7 @@ import {
   isFiltering,
   laneIndex,
   LEASE_TONE,
+  projectName,
   reportIds,
   sessionDepths,
   sessionTitles,
@@ -53,7 +54,7 @@ import {
 import { ReportDetailView } from './ReportDetailView.tsx'
 import type { PathOpener } from './path-opener.ts'
 import { selection } from './selection-bridge.ts'
-import { useReportDetail, useTimeline } from './timeline-source.ts'
+import { ledgerScope, useLedgerScope, useReportDetail, useTimeline } from './timeline-source.ts'
 import { fill, stamp } from './format.ts'
 import { HOP_LABEL, LEASE_HINT, STATUS_LABEL, STATUS_TONE, type ReportLedgerKey } from './locales.ts'
 import { SEARCH_CLASS } from './styles.ts'
@@ -101,9 +102,15 @@ function rememberedStatus(): StatusFilter {
  */
 export function ReportsView(props: ReportsViewProps): ReactElement {
   const { sessionId, t, opener } = props
+  /**
+   * The shared scope, not local state: the right-column canvas reads the same
+   * value, and two surfaces on one ledger must not disagree about which slice of
+   * it they are showing.
+   */
+  const scope = useLedgerScope()
   // One read path for both surfaces: the canvas tab and this view consume the
   // same hook, so polling, visibility handling and failure semantics cannot drift.
-  const { payload, error, refresh: refreshTimeline } = useTimeline(sessionId ?? '')
+  const { payload, error, refresh: refreshTimeline } = useTimeline(sessionId ?? '', scope)
   // Refreshing the timeline and re-reading the open detail are two different
   // things: the background poll must move the first without touching the second,
   // or the panel would blink back to "reading the transfer path" every interval
@@ -314,6 +321,12 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
     gap: '6px',
     marginBottom: '10px',
   }
+  /** The two-pill scope switch; the pills keep their own shell styling. */
+  const scopeGroup: Record<string, string | number> = {
+    display: 'inline-flex',
+    gap: '4px',
+    marginRight: '6px',
+  }
   /** Chips sit next to a label; the shell's tags carry no spacing of their own. */
   const tagRow: Record<string, string | number> = {
     display: 'inline-flex',
@@ -404,12 +417,31 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
         <span style={summary}>
           {filtering
             ? t('filter.showing', { visible: visibleReportCount, total: counts.all })
-            : t('view.summary', { sessions: payload.sessions.length, reports: payload.reports.length })}
+            : scope === 'all'
+              // A global payload's "sessions" count is the number of sessions the
+              // ledger mentions, not a tree size: showing it beside the report
+              // count would invite reading it as a subtree that does not exist.
+              ? t('view.summaryAll', { reports: payload.reports.length })
+              : t('view.summary', { sessions: payload.sessions.length, reports: payload.reports.length })}
         </span>
         <Button variant="outline" icon={<IconRefreshOutlineRegular size={16} />} onClick={refresh}>{t('view.refresh')}</Button>
       </div>
 
       <div style={tools} title={t('filter.hint')}>
+        {/* The scope switch sits before the status chips because it changes what
+            the chips count: one tree's reports, or the whole ledger on disk. */}
+        <span style={scopeGroup} role="group" aria-label={t('scope.hint')} title={t('scope.hint')}>
+          {(['tree', 'all'] as const).map((candidate) => (
+            <Pill
+              key={candidate}
+              active={scope === candidate}
+              aria-pressed={scope === candidate}
+              onClick={() => { ledgerScope.set(candidate) }}
+            >
+              {t(candidate === 'tree' ? 'scope.tree' : 'scope.all')}
+            </Pill>
+          ))}
+        </span>
         {chips.map((candidate) => (
           <Pill
             key={candidate}
@@ -440,7 +472,9 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
         </Tooltip>
       </div>
 
-      {empty === 'no-reports' ? <div style={muted}>{t('view.empty')}</div> : null}
+      {empty === 'no-reports'
+        ? <div style={muted}>{t(scope === 'all' ? 'view.emptyAll' : 'view.empty')}</div>
+        : null}
       {empty === 'filtered-out' ? <div style={muted}>{t('filter.none')}</div> : null}
 
       {visible.map((row) => {
@@ -470,6 +504,13 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
                   <span style={time}>{shortId(row.id)}</span>
                 </Tooltip>
               )}
+              {/* A global list mixes projects, so each session row names its own.
+                  The full path is on the tooltip; the row stays one line. */}
+              {scope === 'all' && row.cwd !== undefined ? (
+                <Tooltip label={row.cwd} side="right" delayMs={400}>
+                  <span style={time}>{projectName(row.cwd)}</span>
+                </Tooltip>
+              ) : null}
               <span style={time}>{stamp(row.at)}</span>
             </div>
           )

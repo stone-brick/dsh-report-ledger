@@ -322,6 +322,8 @@ interface SessionHeaderLike {
   readonly id: string;
   /** Session this one was forked from or spawned by. */
   readonly parentSession?: string;
+  /** Absolute working directory the session was created in, when the harness recorded one. */
+  readonly cwd?: string;
   /** Creation time, Unix epoch milliseconds. */
   readonly createdAt?: number;
   /** Delegation depth; absent (zero) for a top-level session. */

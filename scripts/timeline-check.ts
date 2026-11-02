@@ -26,7 +26,7 @@ const check = (label: string, ok: boolean, detail = ''): void => { checks.push([
 const at = (n: number): number => 1_700_000_000_000 + n * 1000
 const records = [
   { header: { id: 'session-root', createdAt: at(1) }, live: true },
-  { header: { id: 'session-a', parentSession: 'session-root', origin: 'subagent', delegationDepth: 1, createdAt: at(2) }, live: true },
+  { header: { id: 'session-a', parentSession: 'session-root', origin: 'subagent', delegationDepth: 1, createdAt: at(2), cwd: 'D:/Projects/alpha' }, live: true },
   { header: { id: 'session-g', parentSession: 'session-a', delegationDepth: 2, createdAt: at(4) }, live: false },
   { header: { id: 'session-b', parentSession: 'session-root', delegationDepth: 1, createdAt: at(3) }, live: false },
   { header: { id: 'session-other', createdAt: at(0) }, live: false },
@@ -265,12 +265,12 @@ const emptyWorktreeReport = {
 }
 
 const deps = {
-  timeline: async (root: string) => buildTimeline({
+  timeline: async (scope: 'tree' | 'all', root: string) => buildTimeline({
     listSessionRecords: async () => records,
     readTitles: async () => new Map(),
     listReports: async () => allReports,
     readHops: readHopsOf,
-  }, root),
+  }, root, scope),
   report: async (id: string) => (id === 'R-0001'
     ? { front: allReports[0], hops: [], pending: ['session-ghost'], body: 'body text', path: '/ledger/R-0001.md' }
     : undefined),
@@ -312,6 +312,25 @@ for (const badRoot of ['', '../etc/passwd', 'a b', 'x'.repeat(201)]) {
   await timelineHandler(request({ url: `/api/report-ledger/timeline?root=${encodeURIComponent(badRoot)}`, headers: { host: '127.0.0.1:3080' } }), bad.res)
   check(`root ${JSON.stringify(badRoot.slice(0, 12))} answers 400`, bad.captured.status === 400, String(bad.captured.status))
 }
+
+// The global read addresses the ledger, not a session: it must not need a root,
+// and it must not be talked into reading one. A scope value it does not know is a
+// client bug, not a tree with a strange name, so it is refused rather than guessed.
+const globalRead = response()
+await timelineHandler(request({ url: '/api/report-ledger/timeline?scope=all', headers: { host: '127.0.0.1:3080' } }), globalRead.res)
+check('a global read needs no root',
+  globalRead.captured.status === 200 && globalRead.captured.body.includes('"scope":"all"'),
+  `${globalRead.captured.status} ${globalRead.captured.body.slice(0, 120)}`)
+const globalWithRoot = response()
+await timelineHandler(request({ url: '/api/report-ledger/timeline?scope=all&root=session-root', headers: { host: '127.0.0.1:3080' } }), globalWithRoot.res)
+check('a global read ignores a root it was given',
+  globalWithRoot.captured.status === 200 && globalWithRoot.captured.body.includes('"root":"*"'),
+  `${globalWithRoot.captured.status} ${globalWithRoot.captured.body.slice(0, 120)}`)
+const badScope = response()
+await timelineHandler(request({ url: '/api/report-ledger/timeline?scope=everything', headers: { host: '127.0.0.1:3080' } }), badScope.res)
+check('an unknown scope answers 400',
+  badScope.captured.status === 400 && badScope.captured.body.includes('invalid-scope'),
+  `${badScope.captured.status} ${badScope.captured.body}`)
 
 const goodReport = response()
 await reportHandler(request({ url: '/api/report-ledger/report?id=R-0001', headers: { host: '127.0.0.1:3080' } }), goodReport.res)
@@ -380,6 +399,40 @@ const widened = await buildTimeline({
   readHops: async () => [],
 }, 'session-root')
 check('a report to a known outside session brings its frame', widened.sessions.some((node) => node.id === 'session-other'))
+
+// ---------------------------------------------------------------------------
+// The global scope: the whole ledger, with no subtree to anchor it
+// ---------------------------------------------------------------------------
+// Placed after the hop-count assertions on purpose: a global build reads a lane's
+// hops for every bound report, and those reads must not be mistaken for the tree
+// build's cost.
+const global = await buildTimeline({
+  listSessionRecords: async () => records,
+  readTitles: async () => new Map(),
+  listReports: async () => allReports,
+  readHops: async () => [],
+}, '', 'all')
+check('a global payload declares its scope', global.scope === 'all')
+check('a global payload has no tree root', global.root === '*')
+check('a global payload lists every report, in the ledger order',
+  global.reports.map((front) => front.report).join() === 'R-0002,R-0003,R-0004,R-0001,R-0005',
+  global.reports.map((front) => front.report).join())
+// Only sessions the ledger mentions get a frame: 264 empty frames would bury the
+// reports, and a session that never touched a report is not part of the ledger.
+check('global sessions are exactly the sessions the ledger mentions',
+  global.sessions.map((node) => node.id).sort().join() === 'session-a,session-b,session-g,session-other,session-root',
+  global.sessions.map((node) => node.id).join())
+check('a session id the store cannot resolve invents no frame',
+  !global.sessions.some((node) => node.id === 'session-outsider'))
+check('global frames sit at depth zero with no parent link',
+  global.sessions.every((node) => node.depth === 0 && node.parentId === undefined))
+check('a report from an unresolvable session is still listed',
+  global.reports.some((front) => front.report === 'R-0003'))
+check('global frames keep the session working directory',
+  global.sessions.find((node) => node.id === 'session-a')?.cwd === 'D:/Projects/alpha',
+  String(global.sessions.find((node) => node.id === 'session-a')?.cwd))
+check('every bound report contributes a lane, in or out of any tree', global.worktrees.length === 4,
+  String(global.worktrees.length))
 
 let failed = 0
 for (const [label, ok, detail] of checks) {

@@ -55,7 +55,7 @@ import { buildWorktreeReport } from './report/maintenance.ts'
 import { DEFAULT_MAX_PEERS, PeerService, type PeerHost, type PeerPermission, type PeerReceipt, type WorkspaceRegistration } from './report/peer.ts'
 import { REPORT_PATH, TIMELINE_PATH, WORKTREES_PATH, createReportHandler, createTimelineHandler, createWorktreesHandler, type ReportDetail } from './report/route.ts'
 import { ReportService, type ReportServiceHost } from './report/service.ts'
-import { buildTimeline, type SessionRecordLike } from './report/timeline.ts'
+import { buildTimeline, type SessionRecordLike, type TimelineScope } from './report/timeline.ts'
 import { registerReportTools } from './report/tools.ts'
 
 /** Plugin config, supplied by the composition row. */
@@ -550,12 +550,16 @@ function toSessionRecord(entry: unknown): SessionRecordLike | undefined {
   const parentSession = str(fields, 'parentSession')
   const origin = str(fields, 'origin')
   const agentPreset = str(fields, 'agentPreset')
+  const cwd = str(fields, 'cwd')
   return {
     header: {
       id,
       ...(parentSession === undefined ? {} : { parentSession }),
       ...(origin === undefined ? {} : { origin }),
       ...(agentPreset === undefined ? {} : { agentPreset }),
+      // The global ledger view groups reports from different projects, and `cwd`
+      // is the only field on a session header that names one.
+      ...(cwd === undefined ? {} : { cwd }),
       ...(typeof fields.createdAt === 'number' ? { createdAt: fields.createdAt } : {}),
       ...(typeof fields.delegationDepth === 'number' ? { delegationDepth: fields.delegationDepth } : {}),
     },
@@ -1404,12 +1408,12 @@ export function mountHost(ctx: Context, config?: Config): HostHalf {
     const webServer = scoped.get('webServer') as WebServerLike | undefined
     if (webServer === undefined) return
     const deps = {
-      timeline: async (root: string) => buildTimeline({
+      timeline: async (scope: TimelineScope, root: string) => buildTimeline({
         listSessionRecords: () => host.listSessionRecords(),
         readTitles: (ids: readonly string[]) => host.readTitles(ids),
         listReports: () => listReports(),
         readHops: (report: string) => readHops(report),
-      }, root),
+      }, root, scope),
       report: readDetail,
       worktrees: async () => buildWorktreeReport({
         listReports: () => listReports(),

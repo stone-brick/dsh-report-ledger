@@ -11,14 +11,84 @@
  * @module dsh-report-ledger/client/timeline-source
  */
 
-import { useCallback, useEffect, useState } from 'react'
-import type { ReportDetail, TimelinePayload } from '../shared/wire.ts'
+import { useCallback, useEffect, useState, useSyncExternalStore } from 'react'
+import type { ReportDetail, TimelinePayload, TimelineScope } from '../shared/wire.ts'
 
 /** The timeline read endpoint, addressed by the tree's root session. */
 export const TIMELINE_URL = '/api/report-ledger/timeline'
 
 /** One report's detail: its transfer path and its body. */
 export const REPORT_URL = '/api/report-ledger/report'
+
+/** Storage key for the remembered ledger scope. */
+const SCOPE_KEY = 'dsh.reportLedger.scope.v1'
+
+/**
+ * Read the remembered scope, tolerating absent or restricted storage.
+ *
+ * A page with storage blocked simply starts on the tree scope: the toggle still
+ * works for the session, it just is not remembered across reloads.
+ * @returns the stored scope, or `tree`.
+ */
+function readStoredScope(): TimelineScope {
+  try {
+    const raw = globalThis.localStorage?.getItem(SCOPE_KEY)
+    if (raw === 'all' || raw === 'tree') return raw
+  } catch {
+    // A restricted storage just means the choice is not remembered.
+  }
+  return 'tree'
+}
+
+let scopeState: TimelineScope = readStoredScope()
+const scopeListeners = new Set<() => void>()
+
+/**
+ * The one thing the two surfaces must agree about without passing props.
+ *
+ * The conversation tab and the right-column canvas are separate React trees, so
+ * a scope chosen in one would leave the other reading a different slice of the
+ * ledger — the exact "one view quietly renders nothing" failure the shared read
+ * path exists to prevent. A module singleton plus `useSyncExternalStore` keeps
+ * them on one value, and localStorage keeps it across reloads.
+ */
+export const ledgerScope = {
+  /** @returns the current scope; stable until changed. */
+  get(): TimelineScope { return scopeState },
+
+  /**
+   * Subscribe to changes.
+   * @param listener - called after every change.
+   * @returns the unsubscribe function.
+   */
+  subscribe(listener: () => void): () => void {
+    scopeListeners.add(listener)
+    return () => { scopeListeners.delete(listener) }
+  },
+
+  /**
+   * Switch the scope both surfaces read.
+   * @param next - the scope to adopt.
+   */
+  set(next: TimelineScope): void {
+    if (next === scopeState) return
+    scopeState = next
+    try {
+      globalThis.localStorage?.setItem(SCOPE_KEY, next)
+    } catch {
+      // Remembering the scope is a convenience, never a requirement.
+    }
+    for (const listener of scopeListeners) listener()
+  },
+}
+
+/**
+ * Follow the shared ledger scope.
+ * @returns the scope, re-rendering the caller when either surface changes it.
+ */
+export function useLedgerScope(): TimelineScope {
+  return useSyncExternalStore(ledgerScope.subscribe, ledgerScope.get)
+}
 
 /**
  * How often a mounted view re-reads the timeline.
@@ -72,49 +142,58 @@ export interface TimelineRead {
 }
 
 /**
- * Follow one session tree's timeline for as long as the caller is mounted.
+ * Follow one slice of the ledger for as long as the caller is mounted.
  *
- * Reads on mount and on every session change, then on the poll cadence. Polling
- * stops while the page is hidden and a returning page catches up immediately, so
- * a background panel costs nothing and a foreground one is never behind.
- * @param sessionId - the tree's root session; an empty value reads nothing.
+ * Reads on mount and on every session or scope change, then on the poll cadence.
+ * Polling stops while the page is hidden and a returning page catches up
+ * immediately, so a background panel costs nothing and a foreground one is never
+ * behind.
+ * @param sessionId - the tree's root session; an empty value reads nothing in tree scope.
+ * @param scope - the session tree or the whole ledger.
  * @returns the latest payload, its error, and a manual refresh.
  */
-export function useTimeline(sessionId: string): TimelineRead {
+export function useTimeline(sessionId: string, scope: TimelineScope = 'tree'): TimelineRead {
   const [payload, setPayload] = useState<TimelinePayload | undefined>(undefined)
   const [loadedFor, setLoadedFor] = useState<string | undefined>(undefined)
   const [error, setError] = useState<string | undefined>(undefined)
   const [nonce, setNonce] = useState(0)
 
-  // A payload belongs to the session it was read for. Deriving the returned value
-  // from `loadedFor` means a session switch never shows the previous tree, even
-  // for the one frame before the new read lands.
-  useEffect(() => { setError(undefined) }, [sessionId])
+  // A payload belongs to the session AND the scope it was read for; a global
+  // listing is not a tree and must never be shown as one. The key makes a switch
+  // of either derive `undefined` for the frame before the new read lands, and the
+  // read effect below depends on it so both changes re-read.
+  const key = `${scope}:${scope === 'all' ? '' : sessionId}`
+  const target = scope === 'all' ? 'all' : sessionId
+
+  useEffect(() => { setError(undefined) }, [key])
 
   useEffect(() => {
-    if (sessionId === '') {
+    if (target === '') {
       setError('no-session')
       setLoadedFor(undefined)
       return undefined
     }
     let cancelled = false
     const controller = new AbortController()
+    const url = scope === 'all'
+      ? `${TIMELINE_URL}?scope=all`
+      : `${TIMELINE_URL}?root=${encodeURIComponent(sessionId)}`
     // Do not clear the error before the read succeeds. A transient host failure
     // would otherwise alternate the panel between drawing and error on every
     // poll, and every error remounts the canvas and throws its view state away.
-    getJson<TimelinePayload>(`${TIMELINE_URL}?root=${encodeURIComponent(sessionId)}`, controller.signal)
+    getJson<TimelinePayload>(url, controller.signal)
       .then((value) => {
         if (cancelled) return
         setPayload(value)
-        setLoadedFor(sessionId)
+        setLoadedFor(key)
         setError(undefined)
       })
       .catch((cause: unknown) => { if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause)) })
     return () => { cancelled = true; controller.abort() }
-  }, [sessionId, nonce])
+  }, [key, nonce]) // `key` encodes both scope and session, so the read follows either.
 
   useEffect(() => {
-    if (sessionId === '') return undefined
+    if (target === '') return undefined
     const tick = (): void => {
       if (globalThis.document?.visibilityState === 'hidden') return
       setNonce((value) => value + 1)
@@ -126,10 +205,10 @@ export function useTimeline(sessionId: string): TimelineRead {
       globalThis.clearInterval(timer)
       globalThis.document?.removeEventListener('visibilitychange', onVisibility)
     }
-  }, [sessionId])
+  }, [target])
 
   const refresh = useCallback(() => { setNonce((value) => value + 1) }, [])
-  return { payload: loadedFor === sessionId ? payload : undefined, error, refresh }
+  return { payload: loadedFor === key ? payload : undefined, error, refresh }
 }
 
 /** What one report's detail read returns. */
