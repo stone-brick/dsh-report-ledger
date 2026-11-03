@@ -527,6 +527,8 @@ interface WiringOptions {
 const wiring = (options: WiringOptions = {}) => {
   const tools: string[] = []
   const sections: string[] = []
+  /** The text each prompt section was registered with, so wiring can read it. */
+  const sectionTexts = new Map<string, unknown>()
   const listeners = new Map<string, (payload: { agent: { id: unknown } }) => unknown>()
   const routes = new Map<string, RouteHandler>()
   const registered: string[] = []
@@ -582,7 +584,13 @@ const wiring = (options: WiringOptions = {}) => {
     },
     logger: { warn: (message: string) => { warnings.push(message) } },
     tools: { register: (definition: { name: string }) => { tools.push(definition.name); return () => {} } },
-    systemPrompt: { section: (section: { name: string }) => { sections.push(section.name); return () => {} } },
+    systemPrompt: {
+      section: (section: { name: string; text?: unknown }) => {
+        sections.push(section.name)
+        sectionTexts.set(section.name, section.text)
+        return () => {}
+      },
+    },
     on: (name: string, listener: (payload: { agent: { id: unknown } }) => unknown) => {
       listeners.set(name, listener)
       return () => {}
@@ -597,7 +605,7 @@ const wiring = (options: WiringOptions = {}) => {
     },
   }
   return {
-    ctx, tools, sections, listeners, routes, registered, disposed, warnings, effects, provided,
+    ctx, tools, sections, sectionTexts, listeners, routes, registered, disposed, warnings, effects, provided,
     mount: (): void => { for (const injection of injections) injection(scoped) },
   }
 }
@@ -621,6 +629,15 @@ check('the model tools include the peer surface',
   wired.tools.join(','))
 check('the lease tool stays hidden while the worktree feature is off',
   !wired.tools.includes('report_lease'), wired.tools.join(','))
+// The tool schema list is the real gate, but the injected protocol is what a
+// model reads first: it must not advertise a tool or a parameter this
+// deployment does not expose, or the model probes it and gets `unknown tool`.
+const wiredProtocol = wired.sectionTexts.get('plugin:report-ledger')
+check('the protocol section says this deployment has no working trees',
+  typeof wiredProtocol === 'string'
+    && wiredProtocol.includes('本部署未启用工作区')
+    && !wiredProtocol.includes('worktree:true'),
+  typeof wiredProtocol === 'string' ? wiredProtocol.slice(-120) : String(wiredProtocol))
 check('both prompt sections are registered by default',
   wired.sections.join() === 'plugin:report-ledger,plugin:report-ledger:partnership', wired.sections.join())
 wired.effects[wired.effects.length - 1]?.()

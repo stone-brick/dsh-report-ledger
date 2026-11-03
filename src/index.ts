@@ -48,7 +48,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import { realpathNormalize } from '@deepseek-ai/dsh-workspace'
 import type { AgentLike } from './report/deliver.ts'
 import { pendingTargets } from './report/deliver.ts'
-import { PARTNERSHIP_SECTION_ORDER, PROTOCOL, SECTION_ORDER, partnershipText } from './report/guidance.ts'
+import { PARTNERSHIP_SECTION_ORDER, SECTION_ORDER, partnershipText, protocolText } from './report/guidance.ts'
 import { listReports, readHops, readReport, reportPath } from './report/ledger.ts'
 import { resolveWorktree, type WorktreeConfig, type WorktreeRuntime } from './report/allocate.ts'
 import { buildWorktreeReport } from './report/maintenance.ts'
@@ -1612,13 +1612,18 @@ export function mountHost(ctx: Context, config?: Config): HostHalf {
 
   if ((config?.announceToAgent ?? true) === false) return half
 
-  // The protocol is a plain string, byte-identical for every agent, so the
-  // shared part of the prompt stays a stable prefix in every scope.
+  // The protocol is plain text, byte-identical for every agent in this
+  // deployment, so the shared part of the prompt stays a stable prefix in every
+  // scope. It is deployment-aware in exactly one place: a deployment without
+  // working trees must not advertise `report_lease` or the `worktree`
+  // parameters, because the tool schema list (the real gate) does not expose
+  // them and a model that only read the prose would probe a tool that is not
+  // there and get a bare `unknown tool`.
   ctx.effect(
     () => ctx.systemPrompt.section({
       name: 'plugin:report-ledger',
       order: SECTION_ORDER,
-      text: PROTOCOL,
+      text: protocolText(worktree.enabled),
     }),
     'report-ledger: protocol section',
   )

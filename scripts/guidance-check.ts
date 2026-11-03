@@ -18,6 +18,7 @@ const {
   PROTOCOL,
   DELEGATED_HEADING,
   partnershipText,
+  protocolText,
   roleOf,
   parentOf,
 } = await import('../src/report/guidance.ts')
@@ -57,6 +58,21 @@ check('protocol warns that hooks and config are shared', PROTOCOL.includes('装�
 check('protocol frames the branch as a lock', PROTOCOL.includes('只能被一个检出占用'))
 check('protocol says closing releases the claim', PROTOCOL.includes('结案会自动交还'))
 check('protocol states both directions of the claim', PROTOCOL.includes('认领已有检出') && PROTOCOL.includes('交还'))
+
+// ---- the protocol is deployment-aware about working trees ----------------
+// The tool schema list is the real gate, but a model that only reads the prose
+// would probe `report_lease` and get a bare `unknown tool`; so the text says
+// what a deployment without the feature actually offers.
+const worktreeOn = protocolText(true)
+const worktreeOff = protocolText(false)
+check('an enabled deployment gets the shared protocol', worktreeOn === PROTOCOL)
+check('a worktree-off deployment is told report_lease does not exist',
+  worktreeOff.includes('本部署未启用工作区') && worktreeOff.includes('`report_lease` 不存在'))
+check('a worktree-off deployment is not told to pass worktree:true', !worktreeOff.includes('worktree:true'))
+check('the enabled-only worktree paragraph is replaced, not doubled',
+  !worktreeOff.includes('工作区（若本部署启用）'))
+check('the behavior conventions survive the swap',
+  worktreeOff.includes('六条行为约定') && worktreeOff.includes('先对账再继续'))
 
 // ---- the correction rule is stated ---------------------------------------
 check('protocol points at report_amend instead of re-authoring', PROTOCOL.includes('不要重开一份新汇报'))
@@ -120,8 +136,9 @@ check('the shared contract frames peer_start as a partner, not a subordinate',
   rootText.includes('会比你活得更久'))
 
 // ---- the worktree tools are deployment-dependent --------------------------
-// The protocol is a static prefix and cannot be gated per deployment, so the
-// per-assembly partnership section says what a worktree-off deployment implies.
+// The protocol text is chosen per deployment; the per-assembly partnership
+// section states the same fact again, so an agent still sees it when only the
+// contract is reread.
 check('the contract says the worktree tools are deployment-dependent', rootText.includes('部署相关'))
 check('the contract says report_lease may not exist', rootText.includes('report_lease') && rootText.includes('根本不存在'))
 check('the contract says report_release may have nothing to release', rootText.includes('没有对象可交还'))

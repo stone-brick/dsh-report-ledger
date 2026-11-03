@@ -33,9 +33,15 @@ export const DELEGATED_HEADING = '## 你当前是被委派的代理'
 
 /**
  * The capability statement: what the ledger is, which tools exist, and the two
- * rules that change behaviour. Identical for every agent.
+ * rules that change behaviour. Identical for every agent in one deployment.
+ *
+ * The working-tree paragraph is the only deployment-dependent part: a
+ * deployment with the feature off has no `report_lease` tool and no `worktree`
+ * parameter, so listing them unconditionally would advertise capabilities the
+ * deployment does not have. {@link protocolText} swaps that paragraph for the
+ * fact; everything else — including the stable prefix — stays byte-identical.
  */
-export const PROTOCOL = [
+const PROTOCOL_HEAD = [
   '本机已安装 dsh-report-ledger 插件（汇报账本）：在代理之间传递工作、结论与决策的持久、可追溯通道。',
   '',
   '结构：front matter 是缩略（主题、收发、抄送、共写者、跳数），进入上下文很便宜；正文留在账本里按需读取。',
@@ -59,11 +65,20 @@ export const PROTOCOL = [
   '- peer_list —— 列出你能对话的代理（上级、下属、兄弟、你开启的同伴、账本里有往来的联系人），并标注谁此刻在线。',
   '- peer_start —— 开启一个**独立同伴会话**（不是下属）：它有自己的生命周期、比你活得更久；任务作为一份汇报交给它（也可用 `report` 直接交一份已有汇报，用 `parent` 让新作业单挂在某份汇报下）。它只负责新建，唤不回已存在的会话（那是 peer_wake）。它同时给新会话起名（`name`，没给就用作业单主题）——否则会话列表里只会显示「未命名」。',
   '- peer_wake —— 把一个**你开启的**、已经不驻留的同伴叫回来：宿主重新加载它，账本随即把它还欠着的投递送进去。只有开启者能唤，且只在还欠它投递时才有意义；它不占同伴名额。',
-  '',
+].join('\n')
+
+/** What the protocol says about working trees when the deployment has them. */
+const WORKTREE_ENABLED = [
   '工作区（若本部署启用）：peer_start / report_author 加 worktree:true，会为该汇报分配一个**独立的 git 检出**，分支名形如 dsh/R-0007-<主题>。',
   '独立的只有**工作目录与索引**；config、hooks、对象库、以及机器上一切检出之外的东西都是**共享**的——装一个 hook 或改一项配置，会影响所有检出里每一次提交。',
   '一个分支同一时刻只能被一个检出占用，所以它同时也是一把锁：认领已有检出用 report_lease，交还用 report_release，结案会自动交还。被占用时会明确告诉你占用者是谁。',
-  '',
+].join('\n')
+
+/** What it says instead on a deployment that offers no working trees. */
+const WORKTREE_DISABLED = '本部署未启用工作区：`report_lease` 不存在，`peer_start` / `report_author` / `report_close` 也都没有 `worktree` 参数——不要照上面的条目去调它们。'
+
+/** The behavior conventions, identical in both variants. */
+const PROTOCOL_RULES = [
   '六条行为约定：',
   '1. 收件方不在线不是错误。投递由账本持有，等该会话重新驻留时自动送达；不要因为对方此刻不在就放弃交接、或改为自己扛下。但**它不会自己回来**：只有开启它的会话能用 peer_wake（且仅当账本还欠它投递），其余情况要靠人或宿主把它恢复。所以派活时把任务切到一轮能交付，或者准备接手（report_transfer / report_handover）。',
   '2. 传递路径（含每一份抄送与副本）由账本自动记录，不需要你手工维护——但每一步都必须经工具完成，绕过工具的口信不会进入路径。',
@@ -72,6 +87,22 @@ export const PROTOCOL = [
   '5. **写错了就用 report_amend 修正，不要重开一份新汇报**——重开会丢掉原有的传递路径与收件人。改错别怕留痕：修正会被记成一跳，附上改前改后的值，这正是账本该有的样子。注意：只改摘要字段（标题／任务标签／产物）也算一次修正，已结案的汇报会被重新打开——status 回到 open，路径上多一条 reopened，所以改完要重新结案。',
   '6. **会话或网络中断后，先对账再继续，不要从头重做。** 用 report_list / peer_list 找到最后落下的跳、谁已交付、谁还在线；把汇报正文、任务标签与传递路径当作检查点。断点若在写操作中间，先读回半完成状态再决定重试或回滚；重试投递或创建前，先确认它是否已经落地。',
 ].join('\n')
+
+/** The protocol for a deployment whose working-tree feature is on. */
+export const PROTOCOL = [PROTOCOL_HEAD, WORKTREE_ENABLED, PROTOCOL_RULES].join('\n\n')
+
+/**
+ * The protocol for one deployment.
+ *
+ * Every agent in one deployment gets the same bytes, so the shared part of the
+ * prompt stays a stable prefix in every scope; only the deployment's feature
+ * set changes the working-tree paragraph.
+ * @param worktreeEnabled - whether this deployment offers git checkouts.
+ * @returns the section text.
+ */
+export function protocolText(worktreeEnabled: boolean): string {
+  return [PROTOCOL_HEAD, worktreeEnabled ? WORKTREE_ENABLED : WORKTREE_DISABLED, PROTOCOL_RULES].join('\n\n')
+}
 
 /**
  * Describe one assembly's reader.
