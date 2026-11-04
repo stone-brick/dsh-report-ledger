@@ -629,6 +629,10 @@ check('the model tools include the peer surface',
   wired.tools.join(','))
 check('the lease tool stays hidden while the worktree feature is off',
   !wired.tools.includes('report_lease'), wired.tools.join(','))
+// The digest check is read-only and deployment-independent: an agent that cannot
+// run the repair script still needs a way to see that a digest drifted.
+check('the read-only digest check is registered whatever the worktree setting',
+  wired.tools.includes('report_check'), wired.tools.join(','))
 // The tool schema list is the real gate, but the injected protocol is what a
 // model reads first: it must not advertise a tool or a parameter this
 // deployment does not expose, or the model probes it and gets `unknown tool`.

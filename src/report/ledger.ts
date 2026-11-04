@@ -519,6 +519,26 @@ export async function readReport(id: string): Promise<Report | undefined> {
 }
 
 /**
+ * Read one report's digest without reading its body.
+ *
+ * The repair sweep and the model-facing check both need a single report's
+ * digest; reading its body for it would cost whatever the body costs. The
+ * digest is cached by file signature, so a sweep that walks the whole ledger
+ * pays one stat per report in the steady state.
+ * @param id - report identifier.
+ * @returns the digest, or `undefined` when the document is missing or malformed.
+ */
+export async function readDigestOf(id: string): Promise<ReportFrontMatter | undefined> {
+  if (!isValidReportId(id)) return undefined
+  try {
+    return await readDigest(id)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw error
+  }
+}
+
+/**
  * The 1-based document line at which a report's body begins.
  *
  * Read on demand by the one caller that has to point a model at the rest of an

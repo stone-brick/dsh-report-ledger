@@ -35,7 +35,7 @@ const root = await mkdtemp(join(tmpdir(), 'report-ledger-read-path-'))
 process.env.DSH_HOME = root
 
 const { ReportService } = await import('../src/report/service.ts')
-const { allocateId, appendHop, clearReadCache, listReports, readHops, readReport, reportPath, reportsDir, routePath } = await import('../src/report/ledger.ts')
+const { allocateId, appendHop, clearReadCache, listReports, readHops, readReport, reportPath, reportsDir, routePath, writeReport } = await import('../src/report/ledger.ts')
 const { pendingTargets } = await import('../src/report/deliver.ts')
 
 /** Agents resident for this run, and how a digest reached each one. */
@@ -351,6 +351,30 @@ check('the repaired digest matches its hop stream', afterRepair?.hops === 5 && a
   `hops=${afterRepair?.hops} reads=${afterRepair?.reads}`)
 check('a repair does not restamp updated, so a listing keeps its order',
   afterRepair?.updated === staleDocument?.front.updated, `${afterRepair?.updated} vs ${staleDocument?.front.updated}`)
+
+// ---- drift is not only the counters --------------------------------------
+// The repair pass compares the whole derived projection. A hand edit that only
+// touches `to` leaves hops/reads/last identical, so a counters-only check would
+// report "in agreement" and never restore the recipients.
+const drifted = await readReport(staleId)
+check('the recipient-drift fixture is readable', drifted !== undefined)
+if (drifted !== undefined) {
+  const to = drifted.front.to
+  await writeReport(
+    { front: { ...drifted.front, to: [...to, 'session-ghost-drift'] }, body: drifted.body },
+    staleId,
+  )
+  const scoped = await service.repairDigests({ dryRun: true, report: staleId })
+  check('a scoped dry run checks only that report', scoped.length === 1, JSON.stringify(scoped.map((row) => row.report)))
+  check('a recipient list that disagrees with the path is drift too',
+    scoped[0]?.changed === true, JSON.stringify(scoped[0]))
+  await service.repairDigests({ report: staleId })
+  const restored = await readReport(staleId)
+  check('a scoped repair restores the recipients from the path',
+    restored?.front.to.join(',') === to.join(','),
+    `to=${restored?.front.to.join(',')} expected=${to.join(',')}`)
+}
+
 const secondPass = await service.repairDigests()
 check('a second sweep rewrites nothing',
   secondPass.every((repair) => !repair.changed || repair.skipped !== undefined),

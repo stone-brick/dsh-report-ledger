@@ -113,6 +113,7 @@ reports/R-0001.route.jsonl   append-only 传递路径，一行一跳
 | `report_forward` | 转呈下去，或 `mode:"copy"` 作为参考副本分发 |
 | `report_read` | 读缩略 + 完整传递路径（开头一行按动作计数）+ 正文（读取记为 `read`，计入 `hops` 也计入 `reads`，`hops - reads` 才是工作量；不推进 `updated`、不改变列表顺序） |
 | `report_list` | 只列缩略，可按 `session`、`status`、`task`、`worktree` 过滤，用于纵览长期协作；行里带 `authors=N`——回执说明有人确认收到，`authors=1` 说明**没人真的写过东西** |
+| `report_check` | 只读诊断：检查缩略与传递路径是否一致（可限定一份），列出 `stored -> derived`；**不写、不记跳**。修复不是工具，仍是人的动作：`pnpm repair`（可 `--dry-run`） |
 | `report_ack` | 回执，让发送方看到闭环 |
 | `report_amend` | 修正：改缩略字段或更正正文，仅发起者/共写者可改，改动会被记录 |
 | `report_close` | 结案：事情的终结，仅发起者/共写者可关；**从未有过贡献的汇报必须带 `note`**（交代做到了哪，或为什么没写），否则拒绝；同时**交还**它持有的工作区 |

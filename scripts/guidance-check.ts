@@ -43,7 +43,7 @@ const childText = partnershipText(child)
 // ---- the protocol names every tool ---------------------------------------
 for (const tool of [
   'report_author', 'report_contribute', 'report_send', 'report_cc',
-  'report_forward', 'report_read', 'report_list', 'report_ack', 'report_amend', 'report_close',
+  'report_forward', 'report_read', 'report_list', 'report_check', 'report_ack', 'report_amend', 'report_close',
   'report_release', 'report_lease', 'report_transfer', 'report_handover',
   'peer_list', 'peer_start', 'peer_wake',
 ]) {

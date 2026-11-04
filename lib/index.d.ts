@@ -961,9 +961,9 @@ interface DigestRepair {
   readonly report: string;
   /** Whether the stored digest disagreed with the hop stream. */
   readonly changed: boolean;
-  /** The counters the document carried. */
+  /** The derived projection the document carried. */
   readonly stored: string;
-  /** The counters its hop stream derives. */
+  /** The projection its hop stream derives. */
   readonly derived: string;
   /** Why it was left unwritten, when it was. */
   readonly skipped?: string;
@@ -1255,7 +1255,7 @@ declare class ReportService {
    */
   pendingFor(session: string): Promise<PendingHandoff[]>;
   /**
-   * Rebuild every digest's derived counters from its hop stream.
+   * Rebuild digests' derived fields from their hop streams.
    *
    * The front matter is a cache of `projectRoute`, so it can only be as current
    * as the report's last mutation. That is harmless while the projection's meaning
@@ -1272,12 +1272,16 @@ declare class ReportService {
    * honest is not activity, and stamping it would reorder every listing. A report
    * whose transfer path has gone missing is skipped rather than rewritten — that
    * is the same damage guard {@link ReportService}#record applies, for the same
-   * reason: rebuilding from an empty history would erase its recipients.
-   * @param options - `dryRun` reports what would change without writing.
-   * @returns one record per report in the ledger.
+   * reason: rebuilding from an empty history would erase its recipients. A dry
+   * run reports the same skip, so a read-only check can tell "stale but
+   * repairable" from "damaged".
+   * @param options - `dryRun` reports what would change without writing;
+   * `report` limits the pass to one report (an unknown id answers nothing).
+   * @returns one record per report in scope.
    */
   repairDigests(options?: {
     dryRun?: boolean;
+    report?: string;
   }): Promise<DigestRepair[]>;
   /**
    * Deliver every held hand-off owed to one session that just became resident.

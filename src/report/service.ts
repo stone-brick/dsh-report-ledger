@@ -25,7 +25,7 @@ import { planAllocation, type StaleBinding, type WorktreeSettings } from './allo
 import type { AgentLike } from './deliver.ts'
 import { deliver, pendingMode, pendingTargets, type DeliveryOutcome } from './deliver.ts'
 import { evaluateLease, leaseState } from './lease.ts'
-import { allocateId, appendHop, appendReportBody, bodyStartLine, discardUnwrittenId, isValidReportId, listReports, readHops, readReport, reportExists, reportPath, routePath, writeReport } from './ledger.ts'
+import { allocateId, appendHop, appendReportBody, bodyStartLine, discardUnwrittenId, isValidReportId, listReports, readDigestOf, readHops, readReport, reportExists, reportPath, routePath, writeReport } from './ledger.ts'
 import {
   addWorktree, classifyGitRefusal, compareKey, headOf, isWorktreeClean, removeWorktree, resolveRepo, samePath,
   unmergedCommitCount,
@@ -400,19 +400,35 @@ export interface DigestRepair {
   readonly report: string
   /** Whether the stored digest disagreed with the hop stream. */
   readonly changed: boolean
-  /** The counters the document carried. */
+  /** The derived projection the document carried. */
   readonly stored: string
-  /** The counters its hop stream derives. */
+  /** The projection its hop stream derives. */
   readonly derived: string
   /** Why it was left unwritten, when it was. */
   readonly skipped?: string
 }
 
-/** The counters a repair compares, rendered so a dry run reads like the real thing. */
-function digestCounters(front: Pick<ReportFrontMatter, 'hops' | 'reads'> & { readonly last?: ReportFrontMatter['last'] }): string {
-  const last = front.last === undefined ? '-' : `${front.last.action}@${front.last.actor}`
-  return `hops=${front.hops} reads=${front.reads} last=${last}`
+/**
+ * One digest's derived projection, rendered for comparison and for a dry run.
+ *
+ * Every field `projectRoute` produces is part of the comparison, not just the
+ * counters: a definition change can move `to`, `cc` or `authors` while leaving
+ * `hops`/`reads`/`last` untouched, and a counters-only equality check would
+ * report such a report as in agreement and never repair it. `last.at` is
+ * included for the same reason — it is derived too, so a hand-edited timestamp
+ * is drift rather than history.
+ * @param front - a digest, or the projection computed from a hop stream.
+ * @returns one line naming every derived field, so a dry run reads like the
+ * real thing.
+ */
+function digestProjection(front: Pick<ReportFrontMatter, 'to' | 'cc' | 'authors' | 'hops' | 'reads'> & { readonly last?: ReportFrontMatter['last'] }): string {
+  const ids = (list: readonly string[]): string => (list.length === 0 ? '-' : list.join(','))
+  const last = front.last === undefined ? '-' : `${front.last.action}@${front.last.actor}@${front.last.at}`
+  return `to=${ids(front.to)} cc=${ids(front.cc)} authors=${ids(front.authors)} hops=${front.hops} reads=${front.reads} last=${last}`
 }
+
+/** Why a digest cannot be rebuilt, when its transfer path is gone. */
+const MISSING_PATH = 'its transfer path is missing, so the digest cannot be rebuilt from it'
 
 /** The report service. */
 export class ReportService {
@@ -1690,7 +1706,7 @@ export class ReportService {
   }
 
   /**
-   * Rebuild every digest's derived counters from its hop stream.
+   * Rebuild digests' derived fields from their hop streams.
    *
    * The front matter is a cache of `projectRoute`, so it can only be as current
    * as the report's last mutation. That is harmless while the projection's meaning
@@ -1707,38 +1723,54 @@ export class ReportService {
    * honest is not activity, and stamping it would reorder every listing. A report
    * whose transfer path has gone missing is skipped rather than rewritten — that
    * is the same damage guard {@link ReportService}#record applies, for the same
-   * reason: rebuilding from an empty history would erase its recipients.
-   * @param options - `dryRun` reports what would change without writing.
-   * @returns one record per report in the ledger.
+   * reason: rebuilding from an empty history would erase its recipients. A dry
+   * run reports the same skip, so a read-only check can tell "stale but
+   * repairable" from "damaged".
+   * @param options - `dryRun` reports what would change without writing;
+   * `report` limits the pass to one report (an unknown id answers nothing).
+   * @returns one record per report in scope.
    */
-  async repairDigests(options: { dryRun?: boolean } = {}): Promise<DigestRepair[]> {
+  async repairDigests(options: { dryRun?: boolean; report?: string } = {}): Promise<DigestRepair[]> {
     const repairs: DigestRepair[] = []
-    for (const digest of await listReports()) {
-      const stored = digestCounters(digest)
-      const derived = digestCounters(projectRoute(await readHops(digest.report)))
+    const targets: ReportFrontMatter[] = []
+    if (options.report === undefined) {
+      targets.push(...await listReports())
+    } else {
+      // The id is the file name, exactly as in listReports: a hand-edited
+      // identity field must not redirect the repair at another report.
+      const digest = await readDigestOf(options.report)
+      if (digest === undefined) return repairs
+      targets.push({ ...digest, report: options.report })
+    }
+    for (const digest of targets) {
+      const report = digest.report
+      const stored = digestProjection(digest)
+      const derived = digestProjection(projectRoute(await readHops(report)))
       if (stored === derived) {
-        repairs.push({ report: digest.report, changed: false, stored, derived })
+        repairs.push({ report, changed: false, stored, derived })
         continue
       }
+      // Checked for the dry run too: "stale but repairable" and "damaged" are
+      // different answers, and a read-only check that hid the difference would
+      // send a reader to a repair that must refuse.
+      const unrepairable = digest.hops > 0 && !existsSync(routePath(report)) ? MISSING_PATH : undefined
       if (options.dryRun === true) {
-        repairs.push({ report: digest.report, changed: true, stored, derived })
+        repairs.push({ report, changed: true, stored, derived, ...(unrepairable === undefined ? {} : { skipped: unrepairable }) })
         continue
       }
-      const skipped = await this.#withLock(digest.report, async () => {
-        const current = await readReport(digest.report)
+      const skipped = await this.#withLock(report, async () => {
+        const current = await readReport(report)
         if (current === undefined) return 'it disappeared while the sweep was running'
-        if (current.front.hops > 0 && !existsSync(routePath(digest.report))) {
-          return 'its transfer path is missing, so the digest cannot be rebuilt from it'
-        }
-        const fresh = projectRoute(await readHops(digest.report))
+        if (current.front.hops > 0 && !existsSync(routePath(report))) return MISSING_PATH
+        const fresh = projectRoute(await readHops(report))
         // Re-checked inside the lock: a mutation that ran during the scan has
         // already corrected this digest, and rewriting would be a no-op that the
         // report would count as changed.
-        if (digestCounters(fresh) === digestCounters(current.front)) return undefined
-        await writeReport({ front: { ...current.front, ...fresh }, body: current.body }, digest.report)
+        if (digestProjection(fresh) === digestProjection(current.front)) return undefined
+        await writeReport({ front: { ...current.front, ...fresh }, body: current.body }, report)
         return undefined
       })
-      repairs.push({ report: digest.report, changed: true, stored, derived, ...(skipped === undefined ? {} : { skipped }) })
+      repairs.push({ report, changed: true, stored, derived, ...(skipped === undefined ? {} : { skipped }) })
     }
     return repairs
   }

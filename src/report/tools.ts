@@ -535,6 +535,37 @@ export function registerReportTools(
   })))
 
   disposers.push(ctx.tools.register(defineTool({
+    name: 'report_check',
+    description: 'Check whether each report\'s digest still agrees with its transfer path — read-only: nothing is written and no hop is recorded. The front matter is a cache of the append-only path, so a crash between a hop and the digest rewrite, a hand edit, or a version that changed what the digest derives can leave a report whose counters, recipients or co-authors no longer match its history. Omit `report` to sweep the whole ledger (one stat plus one sidecar read per report); pass it to check one. Each disagreement is printed as `stored -> derived`. Repair is deliberately NOT a tool: a sweep rewrites every digest, so it stays with the human who can see whether the ledger is being written right now (`pnpm repair`, optionally `--dry-run`).',
+    parameters: {
+      report: { type: 'string', description: 'Check this report only. Omit to sweep the whole ledger.' },
+    },
+    output: stringOutput,
+    execute: async (args) => {
+      const input = args as { report?: string }
+      const repairs = await service.repairDigests({
+        dryRun: true,
+        ...(input.report === undefined ? {} : { report: input.report }),
+      })
+      if (input.report !== undefined && repairs.length === 0) {
+        return `no report ${JSON.stringify(input.report)} in the ledger`
+      }
+      const stale = repairs.filter((repair) => repair.changed)
+      if (stale.length === 0) {
+        return `${repairs.length} report(s) checked; every digest agrees with its transfer path`
+      }
+      return [
+        `${repairs.length} report(s) checked; ${stale.length} digest(s) disagree with their transfer path:`,
+        ...stale.map((repair) => [
+          `  ${repair.report}  ${repair.stored}  ->  ${repair.derived}`,
+          ...(repair.skipped === undefined ? [] : [`    left alone: ${repair.skipped}`]),
+        ].join('\n')),
+        'repair with `pnpm repair` (optionally --dry-run).',
+      ].join('\n')
+    },
+  })))
+
+  disposers.push(ctx.tools.register(defineTool({
     name: 'report_ack',
     description: 'Acknowledge a report you received: record that you have taken it in, with an optional note. The hop is added to the transfer path and the report moves to `acked`, so the sender can see the loop is closed rather than guessing whether the hand-off landed.',
     parameters: {
