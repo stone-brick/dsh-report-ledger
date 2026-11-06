@@ -577,6 +577,49 @@ check('thread= on a missing report names it', missingThread.includes('no report 
 const onRoot = await callTool('report_list', { thread: threadRoot.front.report })
 check('a thread requested from its root needs no "requested from" suffix', onRoot.startsWith(`thread ${threadRoot.front.report} (4 report(s))`), onRoot)
 
+// ---- time markers ---------------------------------------------------------
+// A reader of a long-lived report has to tell how old the original body is and
+// when each appended section was written, without decoding the path by eye. The
+// stamps are ISO with an explicit offset: unambiguous to a machine, readable to
+// a human in this time zone (a bare `Z` is neither of those when it is UTC+8).
+const stamped = await service.author({ subject: 'timestamped', body: 'base body', actor: 'session-a' })
+const authoredAt = (await readHops(stamped.front.report)).find((hop) => hop.action === 'authored')?.at
+const stampedRead = await service.read(stamped.front.report, 'session-b')
+const createdStamp = stampedRead.match(/created=(\S+)/)?.[1]
+check('the read front line names when the report was created', createdStamp !== undefined,
+  stampedRead.split('\n')[0])
+check('created= parses back to the authored hop',
+  createdStamp !== undefined && Date.parse(createdStamp) === authoredAt,
+  `${createdStamp} vs ${authoredAt}`)
+check('created= carries an explicit UTC offset',
+  createdStamp !== undefined && /[+-]\d{2}:\d{2}$/.test(createdStamp), String(createdStamp))
+check('the updated stamp carries an explicit offset too',
+  /updated=\S+[+-]\d{2}:\d{2}/.test(stampedRead.split('\n')[0] ?? ''), stampedRead.split('\n')[0])
+check('hop times render with an offset rather than a bare Z',
+  /^\s+\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}\s/m.test(stampedRead),
+  stampedRead.split('\n').find((line) => line.includes(' by ')) ?? '')
+
+// The appended sections carry their own stamps, written when the tool ran.
+await service.contribute(stamped.front.report, 'session-a', 'first add')
+await service.amend(stamped.front.report, 'session-a', { body: 'second add' })
+const stampedBody = (await readReport(stamped.front.report))?.body ?? ''
+const contributionStamp = stampedBody.match(/### contribution by .+ at (\S+)/)?.[1]
+const amendmentStamp = stampedBody.match(/### amendment by .+ at (\S+)/)?.[1]
+check('a contribution header carries an explicit offset',
+  contributionStamp !== undefined && /[+-]\d{2}:\d{2}$/.test(contributionStamp), String(contributionStamp))
+check('the contribution header time is the append time',
+  contributionStamp !== undefined && Math.abs(Date.parse(contributionStamp) - Date.now()) < 120_000,
+  String(contributionStamp))
+check('an amendment header carries an explicit offset',
+  amendmentStamp !== undefined && /[+-]\d{2}:\d{2}$/.test(amendmentStamp), String(amendmentStamp))
+
+// A hand-written document has no `authored` hop. The reader must not dress its
+// own look up as the creation time.
+await writeDocument('R-7206', '---\nreport: "R-7206"\nsubject: "no authored hop"\nfrom: "s"\n---\n\nbody only\n')
+const noCreated = await service.read('R-7206', 'session-a')
+check('a report with no authored hop claims no creation time', !noCreated.includes('created='),
+  noCreated.split('\n')[0])
+
 let failed = 0
 for (const [label, ok, detail] of checks) {
   if (!ok) failed++

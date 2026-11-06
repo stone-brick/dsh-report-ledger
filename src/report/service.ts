@@ -512,8 +512,41 @@ function elisionMarker(excerpt: BodyExcerpt): string {
     + ` (body lines ${excerpt.headEndLine + 1}-${excerpt.tailStartLine - 1}) …`
 }
 
-/** Serialize one report for model-facing output. */
-function renderFrontLine(front: ReportFrontMatter): string {
+/** Pad a non-negative integer to two digits. */
+function two(value: number): string {
+  return String(value).padStart(2, '0')
+}
+
+/**
+ * Render an instant as ISO 8601 with the machine's UTC offset.
+ *
+ * `toISOString()` writes `…Z`, which is unambiguous but forces every reader in
+ * UTC+8 to add eight hours in their head — and the ledger's readers are the
+ * agents and the humans on this machine, not a fleet spread across zones. An
+ * explicit offset (`+08:00`) parses exactly as well and is readable as written;
+ * because the offset travels with each stamp, a ledger written on two machines
+ * in different zones still says what each clock meant.
+ * @param ms - instant in epoch milliseconds.
+ * @returns the stamp, e.g. `2026-11-06T09:29:31.908+08:00`.
+ */
+function formatTime(ms: number): string {
+  const date = new Date(ms)
+  const offset = -date.getTimezoneOffset()
+  const sign = offset < 0 ? '-' : '+'
+  const absolute = Math.abs(offset)
+  return `${date.getFullYear()}-${two(date.getMonth() + 1)}-${two(date.getDate())}`
+    + `T${two(date.getHours())}:${two(date.getMinutes())}:${two(date.getSeconds())}`
+    + `.${String(date.getMilliseconds()).padStart(3, '0')}`
+    + `${sign}${two(Math.floor(absolute / 60))}:${two(absolute % 60)}`
+}
+
+/**
+ * Serialize one report for model-facing output.
+ * @param front - the digest.
+ * @param created - the instant the report was opened, when the path records it.
+ * @returns the one-line digest.
+ */
+function renderFrontLine(front: ReportFrontMatter, created?: number): string {
   const parts = [
     `${front.report} [${front.status}] ${front.subject}`,
     `from=${front.from}`,
@@ -522,7 +555,11 @@ function renderFrontLine(front: ReportFrontMatter): string {
     `authors=${front.authors.join(',')}`,
     `hops=${front.hops}`,
     `reads=${front.reads}`,
-    `updated=${new Date(front.updated).toISOString()}`,
+    `updated=${formatTime(front.updated)}`,
+    // The digest has no creation field, so the first `authored` hop is the
+    // record of it. Rendering it beside `updated` is what lets a reader judge
+    // how old the original body is without decoding the path by eye.
+    ...(created === undefined ? [] : [`created=${formatTime(created)}`]),
   ]
   if (front.task !== undefined) parts.push(`task=${front.task}`)
   if (front.worktree !== undefined) parts.push(`worktree=${worktreeLabel(front.worktree)}@${front.worktree.path}`)
@@ -977,7 +1014,7 @@ export class ReportService {
     const text = body.trim()
     if (text === '') throw new Error('report-ledger: report_contribute requires non-empty content')
     const name = await this.#host.describe(actor)
-    const header = `\n\n---\n\n### contribution by ${name ?? actor} at ${new Date().toISOString()}\n\n`
+    const header = `\n\n---\n\n### contribution by ${name ?? actor} at ${formatTime(Date.now())}\n\n`
     return this.#withLock(report, async () => {
       await this.#load(report)
       await this.#reopenIfClosed(report, actor)
@@ -1186,6 +1223,11 @@ export class ReportService {
       const readHop: RouteHop = { at: Date.now(), actor, action: 'read', to: [] }
       const recorded = await this.#record(report, readHop, { touch: false })
       const pathHops = [...hops, readHop]
+      // The `authored` hop is this report's creation record; it is deliberately
+      // read from the path BEFORE the read hop is appended, so a report that was
+      // hand-written without a path cannot pass the reader's own look off as the
+      // moment it was created.
+      const created = hops.find((hop) => hop.action === 'authored')?.at
       const tally = tallyHops(pathHops)
       const path = reportPath(report)
       const view = await this.#renderBody(report, found.body.trim(), offset, limit)
@@ -1194,7 +1236,7 @@ export class ReportService {
         : pathHops.map((hop) => {
           const targets = hop.to.length === 0 ? '' : ` -> ${hop.to.join(',')}`
           const note = hop.note === undefined ? '' : `  # ${hop.note}`
-          return `  ${new Date(hop.at).toISOString()}  ${hop.action.padEnd(11)} by ${hop.actor}${targets}${note}`
+          return `  ${formatTime(hop.at)}  ${hop.action.padEnd(11)} by ${hop.actor}${targets}${note}`
         }).join('\n')
       const pending = pendingTargets(hops)
       // A lease's current state is derived from the hop stream, so it is not in the
@@ -1207,7 +1249,7 @@ export class ReportService {
         + ` (${worktree.allocated === true ? 'allocated by the ledger' : 'adopted'})`,
       ]
       return [
-        renderFrontLine(recorded),
+        renderFrontLine(recorded, created),
         ...lease,
         `body=${path}`,
         '',
@@ -2050,7 +2092,7 @@ export class ReportService {
           await writeReport({ front: (await this.#load(report)).front, body: patch.body }, report)
         } else {
           const name = amendmentName
-          const header = `\n\n---\n\n### amendment by ${name ?? actor} at ${new Date().toISOString()}\n\n`
+          const header = `\n\n---\n\n### amendment by ${name ?? actor} at ${formatTime(Date.now())}\n\n`
           await appendReportBody(report, `${header}${patch.body.trim()}\n`)
         }
       }
