@@ -100,8 +100,15 @@ export function useLedgerScope(): TimelineScope {
  */
 export const POLL_INTERVAL_MS = 10_000
 
-/** A hung host must not pile up an unbounded number of in-flight polls. */
-const READ_TIMEOUT_MS = 15_000
+/**
+ * A read must finish, or fail with an error the panel can show, before the next
+ * poll aborts it. The poll effect starts a new window every {@link POLL_INTERVAL_MS}
+ * and aborts whatever is in flight; a timeout longer than the interval could
+ * therefore never fire — every slow read would be cancelled by the next tick,
+ * leaving the view on "loading" forever with no retry. Deriving it keeps the two
+ * constants from drifting apart.
+ */
+const READ_TIMEOUT_MS = POLL_INTERVAL_MS - 2_000
 
 /** Read one endpoint and unwrap its result envelope. */
 export async function getJson<T>(url: string, signal?: AbortSignal): Promise<T> {

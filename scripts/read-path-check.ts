@@ -33,6 +33,10 @@ import type { ReportFrontMatter } from '../src/report/types.ts'
 
 const root = await mkdtemp(join(tmpdir(), 'report-ledger-read-path-'))
 process.env.DSH_HOME = root
+// `ledgerRoot` prefers the documented override over DSH_HOME. Pin it too: a
+// developer who has set it (to test the override itself, for example) must not
+// have `pnpm test` write these fixtures into that ledger.
+process.env.DSH_REPORT_LEDGER_ROOT = join(root, 'report-ledger')
 
 const { ReportService } = await import('../src/report/service.ts')
 const { allocateId, appendHop, clearReadCache, listReports, readHops, readReport, reportPath, reportsDir, routePath, writeReport } = await import('../src/report/ledger.ts')
@@ -272,6 +276,44 @@ try {
 }
 check('a missing sidecar stops the next mutation', sidecarRefused)
 check('the guarded report still exists', (await readReport(guarded.front.report)) !== undefined)
+
+// An EMPTY sidecar is the crash shape the missing-file guard did not cover: the
+// file exists, so the old check passed, and the read that only wanted to record
+// "somebody opened this" projected an empty history over the digest and erased
+// its recipients. A read must refuse too — it records a hop.
+const emptied = await service.author({
+  subject: 'empty sidecar', body: 'b', actor: 'session-a', to: ['session-empty-b'],
+})
+await writeFile(routePath(emptied.front.report), '')
+let emptyRefused = false
+try {
+  await service.read(emptied.front.report, 'session-empty-b')
+} catch {
+  emptyRefused = true
+}
+check('an empty sidecar stops a read before it can erase the digest', emptyRefused)
+const emptiedAfter = await readReport(emptied.front.report)
+check('a refused read leaves the digest and its recipients intact',
+  emptiedAfter?.front.to.includes('session-empty-b') === true && emptiedAfter.front.hops === 2,
+  `to=${emptiedAfter?.front.to.join(',')} hops=${emptiedAfter?.front.hops}`)
+const emptyDry = (await service.repairDigests({ dryRun: true }))
+  .find((repair) => repair.report === emptied.front.report)
+check('the dry run reports an empty sidecar as damaged, not repairable',
+  emptyDry?.skipped !== undefined, JSON.stringify(emptyDry))
+
+// A record that cannot even be parsed, or a directory where a document belongs,
+// must be named by a diagnostic sweep rather than silently omitted.
+const unparseable = 'R-7104'
+await writeFile(join(reportsDir(), `${unparseable}.md`), 'not a report\n', 'utf8')
+const unreadable = 'R-7105'
+await mkdir(join(reportsDir(), `${unreadable}.md`), { recursive: true })
+const diagnostic = await service.repairDigests({ dryRun: true })
+check('an unparseable document is reported by the sweep',
+  diagnostic.find((repair) => repair.report === unparseable)?.skipped !== undefined,
+  JSON.stringify(diagnostic.find((repair) => repair.report === unparseable)))
+check('a directory where a document belongs is reported by the sweep',
+  diagnostic.find((repair) => repair.report === unreadable)?.skipped !== undefined,
+  JSON.stringify(diagnostic.find((repair) => repair.report === unreadable)))
 
 // Recipients are trimmed; a whitespace-only list is an error, not a hop that the
 // read path silently drops.

@@ -1,4 +1,5 @@
-# Developer-mode roster — read only when the composition row sets `devMode: true`.
+# Developer-mode roster — only a checkout with the `dsh-report-ledger-dev` add-on
+# enabled reads this file; there is no `devMode` config switch any more.
 #
 # These agents are this plugin's OWN sessions, not harness presets: `dev_agent_start`
 # creates a peer session and records the binding in

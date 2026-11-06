@@ -1,8 +1,8 @@
 # 已知未修问题
 
-这份文件是 **0.2.4 发布前审计中确认、且有意识地暂缓** 的问题清单。它不是 bug 总表，也不是路线图：只收那些「证据已经成立、但修复成本/收益或依赖关系还不适合当时动手」的项。
+这份文件是 **0.2.4 / 0.2.6 发布前审计中确认、且有意识地暂缓** 的问题清单。它不是 bug 总表，也不是路线图：只收那些「证据已经成立、但修复成本/收益或依赖关系还不适合当时动手」的项。
 
-- **最后复核**：2026-10-28，关闭「兼容性 records」之后（清单从六项变五项；本机已升到 DSH `0.2.1-rc.2`）。
+- **最后复核**：2026-11-06（0.2.6 发布前复核；本机 DSH `0.2.1-rc.2`）。
 - **证据报告**：审计报告在账本 `$DSH_HOME/report-ledger/reports/R-xxxx.md` 里；这份文档是仓库内、可版本化的摘要。报告 ID 保留，方便回看原始证据与探针。
 - **修一项时**：补测试 → 更新本文件的状态 → 在 `task:deferred-s3` 的跟踪报告里落一笔。
 
@@ -11,7 +11,7 @@
 | # | 问题 | 状态 |
 |---|---|---|
 | 1 | 测试脚本的 scratch 目录没有统一的 `try/finally` | 未修；正常路径清理有效 |
-| 2 | 10k 深链递归导致 `RangeError` | 未修；低频 |
+| 2 | 深链递归导致 `RangeError`（约 8000 层起） | 未修；低频 |
 | 3 | 画布 emoji 折行劈代理对、帧 hover 按 index | 未修 |
 | 4 | 视图跳转后焦点丢失、点击无声、`pane` 死代码 | 未修；V9 已单独修 |
 | 5 | publish 只确认版本可见，不校验 shasum/provenance | 未修 |
@@ -19,15 +19,15 @@
 ## 1. 测试脚本的 scratch 目录没有统一的 `try/finally`
 
 - **证据**：`R-0022` S3-10（当时点名五处）；`R-0051` 复核确认仍在；`R-0059`/`R-0060` 列为 deferred。
-- **当前结构**：脚本在顶部 `mkdtemp`，清理在文件末尾；审计当时是五个脚本，现在使用 `mkdtemp` 的脚本已增至十个（`allocate-check`、`handover-check`、`lease-check`、`maintenance-check`、`read-path-check`、`roster-check`、`smoke`、`workspace-check`、`worktree-check`、`worktree-tools-check`）。个别脚本有局部 `finally`，但都不是包住整个夹具阶段。
+- **当前结构**：脚本在顶部 `mkdtemp`，清理在文件末尾；审计当时是五个脚本，现在使用 `mkdtemp` 的脚本已增至十一个（`allocate-check`、`handover-check`、`lease-check`、`maintenance-check`、`read-path-check`、`release-boundary-check`、`roster-check`、`smoke`、`workspace-check`、`worktree-check`、`worktree-tools-check`），其中八个没有包住整个夹具阶段的 `finally`（`release-boundary-check` 有）。
 - **影响**：正常结束清理有效；夹具阶段失败（无 git、权限、`spawn` 失败）会在 `%TEMP%` 留下目录。不影响产品正确性，只污染测试机。
 - **建议修法**：`mkdtemp` 之后立刻进入 `try { ... } finally { rm(scratch, { recursive: true, force: true }) }`；或抽一个 `withScratch(async (dir) => ...)`，避免十个脚本各加一层缩进。清理失败不应吞掉原错误。
 - **验证**：模拟 `git` 不可用/夹具失败，断言临时目录仍被删除；正常路径再跑一次确认无残留。
 - **状态**：未修。审计判断收益低、diff 大，当时按分类未做。
 
-## 2. 10k 深链递归导致 `RangeError`
+## 2. 深链递归导致 `RangeError`（约 8000 层起）
 
-- **证据**：`R-0023` #10；`R-0052` 量化（1000/5000 层通过，**10000 层 `RangeError: Maximum call stack size exceeded`**，被 HTTP 守卫收敛成 500）；`R-0056` 旧 #10。
+- **证据**：`R-0023` #10；`R-0052` 量化（1000/5000 层通过）；`R-0056` 旧 #10；`R-0074` 复核（**约 8000 层起 `RangeError: Maximum call stack size exceeded`**，10000 层必现，被 HTTP 守卫收敛成 500）。
 - **当前代码**：`src/report/timeline.ts` 的 `walk` 递归（父子链 DFS）。
 - **影响**：病态深链（不是正常协作规模）会让整个时间线请求返回 500，而不是「截断后的树」。低频，但失败形态不体面。
 - **建议修法**：改成显式栈的迭代 DFS；或加 `MAX_DEPTH`（例如 512）并在 payload 里标 `truncated`，让前端知道少了一层而不是整棵树消失。后者更小，但要多一个协议字段。

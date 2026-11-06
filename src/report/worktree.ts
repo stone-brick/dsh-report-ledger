@@ -32,7 +32,7 @@
  */
 
 import { execFile } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, realpathSync } from 'node:fs'
 import { basename, dirname, join, normalize, resolve } from 'node:path'
 
 /** Directory name, under a repository's parent, that holds ledger-allocated worktrees. */
@@ -386,6 +386,24 @@ export async function isWorktreeClean(worktreePath: string): Promise<boolean> {
   return result.stdout.trim() === ''
 }
 
+/**
+ * Count the ignored paths a `remove-if-clean` would delete.
+ *
+ * `git status --porcelain` does not call an ignored file uncommitted, so a tree
+ * holding only a `.env`, a cache directory or a local notes file is "clean" to
+ * {@link isWorktreeClean}. `git worktree remove` still deletes all of them. That
+ * is the one way the removal can destroy something the owner wanted, so the
+ * service asks for this count before it removes and reports it afterwards; the
+ * removal itself stays a plain git removal (no `--force`, no `git clean`).
+ * @param worktreePath - the working tree to inspect.
+ * @returns the number of ignored entries, or `undefined` when git cannot answer.
+ */
+export async function ignoredPathCount(worktreePath: string): Promise<number | undefined> {
+  const result = await runGit(worktreePath, ['status', '--porcelain', '--ignored'])
+  if (!result.ok) return undefined
+  return result.stdout.split('\n').filter((line) => line.startsWith('!! ')).length
+}
+
 /** How far a checkout's branch is ahead of the repository's current branch. */
 export interface UnmergedCommits {
   /** The branch the count is measured against (the main worktree's HEAD). */
@@ -620,7 +638,16 @@ function stripTrailingSeparators(path: string): string {
  * @returns the comparison key.
  */
 export function compareKey(path: string): string {
-  const absolute = stripTrailingSeparators(normalize(resolve(path)))
+  let absolute = stripTrailingSeparators(normalize(resolve(path)))
+  // Two spellings of one directory must compare equal even when one of them is a
+  // junction, a symlink, or an 8.3 short name. `realpath` is what tells the truth
+  // there; a path that no longer exists (a stale binding) falls back to its
+  // normalized spelling, which is the best answer available for it.
+  try {
+    absolute = stripTrailingSeparators(normalize(realpathSync.native(absolute)))
+  } catch {
+    // Deliberately keep the normalized spelling; see above.
+  }
   return process.platform === 'win32' ? absolute.toLowerCase() : absolute
 }
 

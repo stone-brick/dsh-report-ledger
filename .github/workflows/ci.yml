@@ -63,9 +63,11 @@ jobs:
 
       # lib/ 随源码提交（DSH STORE 的固定源检查要求 main/exports 指向的运行产物
       # 出现在固定 Commit 里）。这一步保证提交的产物与源码一致：改了 src 忘了
-      # build、或构建不可重现，都会在这里变红。
-      - name: Committed lib/ matches a fresh build
+      # build、或构建不可重现，都会在这里变红。`dev/bundle/lib` 是同一份源码的
+      # 开发者附加产物，不在发布包里，但同一个 build 会重写它；漏掉它会让开发者
+      # 模式悄悄跑旧代码。
+      - name: Committed lib/ and dev/bundle/lib match a fresh build
         # status --porcelain also sees a NEW untracked file under lib/, which
         # `git diff` cannot; a build that starts emitting an extra artifact must
         # not slip through just because nothing tracked was modified.
-        run: test -z "$(git status --porcelain -- lib)"
+        run: test -z "$(git status --porcelain -- lib dev/bundle/lib)"

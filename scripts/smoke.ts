@@ -20,6 +20,9 @@ import { join } from 'node:path'
 
 const root = await mkdtemp(join(tmpdir(), 'report-ledger-smoke-'))
 process.env.DSH_HOME = root
+// `ledgerRoot` prefers the documented override over DSH_HOME. Pin it too: a
+// developer who has set it must not have `pnpm test` write into that ledger.
+process.env.DSH_REPORT_LEDGER_ROOT = join(root, 'report-ledger')
 
 const { ReportService, renderRow } = await import('../src/report/service.ts')
 const { ledgerRoot, reportPath, routePath } = await import('../src/report/ledger.ts')

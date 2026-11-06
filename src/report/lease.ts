@@ -58,8 +58,12 @@ export function leaseState(hops: readonly RouteHop[]): LeaseState {
   let state: LeaseState = 'none'
   for (const hop of hops) {
     if (hop.action === 'leased') state = 'held'
-    else if (hop.action === 'released') state = 'released'
     else if (hop.action === 'reclaimed') state = 'reclaimed'
+    // `reclaimed` is terminal for the checkout: a later `released` records that
+    // the claim ended, but the ledger must keep saying the directory was removed
+    // deliberately rather than merely let go. A fresh `leased` above still wins,
+    // because a re-claimed checkout is a new claim on a new decision.
+    else if (hop.action === 'released' && state !== 'reclaimed') state = 'released'
   }
   return state
 }

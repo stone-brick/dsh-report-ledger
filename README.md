@@ -27,7 +27,7 @@ dsh plugin --profile web remove dsh-report-ledger
 - 对齐 **DSH 0.2.0-rc.2 与 0.2.1 线**（`0.2.1-rc.2/rc.3/rc.4` 已实测，见 [兼容性](docs/dev-build.md#兼容性与依赖契约)；0.1.5-rc.3 及更早不再支持）；运行产物要求 Node ≥ 20。
 - 账本是**本机文件**：`$DSH_HOME/report-ledger/`（可用 `DSH_REPORT_LEDGER_ROOT` 覆盖），不上传任何地方。
 - 浏览器读数据走三个 **GET 只读端点**，只放行 loopback；所有写操作仍然只经模型工具，那是唯一会记录跳的路径。
-- `peer_start` 是唯一会**新增活代理**的能力，受 `maxPeersPerAgent`（默认 8）约束，每次创建都记进名册日志；`peer_wake` 只加载**已有**会话，既不新增也不占名额，而且只有开启者能唤。
+- `peer_start` 是**发布部署里**唯一会新增活代理的能力，受 `maxPeersPerAgent`（默认 8）约束，每次创建都记进名册日志；开发者模式另有 `dev_agent_start`（只在检出里，同样走这笔额度）。`peer_wake` 只加载**已有**会话，既不新增也不占名额，而且只有开启者能唤。
 - 工作区（git 检出）功能**默认关闭**，关闭时不出现 `report_lease` 与各工具的 `worktree` 参数。
 
 ### 国内镜像（Gitee）
@@ -36,7 +36,7 @@ dsh plugin --profile web remove dsh-report-ledger
 
 ```sh
 # 预构建产物，不需要构建工具链
-dsh plugin --profile web add https://gitee.com/stone_zhan/dsh-report-ledger/releases/download/v0.2.4/dsh-report-ledger-0.2.4.tgz
+dsh plugin --profile web add https://gitee.com/stone_zhan/dsh-report-ledger/releases/download/v0.2.5/dsh-report-ledger-0.2.5.tgz
 # 或直接从 Gitee 安装（预构建产物，安装时不构建）
 dsh plugin --profile web add git+https://gitee.com/stone_zhan/dsh-report-ledger.git
 ```

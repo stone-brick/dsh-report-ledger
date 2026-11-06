@@ -721,6 +721,33 @@ export async function listReports(): Promise<ReportFrontMatter[]> {
 }
 
 /**
+ * Every report id the directory names, including ones {@link listReports} drops.
+ *
+ * `listReports` is deliberately silent about an entry it cannot parse or read:
+ * a listing must not fail behind one broken record. A diagnostic sweep has the
+ * opposite duty — it exists to name the broken records — so it enumerates the
+ * files first and reads each one under its own try. That is also why this does
+ * not go through the digest cache: the point is to try every file.
+ * @returns the ids, sorted, whether or not their contents parse.
+ */
+export async function listReportIds(): Promise<string[]> {
+  await ensureDirs()
+  let names: string[]
+  try {
+    names = await readdir(reportsDir())
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+    throw error
+  }
+  const ids: string[] = []
+  for (const name of names) {
+    const match = REPORT_FILE.exec(name)
+    if (match !== null) ids.push(`R-${match[1]}`)
+  }
+  return ids.sort()
+}
+
+/**
  * Whether a report document exists on disk.
  * @param id - report identifier.
  * @returns true when the document exists.

@@ -27,6 +27,9 @@ import { join } from 'node:path'
 
 const root = await mkdtemp(join(tmpdir(), 'report-ledger-handover-'))
 process.env.DSH_HOME = root
+// `ledgerRoot` prefers the documented override over DSH_HOME. Pin it too: a
+// developer who has set it must not have `pnpm test` write into that ledger.
+process.env.DSH_REPORT_LEDGER_ROOT = join(root, 'report-ledger')
 
 const { ReportService } = await import('../src/report/service.ts')
 const { readHops } = await import('../src/report/ledger.ts')
@@ -175,6 +178,22 @@ check('the quiet delivery is recorded as quiet', quietDelivery?.note === 'quiet'
 check('the returned recipient was injected, not steered',
   inbox.some((entry) => entry.target === 'session-quiet-2' && entry.kind === 'inject')
   && !inbox.some((entry) => entry.target === 'session-quiet-2' && entry.kind === 'steer'))
+
+// The other direction: a quiet copy moving ONTO a session that already holds an
+// unanswered addressed hand-off must not downgrade it. The target has to run; a
+// transfer only adds an obligation, it never erases the wake one already earned.
+const union = await service.author({
+  subject: 'wake union', body: 'body', actor: 'session-a',
+  to: ['session-union-wake'], cc: ['session-quiet-source'],
+})
+await service.transfer(
+  union.front.report, 'session-a', 'session-quiet-source', 'session-union-wake',
+  'the quiet copy moves onto an already-addressed session',
+)
+const unionHops = await readHops(union.front.report)
+check('a quiet transfer does not downgrade an already-addressed target',
+  pendingMode(unionHops, 'session-union-wake') === 'wakeup',
+  pendingMode(unionHops, 'session-union-wake'))
 
 let failed = 0
 for (const [label, ok, detail] of checks) {

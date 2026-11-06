@@ -161,6 +161,12 @@ try {
     files.every((value) => value.replace(/^\.\//, '').replace(/[\\/]+$/, '') !== 'dev'),
     files.join(', '),
   )
+  const shippedManifest = shipped === undefined
+    ? undefined
+    : JSON.parse(shipped.body.toString('utf8')) as { dependencies?: Record<string, string> }
+  const dependencies = Object.keys(shippedManifest?.dependencies ?? {})
+  check('shipped runtime dependencies are only yaml', dependencies.length === 1 && dependencies[0] === 'yaml',
+    dependencies.join(', '))
   check('shipped files whitelist is present', files.length > 0, String(shippedFiles))
   check(
     'shipped package still declares the bundle patch',
@@ -184,13 +190,16 @@ try {
   check('shipped patch never switches devMode on', rows.every((inserted) => inserted.config?.devMode !== true),
     rows.map((inserted) => `${String(inserted.id)}=${String(inserted.config?.devMode)}`).join(', '))
 
-  // ---- 5. the shipped host bundle must carry no developer-mode code -------
+  // ---- 5. the shipped bundles must carry no developer-mode code ------------
   // The add-on is built separately into `dev/bundle/lib`, so a release bundle that
   // still names these identifiers means the split regressed and the code is back.
-  const hostBundle = find('package/lib/index.js')
-  const hostText = hostBundle?.body.toString('utf8') ?? ''
+  // Both halves are scanned: a leaked identifier in the browser bundle would load
+  // in the shell even though the host half is clean.
+  const hostText = find('package/lib/index.js')?.body.toString('utf8') ?? ''
+  const clientText = find('package/lib/client.js')?.body.toString('utf8') ?? ''
   for (const identifier of ['dev_agent_start', 'dev_agents_reload', 'dev_archive', 'plugin:report-ledger:dev']) {
     check(`shipped host bundle carries no ${identifier}`, !hostText.includes(identifier))
+    check(`shipped client bundle carries no ${identifier}`, !clientText.includes(identifier))
   }
 } finally {
   if (cleanup !== undefined) rmSync(cleanup, { recursive: true, force: true })

@@ -9,7 +9,7 @@
 提交的产物与源码是否一致，避免"改了 `src` 忘了 `build`"。
 
 ```sh
-pnpm check          # 完整门禁：类型检查 + 十六套可移植检查（1151 项）+ 工具面三套（240 项）
+pnpm check          # 完整门禁：类型检查 + 十六套可移植检查（1227 项）+ 工具面三套（269 项）
 pnpm build && pnpm pack   # lib/ 随源码提交，pack 前显式重建一次
 npm publish         # ⚠ 本机 registry 若是镜像站，必须显式 --registry=https://registry.npmjs.org
 ```
@@ -19,11 +19,12 @@ npm publish         # ⚠ 本机 registry 若是镜像站，必须显式 --regis
 | 检查项 | 本包取值 |
 |---|---|
 | `main` / `exports` 指向构建产物而非 `src/` | `lib/index.js` / `lib/client.js` |
+| `types` 指向随包的类型声明 | `lib/index.d.ts` |
 | `files` 含入口**与 `cordis.patch.yml`** | `["lib", "cordis.patch.yml", "THIRD-PARTY-NOTICES.md"]` |
 | `dsh.bundle.patch` 指向该 patch | `./cordis.patch.yml` |
 | `version` 已递增 | npm 不允许覆盖已发布版本 |
 
-发布后**在干净环境里验证**（0.1.0 的 tarball 已按此验证过；0.2.0 之后的版本都由 `publish.yml` 发布，但隔离安装记录仍未补齐）：
+发布后**在干净环境里验证**（0.2.1 线的 rc.2 / rc.3 / rc.4 已在隔离 prefix + 隔离 `DSH_HOME` 实测，见 [开发、构建与验证](dev-build.md#兼容性与依赖契约)；每次发布仍按下面两步再验一次）：
 
 ```sh
 dsh plugin --profile demo add dsh-report-ledger   # 空 DSH_HOME 里
@@ -34,16 +35,16 @@ dsh --profile demo --dump-config                  # 应出现 `# == dsh-report-l
 
 ## 开发者模式不能随包出去
 
-`devMode` 是**给复刻仓库的贡献者**准备的开发期回路，不是给安装包使用者的功能。它在发布包之外有两个层面的隔离：
+开发者模式是**给复刻仓库的贡献者**准备的开发期回路，不是给安装包使用者的功能。它在发布包之外有两个层面的隔离：
 
-- **配置**：发布 patch 只有 release 一行，没有 dev 行、没有 `devMode` 字段；
+- **配置**：发布 patch 只有 release 一行，没有 dev 行，也没有 `devMode` 开关；
 - **代码**：dev 半整体搬到了检出里的附加 bundle `dev/bundle/`，单独构建到 `dev/bundle/lib/`，发布包的主入口根本不 import 它。
   `lib/index.js` 里不含任何 dev 工具标识。
 
 门仍然只有一道且没变：`installDevMode` 先看包里有没有 `dev/agents.yml`，没有就返回空 disposer；`files` 不含 `dev/`，
 所以安装出来的包即便有人手工塞进附加包，那个附加也只会去注入 release 行发布的 `reportLedger` 服务，名册缺失时仍一个开发工具都不注册。**复刻仓库才是门。**
 
-`devMode` 那套只有三样东西：工具 `dev_agent_start` / `dev_agents_reload` / `dev_archive`、提示词 section
+开发者模式那套只有三样东西：工具 `dev_agent_start` / `dev_agents_reload` / `dev_archive`、提示词 section
 `plugin:report-ledger:dev`，以及 `$DSH_HOME/report-ledger/dev-agents.json` 里的绑定。早先版本把它们注册成
 harness 预设，是反面教材：预设是部署层面的事实，开发产物会进所有使用者的选择器。
 
@@ -139,7 +140,7 @@ release 创建/上传失败时，先 `gh workflow run mirror-to-gitee.yml --ref 
 
 ```sh
 curl -X POST "https://gitee.com/api/v5/repos/stone_zhan/dsh-report-ledger/releases/<release_id>/attach_files?access_token=<token>" \
-     -F "file=@dsh-report-ledger-0.2.4.tgz"
+     -F "file=@dsh-report-ledger-<version>.tgz"
 ```
 
 

@@ -213,9 +213,14 @@ export function pendingMode(hops: readonly RouteHop[], target: string): Delivery
     if (hop.action === 'transferred') {
       if (hop.from === target) addressed = false
       if (hop.to.includes(target)) {
-        addressed = hop.from === undefined
+        const inherited = hop.from === undefined
           ? true
           : pendingMode(hops.slice(0, index), hop.from) === 'wakeup'
+        // A transfer ADDS an obligation to the target; it must not erase an
+        // unanswered addressed hand-off the target already holds. Assigning the
+        // inherited mode here let a quiet copy moved onto an already-addressed
+        // session downgrade it to `inject`, so the session never ran.
+        if (inherited) addressed = true
       }
       continue
     }

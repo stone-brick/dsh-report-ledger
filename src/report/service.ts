@@ -25,9 +25,9 @@ import { planAllocation, type StaleBinding, type WorktreeSettings } from './allo
 import type { AgentLike } from './deliver.ts'
 import { deliver, pendingMode, pendingTargets, type DeliveryOutcome } from './deliver.ts'
 import { evaluateLease, leaseState } from './lease.ts'
-import { allocateId, appendHop, appendReportBody, bodyStartLine, discardUnwrittenId, isValidReportId, listReports, readDigestOf, readHops, readReport, reportExists, reportPath, routePath, writeReport } from './ledger.ts'
+import { allocateId, appendHop, appendReportBody, bodyStartLine, discardUnwrittenId, isValidReportId, listReports, listReportIds, readDigestOf, readHops, readReport, reportExists, reportPath, routePath, writeReport } from './ledger.ts'
 import {
-  addWorktree, classifyGitRefusal, compareKey, headOf, isWorktreeClean, removeWorktree, resolveRepo, samePath,
+  addWorktree, classifyGitRefusal, compareKey, headOf, ignoredPathCount, isWorktreeClean, removeWorktree, resolveRepo, samePath,
   unmergedCommitCount,
 } from './worktree.ts'
 import type { RepoLocation } from './worktree.ts'
@@ -699,6 +699,17 @@ function digestProjection(front: Pick<ReportFrontMatter, 'to' | 'cc' | 'authors'
 /** Why a digest cannot be rebuilt, when its transfer path is gone. */
 const MISSING_PATH = 'its transfer path is missing, so the digest cannot be rebuilt from it'
 
+/**
+ * Why a digest cannot be rebuilt, when the path file exists but holds no hop.
+ *
+ * A crash between opening the sidecar and writing the first hop leaves a zero-byte
+ * file; a truncated or unreadable file looks the same to `readHops`. That is not a
+ * new report with an empty history — the digest still says how many hops it had —
+ * and projecting an empty path over it would erase the recipients and co-authors
+ * that are the only remaining record of where the report went.
+ */
+const EMPTY_PATH = 'its transfer path is empty or unreadable, so the digest cannot be rebuilt from it'
+
 /** The report service. */
 export class ReportService {
   readonly #host: ReportServiceHost
@@ -744,19 +755,35 @@ export class ReportService {
 
   /** Append one hop, then refresh the derived digest fields. */
   async #record(report: string, hop: RouteHop, options: { touch?: boolean } = {}): Promise<ReportFrontMatter> {
-    // A report whose digest says it has hops but whose sidecar is gone is a
-    // damaged record, not a new one. Appending would start a fresh path and the
-    // next #sync would project that empty history over the digest — erasing the
-    // recipients and co-authors. Refuse and leave the damage visible instead.
+    // A report whose digest says it has hops but whose sidecar is gone or holds
+    // no parseable hop is a damaged record, not a new one. Appending would start
+    // a fresh path and the next #sync would project that empty history over the
+    // digest — erasing the recipients and co-authors. Refuse and leave the damage
+    // visible instead. The second shape matters most: a plain `report_read`
+    // records a hop, so without this guard a read of a crash-truncated sidecar
+    // would destroy the digest it was only asked to display.
     const current = await readReport(report)
-    if (current !== undefined && current.front.hops > 0 && !existsSync(routePath(report))) {
+    const damage = current === undefined ? undefined : await this.#routeDamage(report, current.front)
+    if (damage !== undefined) {
       throw new Error(
-        `report-ledger: ${report}'s transfer path is missing while its digest records ${current.front.hops} hops; `
-        + 'refusing to rewrite the report from an empty history. Restore the .route.jsonl file first.',
+        `report-ledger: ${report} — ${damage}. Refusing to rewrite the report from an empty history.`
+        + ' Restore or repair the .route.jsonl file first.',
       )
     }
     await appendHop(report, hop)
     return await this.#sync(report, options)
+  }
+
+  /**
+   * Decide whether a report's transfer path can be trusted for a rewrite.
+   * @param report - report identifier.
+   * @param front - its digest, which records how many hops should exist.
+   * @returns why the path is damaged, or `undefined` when it is usable.
+   */
+  async #routeDamage(report: string, front: ReportFrontMatter): Promise<string | undefined> {
+    if (front.hops === 0) return undefined
+    if (!existsSync(routePath(report))) return MISSING_PATH
+    return (await readHops(report)).length === 0 ? EMPTY_PATH : undefined
   }
 
   /**
@@ -1550,17 +1577,14 @@ export class ReportService {
         )
       }
       const binding = current.front.worktree
-      // A concluded report cannot be holding a checkout against anyone, so
-      // closing releases the lease whatever happens to the directory next.
-      if (binding !== undefined && leaseState(hops) === 'held') {
-        await this.#record(report, {
-          at: Date.now(),
-          actor,
-          action: 'released',
-          to: [],
-          note: 'released by closing the report',
-        })
-      }
+      // The lease is released AFTER the directory decision, never before it.
+      // Releasing first opened a window in which a concurrent `report_lease`
+      // could claim the checkout — the report was still open and its last lease
+      // hop said `released`, so the referee granted — and the removal below then
+      // deleted the checkout the other report had just adopted. While this report
+      // is still `held`, the referee refuses that claim; once the directory is
+      // gone, a claimant gets `not-a-worktree`. The release hop is recorded
+      // below, after the removal, and `reclaimed` stays the final lease state.
       // The default is to leave a working tree exactly as its owner left it, and
       // the opt-in removal goes through git without a force flag — so an unclean
       // tree refuses here, and the refusal is reported rather than swallowed. A
@@ -1579,9 +1603,18 @@ export class ReportService {
             if (repo === undefined) {
               outcome = { action: 'refused', detail: `${binding.path} is no longer inside a git repository` }
             } else {
+              // `git status` calls a tree with only ignored files clean, and git
+              // then deletes those files on removal. Count them first so the
+              // close can say what it removed; the removal itself is unchanged.
+              const ignored = await ignoredPathCount(binding.path) ?? 0
               const removed = await removeWorktree(repo, binding.path)
               outcome = removed.ok
-                ? { action: 'removed' }
+                ? {
+                    action: 'removed',
+                    ...(ignored === 0 ? {} : {
+                      warning: `removed ${ignored} ignored path(s); git status does not count ignored files as uncommitted, but the removal deletes them`,
+                    }),
+                  }
                 : { action: 'refused', detail: removed.stderr.trim() }
             }
           }
@@ -1607,6 +1640,20 @@ export class ReportService {
           action: 'reclaimed',
           to: [],
           note: `checkout ${binding?.path ?? ''} removed at the owner's request`,
+        })
+      }
+      // End the claim only now that the directory decision above is final. If the
+      // removal succeeded, the report was still `held` throughout it, so a
+      // concurrent lease could not adopt the checkout and then lose it. The
+      // `reclaimed` hop is recorded first and `leaseState` treats it as terminal,
+      // so this release cannot hide the fact that the checkout was removed.
+      if (binding !== undefined && leaseState(hops) === 'held') {
+        await this.#record(report, {
+          at: Date.now(),
+          actor,
+          action: 'released',
+          to: [],
+          note: 'released by closing the report',
         })
       }
       const closedNote = [
@@ -2178,18 +2225,66 @@ export class ReportService {
     const repairs: DigestRepair[] = []
     const targets: ReportFrontMatter[] = []
     if (options.report === undefined) {
-      targets.push(...await listReports())
+      // Enumerated from the directory rather than from listReports: the listing is
+      // deliberately silent about a record it cannot parse, and a diagnostic whose
+      // whole job is naming damage must not inherit that silence.
+      for (const id of await listReportIds()) {
+        let digest: ReportFrontMatter | undefined
+        try {
+          digest = await readDigestOf(id)
+        } catch (error) {
+          repairs.push({
+            report: id, changed: false, stored: '', derived: '',
+            skipped: `the document could not be read: ${error instanceof Error ? error.message : String(error)}`,
+          })
+          continue
+        }
+        if (digest === undefined) {
+          repairs.push({
+            report: id, changed: false, stored: '', derived: '',
+            skipped: 'the document exists but its digest could not be parsed',
+          })
+          continue
+        }
+        targets.push({ ...digest, report: id })
+      }
     } else {
       // The id is the file name, exactly as in listReports: a hand-edited
       // identity field must not redirect the repair at another report.
-      const digest = await readDigestOf(options.report)
-      if (digest === undefined) return repairs
+      let digest: ReportFrontMatter | undefined
+      try {
+        digest = await readDigestOf(options.report)
+      } catch (error) {
+        return [{
+          report: options.report, changed: false, stored: '', derived: '',
+          skipped: `the document could not be read: ${error instanceof Error ? error.message : String(error)}`,
+        }]
+      }
+      if (digest === undefined) {
+        if (existsSync(reportPath(options.report))) {
+          return [{
+            report: options.report, changed: false, stored: '', derived: '',
+            skipped: 'the document exists but its digest could not be parsed',
+          }]
+        }
+        return repairs
+      }
       targets.push({ ...digest, report: options.report })
     }
     for (const digest of targets) {
       const report = digest.report
       const stored = digestProjection(digest)
-      const derived = digestProjection(projectRoute(await readHops(report)))
+      let hops: RouteHop[]
+      try {
+        hops = await readHops(report)
+      } catch (error) {
+        repairs.push({
+          report, changed: false, stored, derived: '',
+          skipped: `its transfer path could not be read: ${error instanceof Error ? error.message : String(error)}`,
+        })
+        continue
+      }
+      const derived = digestProjection(projectRoute(hops))
       if (stored === derived) {
         repairs.push({ report, changed: false, stored, derived })
         continue
@@ -2197,7 +2292,9 @@ export class ReportService {
       // Checked for the dry run too: "stale but repairable" and "damaged" are
       // different answers, and a read-only check that hid the difference would
       // send a reader to a repair that must refuse.
-      const unrepairable = digest.hops > 0 && !existsSync(routePath(report)) ? MISSING_PATH : undefined
+      const unrepairable = digest.hops > 0
+        ? (!existsSync(routePath(report)) ? MISSING_PATH : hops.length === 0 ? EMPTY_PATH : undefined)
+        : undefined
       if (options.dryRun === true) {
         repairs.push({ report, changed: true, stored, derived, ...(unrepairable === undefined ? {} : { skipped: unrepairable }) })
         continue
@@ -2205,7 +2302,8 @@ export class ReportService {
       const skipped = await this.#withLock(report, async () => {
         const current = await readReport(report)
         if (current === undefined) return 'it disappeared while the sweep was running'
-        if (current.front.hops > 0 && !existsSync(routePath(report))) return MISSING_PATH
+        const damage = await this.#routeDamage(report, current.front)
+        if (damage !== undefined) return damage
         const fresh = projectRoute(await readHops(report))
         // Re-checked inside the lock: a mutation that ran during the scan has
         // already corrected this digest, and rewriting would be a no-op that the

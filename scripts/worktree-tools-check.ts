@@ -63,6 +63,9 @@ await git(repo, 'config', 'user.email', 'worktree-tools-check@example.invalid')
 await writeFile(join(repo, 'f.txt'), 'l1\n')
 await git(repo, 'add', '-A')
 await git(repo, 'commit', '-q', '-m', 'base')
+// `ignored.log` is invisible to `git status --porcelain`, so a checkout holding
+// only that file is "clean". The removal warning test needs exactly that shape.
+await writeFile(join(repo, '.git', 'info', 'exclude'), 'ignored.log\n', 'utf8')
 
 const located = await w.resolveRepo(repo)
 if (located === undefined) throw new Error('fixture repository did not resolve')
@@ -363,6 +366,30 @@ check('the checkout is gone',
   peerDigest?.worktree === undefined
   || !(await w.listWorktrees(located)).some((entry) => w.samePath(entry.path, peerDigest.worktree?.path ?? '')))
 check('report_close still says the report can reopen', disposed.includes('reopens it automatically'))
+
+// The order is the race fix: the directory decision (reclaimed) must precede the
+// release, so a concurrent lease sees `held` throughout the removal. If a future
+// change moves the release back before the removal, the first assertion fails.
+const disposedHops = await ledger.readHops(peerDigest?.report ?? '')
+const reclaimedAt = disposedHops.findIndex((hop) => hop.action === 'reclaimed')
+const releasedAt = disposedHops.findIndex((hop) => hop.action === 'released')
+check('the checkout is reclaimed before the claim is released',
+  reclaimedAt !== -1 && releasedAt !== -1 && reclaimedAt < releasedAt,
+  disposedHops.map((hop) => hop.action).join(','))
+check('a removed checkout keeps reclaimed as its terminal lease state',
+  leaseState(disposedHops) === 'reclaimed', leaseState(disposedHops))
+
+// Ignored files are deleted by `git worktree remove` even though `git status`
+// calls the tree clean. The close must say so rather than report a silent removal.
+const warned = await call('report_author', { subject: 'ignored warning', body: 'b', worktree: true })
+const warnedDigest = (await ledger.listReports()).find((front) => front.subject === 'ignored warning')
+await writeFile(join(warnedDigest?.worktree?.path ?? '', 'ignored.log'), 'secret\n')
+const warnedClose = await call('report_close', {
+  report: warnedDigest?.report ?? '', note: 'done', worktree: 'remove-if-clean',
+})
+check('removal warns about ignored paths it deletes',
+  warnedClose.includes('working tree removed') && warnedClose.includes('ignored path'),
+  warnedClose)
 
 const kept = await call('report_author', { subject: 'kept checkout', body: 'b', worktree: true })
 const keptDigest = (await ledger.listReports()).find((front) => front.subject === 'kept checkout')

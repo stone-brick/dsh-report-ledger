@@ -18,7 +18,7 @@ export {}
  * Run: node scripts/worktree-check.ts
  */
 
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 
@@ -110,6 +110,22 @@ check('a drive root keeps its separator',
   w.compareKey('C:\\'))
 check('case sensitivity follows the host', w.samePath('C:/A/B', 'c:/a/b') === win32,
   `platform=${process.platform}`)
+
+// The same directory reached through a junction/symlink is one identity, not two.
+// Without realpath the ledger would refuse a legitimate checkout claim (and could
+// record a live checkout as "not a worktree") just because the caller spelled it
+// through a link.
+const target = join(scratch, 'same-target')
+await mkdir(target, { recursive: true })
+const link = join(scratch, 'same-link')
+try {
+  await symlink(target, link, win32 ? 'junction' : 'dir')
+  check('a junction or symlink spelling is the same path', w.samePath(link, target))
+} catch {
+  // A host that forbids creating links cannot answer this; the comparison rule
+  // still falls back to the normalized spelling, and the rest of the suite runs.
+  check('a junction or symlink spelling is the same path', true, 'host refused to create a link; skipped')
+}
 
 // ---- 3. version gating ------------------------------------------------------
 check('relative paths are recognized on 2.48', w.supportsRelativePaths('git version 2.48.0'))

@@ -1,17 +1,15 @@
 /**
  * The model-facing tools of the report ledger.
  *
- * Sixteen tools are registered by default and seventeen when the worktree
- * feature is on: author, co-author, address, copy, forward, read, list,
+ * Seventeen tools are registered by default and eighteen when the worktree
+ * feature is on: author, co-author, address, copy, forward, read, list, check,
  * acknowledge, amend, close and release, plus discovery (peer_list), creation
  * (peer_start) and revival (peer_wake) — and report_lease, which exists only with
  * the feature.
  * `report_transfer` and `report_handover` are the retirement half: a hand-off that
  * would otherwise stay owed forever, and the act of moving a departing session's
- * assets to a successor. The
- * report_* tools each record a hop, so the transfer path is a by-product of
- * normal use rather than a separate discipline the model has to remember; the
- * two peer_* tools read and create sessions and leave the ledger alone.
+ * assets to a successor. Most report_* tools record a hop, so the transfer path is
+ * a by-product of normal use; `report_check` is the read-only exception.
  *
  * @module dsh-report-ledger/report/tools
  */
@@ -79,7 +77,11 @@ function renderProvision(prepared: PreparedWorktree): string[] {
 /** The line describing what a mutation did with a checkout on disk. */
 function renderWorktreeOutcome(outcome: WorktreeOutcome | undefined, canRemove: boolean): string | undefined {
   if (outcome === undefined) return undefined
-  if (outcome.action === 'removed') return 'working tree removed'
+  if (outcome.action === 'removed') {
+    return outcome.warning === undefined
+      ? 'working tree removed'
+      : `working tree removed\nwarning: ${outcome.warning}`
+  }
   // The hint only names a parameter the caller can actually see and pass; on a
   // deployment with the feature off, `worktree` is not advertised at all.
   if (outcome.action === 'kept') {
@@ -563,7 +565,7 @@ export function registerReportTools(
 
   disposers.push(ctx.tools.register(defineTool({
     name: 'report_check',
-    description: 'Check whether each report\'s digest still agrees with its transfer path — read-only: nothing is written and no hop is recorded. The front matter is a cache of the append-only path, so a crash between a hop and the digest rewrite, a hand edit, or a version that changed what the digest derives can leave a report whose counters, recipients or co-authors no longer match its history. Omit `report` to sweep the whole ledger (one stat plus one sidecar read per report); pass it to check one. Each disagreement is printed as `stored -> derived`. Repair is deliberately NOT a tool: a sweep rewrites every digest, so it stays with the human who can see whether the ledger is being written right now (`pnpm repair`, optionally `--dry-run`).',
+    description: 'Check whether each report\'s digest still agrees with its transfer path — read-only: nothing is written and no hop is recorded. The front matter is a cache of the append-only path, so a crash between a hop and the digest rewrite, a hand edit, or a version that changed what the digest derives can leave a report whose counters, recipients or co-authors no longer match its history. Omit `report` to sweep the whole ledger (one stat plus one sidecar read per report); pass it to check one. Each disagreement is printed as `stored -> derived`; a record that cannot be parsed or read is reported as `could not be checked` rather than silently omitted. `status` is state, not a projection of the transfer path (an ack after a close does not reopen), so this check does not compare it. Repair is deliberately NOT a tool: a sweep rewrites every digest, so it stays with the human who can see whether the ledger is being written right now (`pnpm repair`, optionally `--dry-run`).',
     parameters: {
       report: { type: 'string', description: 'Check this report only. Omit to sweep the whole ledger.' },
     },
@@ -578,17 +580,24 @@ export function registerReportTools(
         return `no report ${JSON.stringify(input.report)} in the ledger`
       }
       const stale = repairs.filter((repair) => repair.changed)
-      if (stale.length === 0) {
+      const skipped = repairs.filter((repair) => repair.skipped !== undefined)
+      if (stale.length === 0 && skipped.length === 0) {
         return `${repairs.length} report(s) checked; every digest agrees with its transfer path`
       }
-      return [
-        `${repairs.length} report(s) checked; ${stale.length} digest(s) disagree with their transfer path:`,
-        ...stale.map((repair) => [
-          `  ${repair.report}  ${repair.stored}  ->  ${repair.derived}`,
-          ...(repair.skipped === undefined ? [] : [`    left alone: ${repair.skipped}`]),
-        ].join('\n')),
-        'repair with `pnpm repair` (optionally --dry-run).',
-      ].join('\n')
+      const lines = [`${repairs.length} report(s) checked;`]
+      if (stale.length > 0) lines.push(`${stale.length} digest(s) disagree with their transfer path:`)
+      lines.push(...stale.map((repair) => [
+        `  ${repair.report}  ${repair.stored}  ->  ${repair.derived}`,
+        ...(repair.skipped === undefined ? [] : [`    left alone: ${repair.skipped}`]),
+      ].join('\n')))
+      if (skipped.length > 0) {
+        lines.push(`${skipped.length} record(s) could not be checked:`)
+        lines.push(...skipped.map((repair) => `  ${repair.report}  ${repair.skipped ?? 'skipped'}`))
+      }
+      if (stale.some((repair) => repair.skipped === undefined)) {
+        lines.push('repair with `pnpm repair` (optionally --dry-run).')
+      }
+      return lines.join('\n')
     },
   })))
 
@@ -619,7 +628,7 @@ export function registerReportTools(
             type: 'string',
             enum: ['keep', 'remove-if-clean'],
             description: 'What to do with a bound git checkout. keep (the default) leaves it exactly as it is; '
-              + 'remove-if-clean deletes it only if it has no uncommitted work, and reports git\'s refusal otherwise.',
+              + 'remove-if-clean deletes it only if it has no uncommitted work (ignored files and empty untracked directories are still deleted; the result names how many), and reports git\'s refusal otherwise.',
           },
         }
         : {}),

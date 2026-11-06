@@ -76,7 +76,7 @@ const WORKTREE_ENABLED = [
 ].join('\n')
 
 /** What it says instead on a deployment that offers no working trees. */
-const WORKTREE_DISABLED = '本部署未启用工作区：`report_lease` 不存在，`peer_start` / `report_author` / `report_close` 也都没有 `worktree` 参数——不要照上面的条目去调它们。'
+const WORKTREE_DISABLED = '本部署未启用工作区：`report_lease` 不存在；`report_release` 仍在，但这里没有检出可交还，调用它只会得到这条部署事实。`peer_start` / `report_author` / `report_close` 也都没有 `worktree` 参数——不要照上面的条目去调它们。'
 
 /** The behavior conventions, identical in both variants. */
 const PROTOCOL_RULES = [
