@@ -85,7 +85,17 @@ jobs:
               echo "tag $tag already on gitee; leaving it alone"
             else
               echo "pushing tag $tag"
-              gp gitee "refs/tags/$tag:refs/tags/$tag"
+              # A main-push run and a tag-push run can start together. Both see the
+              # tag missing from their snapshot; the loser is rejected with
+              # "already exists". That is success for this job — the tag is now on
+              # Gitee — so re-check before turning the race into a red run.
+              if ! gp gitee "refs/tags/$tag:refs/tags/$tag"; then
+                if git ls-remote --tags gitee "refs/tags/$tag" | grep -q .; then
+                  echo "tag $tag appeared while this run was pushing; leaving it alone"
+                else
+                  exit 1
+                fi
+              fi
             fi
           done
 
