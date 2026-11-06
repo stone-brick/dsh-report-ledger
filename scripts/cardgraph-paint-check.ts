@@ -516,6 +516,43 @@ check('every arrowhead lands just short of its wire target', heads.every((head) 
     const dy = Math.max(head.box.y - edge.to.y, 0, edge.to.y - (head.box.y + head.box.height))
     return Math.hypot(dx, dy) <= 4
   })))
+// The check above is a proximity test only: it also accepts a head that *overlaps*
+// the target, and it cannot tell a shrunken head from an oversized one. The case
+// that matters is the adjacent-card short jump — an 8px gap and a 9px head used to
+// put the base inside the parent card, where the card (painted above the wires) hid
+// half of it. R-0059 shrank the head to `segment - ARROW_GAP`; what actually pins
+// that is containment: a head may touch an endpoint's border but never enter it
+// (R-0076 N2).
+/** The box a wire end lands on: a card's or a frame's rectangle. */
+const endBox = (end: { readonly kind: 'card' | 'frame'; readonly index: number }): Box | undefined =>
+  end.kind === 'card' ? layout.cards[end.index]?.bounds : layout.frames[end.index]?.bounds
+/** Shared area of two boxes; 0 means disjoint or merely touching. */
+const overlapArea = (a: Box, b: Box): number =>
+  Math.max(0, Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x))
+  * Math.max(0, Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y))
+check('no arrowhead is buried inside either endpoint box', heads.length === layout.edges.length
+  && heads.every((head, index) => {
+    const edge = layout.edges[index]
+    if (edge === undefined) return false
+    const target = endBox(edge.to)
+    const source = endBox(edge.from)
+    return (target === undefined || overlapArea(head.box, target) === 0)
+      && (source === undefined || overlapArea(head.box, source) === 0)
+  }))
+// The regression itself, on the shortest wire the drawing can make: the old
+// formula (`head = last segment length`) puts the head's base 5px inside the parent
+// card, so this fails; the shipped one starts exactly on the parent's bottom edge.
+const tight = buildCardgraph(payload, [
+  report('R-0900', { created: at(1) }),
+  report('R-0901', { created: at(2), parent: 'R-0900' }),
+], { fitChannels: true })
+const tightHeads = paint({ layout: tight }).recorder.fills.filter((fill) => fill.points === 3)
+check('an adjacent-card arrowhead starts on the parent edge, not inside it', (() => {
+  const parent = tight.cards.find((card) => card.report === 'R-0900')?.bounds
+  const child = tight.cards.find((card) => card.report === 'R-0901')?.bounds
+  if (parent === undefined || child === undefined || tightHeads.length !== tight.edges.length) return false
+  return tightHeads.every((head) => overlapArea(head.box, parent) === 0 && overlapArea(head.box, child) === 0)
+})())
 
 /** Half way along a polyline, measured the same way the painter does. */
 const midpointOf = (points: readonly { readonly x: number; readonly y: number }[]): { x: number; y: number } | undefined => {

@@ -1067,40 +1067,14 @@ function buildOne(
   const drawingWidth = columns.length === 0
     ? 0
     : opts.margin * 2 + columns.length * frameWidth + (columns.length - 1) * opts.columnGap
-  /** The lane x each wire takes at each end, decided before any route is built. */
+  /**
+   * The lane x each wire takes at each end, decided before any route is built.
+   *
+   * Filled in below, after the three thread-lane maps: a channel may only count
+   * the wires whose route actually reaches a gutter, and which ones those are is
+   * what those maps decide (R-0076 N1).
+   */
   const lanePlan = new Map<PendingEdge, { fromX?: number; toX?: number }>()
-  {
-    const uses = new Map<string, { edge: PendingEdge; end: 'from' | 'to'; portY: number; column: number; side: CardgraphSide }[]>()
-    for (const edge of pending) {
-      const use = gutterUse(edge)
-      for (const end of ['from', 'to'] as const) {
-        const part = end === 'from' ? use.from : use.to
-        if (part === undefined) continue
-        const key = gutterKeyOf(part.column, part.side)
-        const list = uses.get(key) ?? []
-        list.push({ edge, end, portY: part.portY, column: part.column, side: part.side })
-        uses.set(key, list)
-      }
-    }
-    for (const [key, list] of uses) {
-      const first = list[0]
-      if (first === undefined) continue
-      const band = gutterBand(first.column, first.side)
-      const capacity = Math.max(1, Math.floor((band.high - band.low) / LANE_STEP) + 1)
-      list.sort((a, b) => a.portY - b.portY || (a.edge.report < b.edge.report ? -1 : a.edge.report > b.edge.report ? 1 : 0))
-      list.forEach((use, index) => {
-        const offset = ((index % capacity) - (capacity - 1) / 2) * LANE_STEP
-        // Keep the lane inside the canvas: in a single-column drawing the last column's
-        // gutter sits on the drawing's edge, and an unclamped lane would hang off it.
-        const x = clampTo(band.base + offset, Math.max(4, band.low), Math.min(drawingWidth - 4, band.high))
-        const plan = lanePlan.get(use.edge) ?? {}
-        if (use.end === 'from') plan.fromX = x
-        else plan.toX = x
-        lanePlan.set(use.edge, plan)
-      })
-      demand.gutters.set(key, list.length)
-    }
-  }
   /**
    * Thread run rows.
    *
@@ -1185,6 +1159,60 @@ function buildOne(
       list.sort((a, b) => a.from.y - b.from.y || (a.report < b.report ? -1 : 1))
       list.forEach((edge, index) => sameFrameLane.set(edge, index))
       demand.sameFrameLanes = Math.max(demand.sameFrameLanes, list.length)
+    }
+  }
+  /**
+   * Whether a wire's route actually travels down a column gutter.
+   *
+   * Three kinds of thread never leave their frame: the adjacent-card short jump,
+   * the cross-column gap lane, and the same-frame padding lane — `route` returns
+   * from inside the frame for each of them. Counting them as gutter users anyway
+   * widened every column gap by 9px per wire for lanes nothing was ever drawn on:
+   * 40 adjacent replies grew the gap from 48 to 393 (R-0076 N1). The predicate
+   * reads the same maps `route` tests, so demand and drawing cannot disagree.
+   * @param edge - the wire being planned.
+   * @returns whether its route reaches a gutter.
+   */
+  const usesGutter = (edge: PendingEdge): boolean => {
+    if (edge.kind !== 'thread') return true
+    const fromCard = edge.from.kind === 'card' ? cards[edge.from.index] : undefined
+    const toCard = edge.to.kind === 'card' ? cards[edge.to.index] : undefined
+    if (fromCard === undefined || toCard === undefined) return true
+    if (fromCard.frame !== toCard.frame) return true
+    if (Math.abs(toCard.slot - fromCard.slot) === 1) return false
+    return !crossGapLane.has(edge) && !sameFrameLane.has(edge)
+  }
+  {
+    const uses = new Map<string, { edge: PendingEdge; end: 'from' | 'to'; portY: number; column: number; side: CardgraphSide }[]>()
+    for (const edge of pending) {
+      if (!usesGutter(edge)) continue
+      const use = gutterUse(edge)
+      for (const end of ['from', 'to'] as const) {
+        const part = end === 'from' ? use.from : use.to
+        if (part === undefined) continue
+        const key = gutterKeyOf(part.column, part.side)
+        const list = uses.get(key) ?? []
+        list.push({ edge, end, portY: part.portY, column: part.column, side: part.side })
+        uses.set(key, list)
+      }
+    }
+    for (const [key, list] of uses) {
+      const first = list[0]
+      if (first === undefined) continue
+      const band = gutterBand(first.column, first.side)
+      const capacity = Math.max(1, Math.floor((band.high - band.low) / LANE_STEP) + 1)
+      list.sort((a, b) => a.portY - b.portY || (a.edge.report < b.edge.report ? -1 : a.edge.report > b.edge.report ? 1 : 0))
+      list.forEach((use, index) => {
+        const offset = ((index % capacity) - (capacity - 1) / 2) * LANE_STEP
+        // Keep the lane inside the canvas: in a single-column drawing the last column's
+        // gutter sits on the drawing's edge, and an unclamped lane would hang off it.
+        const x = clampTo(band.base + offset, Math.max(4, band.low), Math.min(drawingWidth - 4, band.high))
+        const plan = lanePlan.get(use.edge) ?? {}
+        if (use.end === 'from') plan.fromX = x
+        else plan.toX = x
+        lanePlan.set(use.edge, plan)
+      })
+      demand.gutters.set(key, list.length)
     }
   }
   /** Drop repeated points and merge collinear ones, so a route has no stutter. */  const tidy = (input: { x: number; y: number }[]): { x: number; y: number }[] => {

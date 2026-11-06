@@ -978,6 +978,31 @@ check('muting a kind under fitChannels does not move frames',
 check('muting a kind under fitChannels does not change the drawing width',
   busyFull.width === busyMuted.width, `${busyFull.width} vs ${busyMuted.width}`)
 
+// The demand a gutter contributes is the number of wires that actually travel down
+// it. Three kinds of thread stay inside their frame — the adjacent-card short jump,
+// the cross-column gap lane, and the same-frame padding lane — and none of them
+// reaches a gutter, so none may widen the column gap. They used to be counted
+// anyway: 40 adjacent replies grew the gap from 48 to 393 (9px per reserved lane),
+// pushing every sibling column right and shrinking the fitted drawing (R-0076 N1).
+const columnGapOf = (drawing: { readonly columns: readonly { readonly bounds: { readonly x: number; readonly width: number } }[] }): number => {
+  const left = drawing.columns[0]?.bounds
+  const right = drawing.columns[1]?.bounds
+  return left === undefined || right === undefined ? 0 : right.x - (left.x + left.width)
+}
+const chainRoot = report('R-0370', { created: at(1), to: ['session-child'] })
+const adjacentChain = [chainRoot]
+for (let index = 1; index <= 40; index++) {
+  adjacentChain.push(report(`R-${String(370 + index).padStart(4, '0')}`, {
+    created: at(1 + index),
+    parent: index === 1 ? 'R-0370' : `R-${String(370 + index - 1).padStart(4, '0')}`,
+  }))
+}
+const chainOnly = buildCardgraph(payload, [chainRoot], { fitChannels: true })
+const chainThreads = buildCardgraph(payload, adjacentChain, { fitChannels: true })
+check('an in-frame thread reserves no gutter lane',
+  chainThreads.edges.length === 41 && columnGapOf(chainThreads) === columnGapOf(chainOnly),
+  `${chainThreads.edges.length} edges, gap ${columnGapOf(chainThreads)} vs ${columnGapOf(chainOnly)}`)
+
 // Cross-column threads share the gap between the two card columns, and each gets its
 // own lane inside it.
 const gapFork = buildCardgraph(payload, [
