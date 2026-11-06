@@ -37,6 +37,7 @@ process.env.DSH_HOME = root
 const { ReportService } = await import('../src/report/service.ts')
 const { allocateId, appendHop, clearReadCache, listReports, readHops, readReport, reportPath, reportsDir, routePath, writeReport } = await import('../src/report/ledger.ts')
 const { pendingTargets } = await import('../src/report/deliver.ts')
+const { registerReportTools } = await import('../src/report/tools.ts')
 
 /** Agents resident for this run, and how a digest reached each one. */
 const live = new Set<string>()
@@ -384,6 +385,197 @@ check('a second sweep rewrites nothing',
 check('a report whose path is gone is reported, not rewritten',
   secondPass.find((repair) => repair.report === guarded.front.report)?.skipped !== undefined,
   JSON.stringify(secondPass.find((repair) => repair.report === guarded.front.report)))
+
+// ---- long bodies: outline, head+tail, and windowed reads ------------------
+// The failure these pin: a head-only excerpt of a long body hid the newest
+// section, which is exactly what a returning reader opens a running report for.
+// The fix is a head AND a tail, a line-numbered outline, and a windowed read so
+// a specific section can be fetched by the line the outline printed.
+const longLines: string[] = ['# plan', '', '```', '# not a heading', '```', '']
+for (let index = 0; index < 400; index++) longLines.push(`step ${index}: ${'x'.repeat(40)}`)
+longLines.push('', '## closing note', '', 'the tail marker line')
+const longAuthored = await service.author({ subject: 'long body', body: longLines.join('\n'), actor: 'session-a' })
+const longId = longAuthored.front.report
+await service.contribute(longId, 'session-a', 'newest decision: ship it')
+
+const longBody = (await readReport(longId))?.body.trim() ?? ''
+const longBodyLines = longBody.split('\n')
+const totalLong = longBodyLines.length
+const contributionLine = longBodyLines.findIndex((line) => line.startsWith('### contribution by')) + 1
+const newestLine = longBodyLines.findIndex((line) => line === 'newest decision: ship it') + 1
+check('the long-body fixture is large enough to be excerpted', longBody.length > 8000, String(longBody.length))
+check('the long-body fixture has a contribution at its end', contributionLine > 0 && newestLine === totalLong,
+  `contribution=${contributionLine} newest=${newestLine} total=${totalLong}`)
+
+const excerpt = await service.read(longId, 'session-b')
+check('a long body comes back as a head-and-tail excerpt', excerpt.includes(`head and tail of ${totalLong} body lines`),
+  excerpt.split('\n').slice(-6).join(' | '))
+check('the excerpt keeps the oldest section (the head)', excerpt.includes('# plan'))
+check('the excerpt keeps the newest section (the tail a head-only cut hid)',
+  excerpt.includes('newest decision: ship it'))
+check('the excerpt does not carry the whole body', excerpt.length < longBody.length,
+  `${excerpt.length} vs ${longBody.length}`)
+check('the middle of a long body is left out of the excerpt', !excerpt.includes('step 200:'),
+  excerpt.includes('step 200:') ? 'middle present' : '')
+
+// The outline is derived from the body and numbered in body lines; it is what
+// makes "fetch that section" answerable without a second guess.
+const bodyHeaderAt = excerpt.indexOf('\n## body')
+const outlineStart = excerpt.indexOf('## outline')
+const outlinePart = outlineStart < 0 || bodyHeaderAt < 0 ? '' : excerpt.slice(outlineStart, bodyHeaderAt)
+check('a long body carries an outline', outlinePart.startsWith('## outline'), outlinePart.slice(0, 80))
+check('the outline numbers a heading with its body line',
+  new RegExp(`\\b1\\s+# plan`).test(outlinePart), outlinePart.slice(0, 120))
+check('the outline numbers the newest contribution by its body line',
+  new RegExp(`\\b${contributionLine}\\s+### contribution by`).test(outlinePart),
+  outlinePart.split('\n').filter((line) => line.includes('contribution')).join(' | '))
+check('the outline numbers the closing heading',
+  new RegExp(`\\b${longBodyLines.indexOf('## closing note') + 1}\\s+## closing note`).test(outlinePart))
+check('the outline skips a heading inside a fenced code block', !outlinePart.includes('not a heading'),
+  outlinePart.split('\n').filter((line) => line.includes('heading')).join(' | '))
+
+// A window is an exact slice by body line — the same unit the outline prints —
+// and it is not accompanied by the outline, because the caller already has one.
+const windowed = await service.read(longId, 'session-b', { offset: contributionLine, limit: 3 })
+const windowedBody = windowed.split('\n## body')[1] ?? ''
+check('a window is labelled with its body line range',
+  windowedBody.startsWith(` (body lines ${contributionLine}-${contributionLine + 2} of ${totalLong})`),
+  windowedBody.slice(0, 120))
+check('a window returns exactly the requested lines',
+  windowedBody.includes(longBodyLines.slice(contributionLine - 1, contributionLine + 2).join('\n')))
+const earlyWindow = await service.read(longId, 'session-b', { offset: 10, limit: 3 })
+check('a window short of the end names the next line to continue from',
+  (earlyWindow.split('\n## body')[1] ?? '').includes('continue with report_read offset=13'),
+  (earlyWindow.split('\n## body')[1] ?? '').slice(-160))
+check('a window does not repeat the outline', !windowed.includes('## outline'))
+
+const lastWindow = await service.read(longId, 'session-b', { offset: totalLong - 1, limit: 5 })
+const lastWindowBody = lastWindow.split('\n## body')[1] ?? ''
+check('a window past the end is clamped to the last line',
+  lastWindowBody.startsWith(` (body lines ${totalLong - 1}-${totalLong} of ${totalLong})`), lastWindowBody.slice(0, 120))
+check('a window that reaches the end has no continuation', !lastWindowBody.includes('continue with report_read'))
+
+const beyond = await service.read(longId, 'session-b', { offset: totalLong + 5 })
+check('an offset past the end says so instead of failing', beyond.includes(`no body line ${totalLong + 5}`),
+  beyond.split('\n').find((line) => line.includes('no body line')) ?? beyond.slice(0, 120))
+
+let badOffsetRefused = false
+try {
+  await service.read(longId, 'session-b', { offset: 0 })
+} catch {
+  badOffsetRefused = true
+}
+check('a zero offset is refused', badOffsetRefused)
+let badLimitRefused = false
+try {
+  await service.read(longId, 'session-b', { limit: 0 })
+} catch {
+  badLimitRefused = true
+}
+check('a zero limit is refused', badLimitRefused)
+
+const beforeWindowReads = await listed(longId)
+await service.read(longId, 'session-b', { offset: 1, limit: 2 })
+const afterWindowReads = await listed(longId)
+check('a windowed read is still recorded as a read',
+  (afterWindowReads?.reads ?? 0) === (beforeWindowReads?.reads ?? 0) + 1,
+  `reads=${beforeWindowReads?.reads}->${afterWindowReads?.reads}`)
+
+// A body that fits the inline limit is shown whole and gets no outline: the
+// outline exists to navigate a body the reader cannot see in one piece.
+const shortRead = await service.read(readme.front.report, 'session-b')
+check('a short body is shown whole with no outline',
+  shortRead.includes('\n## body\n') && !shortRead.includes('## outline'))
+check('a short body is not labelled with a line range', !shortRead.includes('head and tail of'))
+
+// ---- one thread, listed from digests alone --------------------------------
+// The tree is written from both ends (`parent` on the child, `children` on the
+// parent), so the listing has to merge them; and it must cost nothing beyond the
+// digest scan — opening a body for a map would make a glance an audit event.
+const threadRoot = await service.author({ subject: 'thread root', body: 'root body', actor: 'session-a', task: 'line-x' })
+const lineA = await service.author({ subject: 'line A', body: 'a', actor: 'session-a', parent: threadRoot.front.report })
+const lineB = await service.author({ subject: 'line B', body: 'b', actor: 'session-a', parent: threadRoot.front.report })
+const lineADetail = await service.author({ subject: 'line A detail', body: 'g', actor: 'session-a', parent: lineA.front.report })
+
+const hopsBeforeThread = (await readHops(threadRoot.front.report)).length
+const thread = await service.thread(threadRoot.front.report)
+check('a thread lists the root and every descendant', thread?.rows.length === 4, String(thread?.rows.length))
+const shape = thread?.rows.map((entry) => `${entry.row.report}@${entry.depth}`).join(',')
+check('thread rows are in pre-order and carry their depth',
+  shape === `${threadRoot.front.report}@0,${lineA.front.report}@1,${lineADetail.front.report}@2,${lineB.front.report}@1`,
+  String(shape))
+check('the requested report is marked, the others are not',
+  thread?.rows[0]?.anchor === true && thread?.rows[1]?.anchor === false)
+check('a thread records no read hop', (await readHops(threadRoot.front.report)).length === hopsBeforeThread,
+  String((await readHops(threadRoot.front.report)).length))
+const fromMiddle = await service.thread(lineADetail.front.report)
+check('a thread reached from the middle resolves the same root', fromMiddle?.root === threadRoot.front.report,
+  String(fromMiddle?.root))
+check('a thread from the middle marks exactly one row', fromMiddle?.rows.filter((entry) => entry.anchor).length === 1)
+check('a thread of an unknown report is undefined', (await service.thread('R-9999')) === undefined)
+
+// A hand edit can leave the two ends disagreeing. The child's `parent` alone must
+// still be enough to place it, or a tree would depend on which side was written.
+await writeDocument('R-7200', '---\nreport: "R-7200"\nsubject: "hand parent"\nfrom: "s"\n---\n\nroot\n')
+await writeDocument('R-7201', '---\nreport: "R-7201"\nsubject: "hand child"\nfrom: "s"\nparent: "R-7200"\n---\n\nchild\n')
+const merged = await service.thread('R-7201')
+check('a child known only by its own parent field still joins the tree',
+  merged?.root === 'R-7200' && merged?.rows.length === 2,
+  JSON.stringify(merged?.rows.map((entry) => `${entry.row.report}@${entry.depth}`)))
+
+// A cycle is a hand-edit accident, not a reason to hang a session.
+await writeDocument('R-7202', '---\nreport: "R-7202"\nsubject: "cycle a"\nfrom: "s"\nparent: "R-7203"\n---\n\na\n')
+await writeDocument('R-7203', '---\nreport: "R-7203"\nsubject: "cycle b"\nfrom: "s"\nparent: "R-7202"\n---\n\nb\n')
+const cycle = await service.thread('R-7202')
+check('a parent/children cycle stops instead of hanging', cycle?.rows.length === 2, String(cycle?.rows.length))
+check('a cut cycle is reported rather than silently shortened', (cycle?.note ?? '').includes('cycle'),
+  String(cycle?.note))
+
+// A deleted document leaves a hole on one side or the other. Both are reported:
+// a line that quietly lost a member is worse than one that says so.
+await writeDocument('R-7204', '---\nreport: "R-7204"\nsubject: "orphaned by a deleted parent"\nfrom: "s"\nparent: "R-9998"\n---\n\na\n')
+const orphan = await service.thread('R-7204')
+check('a parent missing from the ledger is named', (orphan?.note ?? '').includes('parent R-9998'),
+  String(orphan?.note))
+check('an orphaned report still lists itself', orphan?.root === 'R-7204' && orphan?.rows.length === 1,
+  JSON.stringify(orphan?.rows.map((entry) => entry.row.report)))
+await writeDocument('R-7205', '---\nreport: "R-7205"\nsubject: "dangling child"\nfrom: "s"\nchildren:\n  - "R-9997"\n---\n\na\n')
+const dangling = await service.thread('R-7205')
+check('a listed child missing from the ledger is named', (dangling?.note ?? '').includes('R-9997'),
+  String(dangling?.note))
+
+// ---- the tool surface for a thread ----------------------------------------
+// The service can produce a tree; the tool has to render it, mark the anchor and
+// refuse to pretend a filtered tree answers the same question.
+const captured = new Map<string, { name: string; execute(args: unknown, exec: unknown): Promise<string> }>()
+const fakeCtx = {
+  tools: {
+    register(definition: unknown): () => void {
+      const entry = definition as { name: string; execute(args: unknown, exec: unknown): Promise<string> }
+      captured.set(entry.name, entry)
+      return () => {}
+    },
+  },
+}
+registerReportTools(fakeCtx, service, {} as never, { enabled: false } as never)
+const callTool = async (name: string, args: unknown): Promise<string> => {
+  const entry = captured.get(name)
+  if (entry === undefined) throw new Error(`tool ${name} was not registered`)
+  return await entry.execute(args, {} as never)
+}
+const toolTree = await callTool('report_list', { thread: lineADetail.front.report })
+check('report_list renders the line as a tree and marks the requested report',
+  toolTree.includes(`thread ${threadRoot.front.report} (4 report(s); requested from ${lineADetail.front.report})`)
+  && toolTree.includes('<- requested'), toolTree)
+check('a grandchild is indented by two levels', toolTree.includes(`\n    ${lineADetail.front.report} [`), toolTree)
+check('a thread tree shows the subject and status of each row',
+  toolTree.includes(`[open] line A`) && toolTree.includes(`[open] thread root`), toolTree)
+const combined = await callTool('report_list', { thread: threadRoot.front.report, status: 'closed' })
+check('thread= refuses to be combined with a flat filter', combined.includes('selector'), combined)
+const missingThread = await callTool('report_list', { thread: 'R-9999' })
+check('thread= on a missing report names it', missingThread.includes('no report "R-9999"'), missingThread)
+const onRoot = await callTool('report_list', { thread: threadRoot.front.report })
+check('a thread requested from its root needs no "requested from" suffix', onRoot.startsWith(`thread ${threadRoot.front.report} (4 report(s))`), onRoot)
 
 let failed = 0
 for (const [label, ok, detail] of checks) {

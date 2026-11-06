@@ -34,11 +34,47 @@ import type { RepoLocation } from './worktree.ts'
 import type { DeliveryMode, Report, ReportFrontMatter, ReportStatus, ReportWorktree, RouteHop } from './types.ts'
 import { HOP_ACTIONS, type HopAction } from './types.ts'
 
-/** Body size above which `report_read` returns a paged pointer instead of everything. */
+/** Body size above which `report_read` returns a head-and-tail excerpt instead of everything. */
 const BODY_INLINE_LIMIT = 8000
 
-/** How many characters of a body are shown when it exceeds the inline limit. */
+/** Characters of a truncated body shown from its start. */
 const BODY_HEAD_LIMIT = 1200
+
+/**
+ * Characters of a truncated body shown from its end.
+ *
+ * Larger than the head on purpose: a running collaboration appends its newest —
+ * and therefore most relevant — sections at the end, and a head-only excerpt used
+ * to hide exactly those. The tail is what a returning reader came for.
+ */
+const BODY_TAIL_LIMIT = 2000
+
+/** Body lines one windowed read returns when the caller does not name a limit. */
+const BODY_WINDOW_DEFAULT_LINES = 120
+
+/** Hard cap on the lines one window may return, whatever the caller asks. */
+const BODY_WINDOW_MAX_LINES = 400
+
+/**
+ * Hard cap on the characters one window may return.
+ *
+ * A limit counted in lines is only a budget if lines have a bounded size, and a
+ * body may legitimately contain one enormous line (a minified payload, a pasted
+ * blob). Without this the "default 120 lines" could still be megabytes.
+ */
+const BODY_WINDOW_MAX_CHARS = 20000
+
+/** How many headings the derived outline lists before it stops. */
+const OUTLINE_MAX_ENTRIES = 30
+
+/** Longest heading text one outline row keeps. */
+const OUTLINE_MAX_CHARS = 120
+
+/** Most rows one thread listing returns before it stops. */
+const THREAD_MAX_ROWS = 400
+
+/** Deepest nesting a thread listing follows before it stops. */
+const THREAD_MAX_DEPTH = 64
 
 /** A subject is one line; a newline would forge a second row in report_list. */
 function oneLineSubject(subject: string): string {
@@ -207,6 +243,21 @@ export interface AmendInput {
   readonly note?: string
 }
 
+/**
+ * One windowed read of a body.
+ *
+ * Offsets count **body lines** — the unit the derived outline prints — so a
+ * caller can go from an outline row straight to a window without translating
+ * document lines. A read without either field returns the default view (the whole
+ * body when it is small, a head-and-tail excerpt with an outline when it is not).
+ */
+export interface ReadOptions {
+  /** 1-based body line to start at. */
+  readonly offset?: number
+  /** How many body lines to return. */
+  readonly limit?: number
+}
+
 /** One row of a digest listing. */
 export interface DigestRow {
   /** Report identifier. */
@@ -237,6 +288,31 @@ export interface DigestRow {
   readonly updated: number
 }
 
+/** One digest in a thread listing, with where it sits in the tree. */
+export interface ThreadRow {
+  /** 0 for the root, one more for every level down. */
+  readonly depth: number
+  /** The digest, projected exactly like a flat listing row. */
+  readonly row: DigestRow
+  /** Whether this is the report the caller asked about. */
+  readonly anchor: boolean
+}
+
+/**
+ * One line of reports around a single report: its root, and every descendant.
+ *
+ * Built from digests alone, so a listing costs one scan and records no hop: a
+ * thread is a map, and looking at a map is not reading any report on it.
+ */
+export interface ThreadListing {
+  /** The root the walk started from — not necessarily the report that was asked for. */
+  readonly root: string
+  /** Pre-order rows: each report immediately before its children. */
+  readonly rows: readonly ThreadRow[]
+  /** Why the listing is incomplete, when it had to be cut short. */
+  readonly note?: string
+}
+
 /**
  * One token naming a bound working tree.
  *
@@ -251,33 +327,189 @@ function worktreeLabel(worktree: ReportWorktree): string {
   return basename(worktree.path) || worktree.path
 }
 
-/** A truncated head of a body, with the number of document lines it spans. */
-interface BodyHead {
-  /** The head text itself. */
-  readonly text: string
-  /** How many lines the head occupies. */
-  readonly lines: number
-}
-
 /**
- * Cut a body head to a character budget without splitting a surrogate pair.
+ * Cut text to a character budget without splitting a surrogate pair.
  *
  * The budget is expressed in characters because that is what a model reads, but
  * `slice` counts UTF-16 code units: a cut inside an astral character (an emoji, a
  * rare CJK ideograph) leaves a lone surrogate that renders as a replacement
  * glyph and can even corrupt the surrounding text. Backing up one unit when the
  * cut lands on a high surrogate keeps the excerpt a valid string.
- * @param body - the rendered body.
+ * @param text - the text to clip.
  * @param budget - maximum characters to keep.
- * @returns the head text and its line count.
+ * @returns the clipped prefix.
  */
-function bodyHead(body: string, budget: number): BodyHead {
-  if (body.length <= budget) return { text: body, lines: body.split('\n').length }
+function clipHead(text: string, budget: number): string {
+  if (text.length <= budget) return text
   let end = budget
-  const last = body.charCodeAt(end - 1)
+  const last = text.charCodeAt(end - 1)
   if (last >= 0xd800 && last <= 0xdbff) end--
-  const text = body.slice(0, end)
-  return { text, lines: text.split('\n').length }
+  return text.slice(0, end)
+}
+
+/**
+ * Cut text to its last `budget` characters without splitting a surrogate pair.
+ * The mirror of {@link clipHead}, for the end of a body.
+ * @param text - the text to clip.
+ * @param budget - maximum characters to keep.
+ * @returns the clipped suffix.
+ */
+function clipTail(text: string, budget: number): string {
+  if (text.length <= budget) return text
+  let start = text.length - budget
+  const first = text.charCodeAt(start)
+  if (first >= 0xdc00 && first <= 0xdfff) start++
+  return text.slice(start)
+}
+
+/** One heading of a body, with the 1-based body line it sits on. */
+interface OutlineEntry {
+  /** 1-based line inside the body, the same unit `report_read` offsets use. */
+  readonly line: number
+  /** The heading line, clipped to an affordable width. */
+  readonly heading: string
+}
+
+/**
+ * Derive a table of contents from a body's ATX headings.
+ *
+ * Derived on every read rather than stored. A persisted heading index would be a
+ * second authority over the body: a hand edit would desync it in a way
+ * `report_check` — which only compares the digest with the hop stream — could
+ * never see. Fenced code is skipped, because a `#` inside a fence is a comment,
+ * not a chapter.
+ * @param lines - the body's lines.
+ * @returns the headings, in document order.
+ */
+function outlineOf(lines: readonly string[]): OutlineEntry[] {
+  const entries: OutlineEntry[] = []
+  let fenced = false
+  for (const [index, line] of lines.entries()) {
+    if (/^\s*(```|~~~)/.test(line)) {
+      fenced = !fenced
+      continue
+    }
+    if (fenced) continue
+    if (!/^#{1,6}\s+\S/.test(line)) continue
+    entries.push({ line: index + 1, heading: clipHead(line.trim(), OUTLINE_MAX_CHARS) })
+  }
+  return entries
+}
+
+/**
+ * Render the outline rows, numbering them by body line.
+ *
+ * The line number is the point: it is what makes the outline an index into the
+ * windowed read rather than a mere summary of what a full read would show.
+ * @param entries - the derived headings.
+ * @returns the section lines.
+ */
+function renderOutline(entries: readonly OutlineEntry[]): string[] {
+  const shown = entries.slice(0, OUTLINE_MAX_ENTRIES)
+  const width = String(shown[shown.length - 1]?.line ?? 1).length
+  const rows = shown.map((entry) => `  ${String(entry.line).padStart(width)}  ${entry.heading}`)
+  const hidden = entries.length - shown.length
+  if (hidden > 0) rows.push(`  … ${hidden} more heading(s); window the body to see them`)
+  return ['## outline', ...rows]
+}
+
+/** A head-and-tail excerpt of a body, plus what it left out. */
+interface BodyExcerpt {
+  /** Characters shown from the start. */
+  readonly head: string
+  /** Characters shown from the end. */
+  readonly tail: string
+  /** 1-based body line the head reaches (partially, when clipped). */
+  readonly headEndLine: number
+  /** 1-based body line the tail begins at (partially, when clipped). */
+  readonly tailStartLine: number
+  /** Whether the head stops inside its last line. */
+  readonly headClipped: boolean
+  /** Whether the tail starts inside its first line. */
+  readonly tailClipped: boolean
+  /** Characters omitted between the two. */
+  readonly omitted: number
+  /** Body line count. */
+  readonly totalLines: number
+}
+
+/**
+ * Take a head and a tail from a body, cutting on line boundaries where possible.
+ *
+ * The line numbers are what the caller reports back, so they have to be true: a
+ * cut backs up to the previous newline, and only a single line larger than the
+ * whole budget is clipped inside itself (there is no boundary to back up to).
+ * @param lines - the body's lines.
+ * @param totalChars - the body's character length.
+ * @returns the excerpt and the ranges it covers.
+ */
+function excerptBody(lines: readonly string[], totalChars: number): BodyExcerpt {
+  const totalLines = lines.length
+
+  let headEnd = 0
+  let headChars = 0
+  let headClipped = false
+  for (const line of lines) {
+    if (headEnd > 0 && headChars + 1 + line.length > BODY_HEAD_LIMIT) break
+    if (headEnd === 0 && line.length > BODY_HEAD_LIMIT) {
+      headClipped = true
+      headEnd = 1
+      break
+    }
+    headChars += headEnd === 0 ? line.length : 1 + line.length
+    headEnd += 1
+    if (headChars >= BODY_HEAD_LIMIT) break
+  }
+
+  let tailStart = totalLines
+  let tailChars = 0
+  let tailClipped = false
+  for (let index = totalLines - 1; index >= 0; index--) {
+    const line = lines[index] ?? ''
+    if (index < totalLines - 1 && tailChars + 1 + line.length > BODY_TAIL_LIMIT) break
+    if (index === totalLines - 1 && line.length > BODY_TAIL_LIMIT) {
+      tailClipped = true
+      tailStart = index + 1
+      break
+    }
+    tailChars += index === totalLines - 1 ? line.length : 1 + line.length
+    tailStart = index + 1
+    if (tailChars >= BODY_TAIL_LIMIT) break
+  }
+
+  const head = headClipped ? clipHead(lines[0] ?? '', BODY_HEAD_LIMIT) : lines.slice(0, headEnd).join('\n')
+  const tail = tailClipped
+    ? clipTail(lines[totalLines - 1] ?? '', BODY_TAIL_LIMIT)
+    : lines.slice(tailStart - 1).join('\n')
+  return {
+    head,
+    tail,
+    headEndLine: headEnd,
+    tailStartLine: tailStart,
+    headClipped,
+    tailClipped,
+    // Never negative: the excerpt budgets are smaller than the inline limit, so
+    // the two pieces cannot overlap for a body that reaches this path.
+    omitted: Math.max(0, totalChars - head.length - tail.length),
+    totalLines,
+  }
+}
+
+/**
+ * Name what an excerpt left out, in the units the outline and offsets use.
+ * @param excerpt - the excerpt.
+ * @returns the one-line marker that sits between head and tail.
+ */
+function elisionMarker(excerpt: BodyExcerpt): string {
+  if (excerpt.headEndLine >= excerpt.tailStartLine) {
+    return `… ${excerpt.omitted} characters elided inside body line ${excerpt.headEndLine} …`
+  }
+  if (excerpt.headClipped || excerpt.tailClipped) {
+    return `… ${excerpt.omitted} characters elided (from body line ${excerpt.headEndLine}`
+      + ` to body line ${excerpt.tailStartLine}) …`
+  }
+  return `… ${excerpt.omitted} characters elided`
+    + ` (body lines ${excerpt.headEndLine + 1}-${excerpt.tailStartLine - 1}) …`
 }
 
 /** Serialize one report for model-facing output. */
@@ -917,11 +1149,23 @@ export class ReportService {
 
   /**
    * Read a report's digest, body, and complete transfer path.
+   *
+   * The body has three possible shapes: whole (a small body), a head-and-tail
+   * excerpt with a derived outline (a body over the inline limit), or an explicit
+   * line window when `offset`/`limit` is given. See {@link #renderBody}.
    * @param report - report identifier.
    * @param actor - reading session id.
+   * @param options - optional body window; omitted means the default view.
    * @returns the model-facing rendering.
    */
-  async read(report: string, actor: string): Promise<string> {
+  async read(report: string, actor: string, options: ReadOptions = {}): Promise<string> {
+    const { offset, limit } = options
+    if (offset !== undefined && (!Number.isInteger(offset) || offset < 1)) {
+      throw new Error('report-ledger: report_read offset must be a positive integer (a body line)')
+    }
+    if (limit !== undefined && (!Number.isInteger(limit) || limit < 1)) {
+      throw new Error('report-ledger: report_read limit must be a positive integer (body lines)')
+    }
     // A read records a hop, and recording a hop rewrites the document — so a read
     // is a writer and takes the same per-report mutex as every other writer. It
     // used to run unlocked, which let it collide with a mutation's rename (an
@@ -944,21 +1188,7 @@ export class ReportService {
       const pathHops = [...hops, readHop]
       const tally = tallyHops(pathHops)
       const path = reportPath(report)
-      const body = found.body.trim()
-      let rendered = body
-      if (body.length > BODY_INLINE_LIMIT) {
-        const head = bodyHead(body, BODY_HEAD_LIMIT)
-        // The pointer is a line offset, not a character one: give the file line at
-        // which the body starts, add the lines the head spans, and the model can
-        // resume exactly where the excerpt stopped instead of re-reading the head.
-        // `head.lines - 1` names the line the cut lands in; the read tool returns
-        // whole lines, so re-reading that one line is the safe resume point
-        // whether the cut fell mid-line or exactly on a line break.
-        const start = (await bodyStartLine(report)) ?? 1
-        const resume = start + head.lines - 1
-        rendered = `${head.text}\n\n… body truncated (${body.length} chars total). `
-          + `The next unread line is ${resume}; read the rest with the read tool at ${path} using offset=${resume}.`
-      }
+      const view = await this.#renderBody(report, found.body.trim(), offset, limit)
       const route = pathHops.length === 0
         ? '  (no hops recorded)'
         : pathHops.map((hop) => {
@@ -986,10 +1216,113 @@ export class ReportService {
         route,
         ...(pending.length === 0 ? [] : ['', `## still pending delivery to: ${pending.join(', ')}`]),
         '',
-        '## body',
-        rendered,
+        ...view,
       ].join('\n')
     })
+  }
+
+  /**
+   * Render the `## body` section of one read.
+   *
+   * Three shapes, each answering a different question:
+   *
+   *  - **whole**: a small body is simply shown. An outline on top of it would be
+   *    context spent on a table of contents the reader can see in place.
+   *  - **head and tail**: a body over the inline limit is shown from both ends,
+   *    with a derived outline and an elision marker naming the line range left
+   *    out. The tail is the half that matters — a running collaboration appends
+   *    its newest sections at the end, and a head-only excerpt hid exactly those.
+   *  - **window**: `offset`/`limit` return a slice by body line. Slicing costs
+   *    nothing extra because the body is already in memory.
+   *
+   * The raw-file line of body line N is `bodyStartLine + N - 1` (the body is the
+   * document minus its front matter, and trimming only removes blank lines at the
+   * two ends), so a reader that prefers the plain `read` tool is given an exact
+   * line rather than an estimate. That lookup opens the file, so it is only paid
+   * for when the view is partial and the pointer is actually emitted.
+   * @param report - the report id, for the raw-file pointer.
+   * @param body - the trimmed body.
+   * @param offset - 1-based body line to start at, when a window was asked for.
+   * @param limit - body lines to return, when a window was asked for.
+   * @returns the section lines.
+   */
+  async #renderBody(report: string, body: string, offset?: number, limit?: number): Promise<string[]> {
+    const lines = body === '' ? [] : body.split('\n')
+    const total = lines.length
+
+    if (offset !== undefined || limit !== undefined) {
+      if (total === 0) return ['## body (empty)']
+      const from = offset ?? 1
+      if (from > total) {
+        return [
+          `## body (no body line ${from}; the body has ${total} line(s))`,
+          `The last body line is ${total}; omit offset for the default view, or ask for report_read offset=${total}.`,
+        ]
+      }
+      const wanted = Math.min(limit ?? BODY_WINDOW_DEFAULT_LINES, BODY_WINDOW_MAX_LINES)
+      const lastWanted = Math.min(from + wanted - 1, total)
+      // Whole lines up to the character ceiling. A single line bigger than the
+      // ceiling is the one case with no boundary to stop on: it is clipped inside
+      // itself and reported, because silently returning megabytes is worse than
+      // returning a partial line and saying so.
+      let end = from - 1
+      let chars = 0
+      while (end < lastWanted) {
+        const line = lines[end] ?? ''
+        const added = end === from - 1 ? line.length : line.length + 1
+        if (end > from - 1 && chars + added > BODY_WINDOW_MAX_CHARS) break
+        chars += added
+        end += 1
+        if (chars >= BODY_WINDOW_MAX_CHARS) break
+      }
+      let text = lines.slice(from - 1, end).join('\n')
+      let clipped = false
+      if (text.length > BODY_WINDOW_MAX_CHARS) {
+        text = clipHead(text, BODY_WINDOW_MAX_CHARS)
+        clipped = true
+      }
+      const section = [`## body (body lines ${from}-${end} of ${total})`, text]
+      if (clipped) {
+        section.push(
+          '',
+          `Body line ${from} alone is longer than one window (${(lines[from - 1] ?? '').length} characters); `
+          + `only its first ${BODY_WINDOW_MAX_CHARS} are shown. Open the raw file ${reportPath(report)} for the rest.`,
+        )
+      } else if (end < total) {
+        const next = end + 1
+        const bodyStart = await bodyStartLine(report)
+        const raw = bodyStart === undefined ? '' : ` (raw file line ${bodyStart + next - 1})`
+        section.push('', `… ${total - end} body line(s) follow; continue with report_read offset=${next}${raw} …`)
+      }
+      return section
+    }
+
+    if (body.length <= BODY_INLINE_LIMIT) return ['## body', body]
+
+    const excerpt = excerptBody(lines, body.length)
+    const section: string[] = []
+    const outline = outlineOf(lines)
+    if (outline.length > 0) section.push(...renderOutline(outline), '')
+    section.push(
+      `## body (head and tail of ${total} body lines)`,
+      excerpt.head,
+      '',
+      elisionMarker(excerpt),
+      '',
+      excerpt.tail,
+    )
+    const bodyStart = await bodyStartLine(report)
+    // A concrete first line is more useful than a placeholder: the reader of an
+    // excerpt usually wants the omitted middle next, and that is the line where
+    // the head stopped (inside it, when the head was clipped mid-line).
+    const middleStart = excerpt.headClipped ? excerpt.headEndLine : excerpt.headEndLine + 1
+    section.push(
+      '',
+      `Window the body with report_read offset=${middleStart} (limit in lines, default ${BODY_WINDOW_DEFAULT_LINES});`
+      + ' the omitted middle starts there, and the outline above numbers every section.'
+      + (bodyStart === undefined ? '' : ` In the raw file, body line 1 is document line ${bodyStart}.`),
+    )
+    return section
   }
 
   /**
@@ -1024,21 +1357,90 @@ export class ReportService {
         || front.authors.includes(session)
     })
     const limit = filter.limit === undefined || filter.limit <= 0 ? 50 : Math.min(filter.limit, 200)
-    return matching.slice(0, limit).map((front) => ({
-      report: front.report,
-      status: front.status,
-      subject: front.subject,
-      from: front.from,
-      to: front.to,
-      cc: front.cc,
-      hops: front.hops,
-      reads: front.reads,
-      authors: front.authors,
-      ...(front.task === undefined ? {} : { task: front.task }),
-      ...(front.worktree === undefined ? {} : { worktree: worktreeLabel(front.worktree) }),
-      ...(front.last === undefined ? {} : { last: `${front.last.action}@${front.last.actor}` }),
-      updated: front.updated,
-    }))
+    return matching.slice(0, limit).map(toDigestRow)
+  }
+
+  /**
+   * List one thread: the root of the line a report belongs to, plus every
+   * descendant, as digests.
+   *
+   * The ledger's tree is written from both ends — a report records `parent`, its
+   * parent records `children` — so the index is built from both directions. A
+   * hand edit that leaves the two sides disagreeing then still yields a complete
+   * tree instead of half of one, and a cycle makes the walk stop rather than
+   * hang. The walk goes up to the root first: a caller usually reaches a thread
+   * from one of its middle reports (an id in context, a task label), and a
+   * listing that started there would show a fragment.
+   * @param report - a report anywhere in the line.
+   * @returns the tree, or `undefined` when the report is not in the ledger.
+   */
+  async thread(report: string): Promise<ThreadListing | undefined> {
+    const all = await listReports()
+    const byId = new Map(all.map((front) => [front.report, front]))
+    if (!byId.has(report)) return undefined
+
+    const childrenOf = new Map<string, string[]>()
+    const addChild = (parent: string, child: string): void => {
+      const children = childrenOf.get(parent) ?? []
+      if (!children.includes(child)) children.push(child)
+      childrenOf.set(parent, children)
+    }
+    // The `children` array keeps the author's order; a child that only names its
+    // own parent is appended where that parent is, rather than dropped.
+    for (const front of all) for (const child of front.children) addChild(front.report, child)
+    for (const front of all) {
+      if (front.parent !== undefined && byId.has(front.parent)) addChild(front.parent, front.report)
+    }
+
+    let root = report
+    const seen = new Set<string>([root])
+    let note: string | undefined
+    for (;;) {
+      const parent = byId.get(root)?.parent
+      if (parent === undefined) break
+      // A parent that is gone is a hole in the line, not a reason to pretend the
+      // requested report is a root: say so instead of silently shortening it.
+      if (!byId.has(parent)) {
+        note ??= `parent ${parent} is not in the ledger`
+        break
+      }
+      if (seen.has(parent)) break
+      seen.add(parent)
+      root = parent
+    }
+
+    const rows: ThreadRow[] = []
+    const visited = new Set<string>()
+    const stack: { id: string; depth: number }[] = [{ id: root, depth: 0 }]
+    while (stack.length > 0 && rows.length < THREAD_MAX_ROWS) {
+      const { id, depth } = stack.pop() as { id: string; depth: number }
+      if (visited.has(id)) {
+        note ??= `a parent/children cycle was cut at ${id}`
+        continue
+      }
+      const front = byId.get(id)
+      if (front === undefined) {
+        // Symmetric with a missing parent: a `children` entry whose document was
+        // deleted by hand still names work that is not in the ledger.
+        note ??= `listed child ${id} is missing from the ledger`
+        continue
+      }
+      visited.add(id)
+      rows.push({ depth, row: toDigestRow(front), anchor: id === report })
+      if (depth >= THREAD_MAX_DEPTH) {
+        note ??= `nesting deeper than ${THREAD_MAX_DEPTH} was not followed`
+        continue
+      }
+      const children = childrenOf.get(id) ?? []
+      // Pushed in reverse so the stack pops them in the order the author sees.
+      for (let index = children.length - 1; index >= 0; index -= 1) {
+        stack.push({ id: children[index] as string, depth: depth + 1 })
+      }
+    }
+    if (rows.length >= THREAD_MAX_ROWS && stack.length > 0) {
+      note = `listing stopped after ${THREAD_MAX_ROWS} reports`
+    }
+    return { root, rows, ...(note === undefined ? {} : { note }) }
   }
 
   /**
@@ -1856,6 +2258,33 @@ export class ReportService {
   }
 }
 
+/**
+ * Project one digest to a listing row.
+ *
+ * Shared by the flat listing and the thread listing so the two can never drift:
+ * a field added to one and forgotten in the other would make the same report
+ * read differently depending on how it was looked at.
+ * @param front - the digest.
+ * @returns the row.
+ */
+function toDigestRow(front: ReportFrontMatter): DigestRow {
+  return {
+    report: front.report,
+    status: front.status,
+    subject: front.subject,
+    from: front.from,
+    to: front.to,
+    cc: front.cc,
+    authors: front.authors,
+    hops: front.hops,
+    reads: front.reads,
+    ...(front.task === undefined ? {} : { task: front.task }),
+    ...(front.worktree === undefined ? {} : { worktree: worktreeLabel(front.worktree) }),
+    ...(front.last === undefined ? {} : { last: `${front.last.action}@${front.last.actor}` }),
+    updated: front.updated,
+  }
+}
+
 /** Render one digest row for model-facing listing output. */
 export function renderRow(row: DigestRow): string {
   const last = row.last === undefined ? '-' : row.last
@@ -1869,4 +2298,22 @@ export function renderRow(row: DigestRow): string {
   // the difference a receipt cannot express and a reader has to be able to see
   // without opening the body.
   return `${row.report} [${row.status}] ${row.subject}${task}${worktree} | from=${row.from} to=${row.to.length === 0 ? '-' : row.to.join(',')} cc=${row.cc.length === 0 ? '-' : row.cc.join(',')} authors=${row.authors.length} hops=${row.hops} reads=${row.reads} last=${last}`
+}
+
+/**
+ * Render one thread row: a digest indented by its depth, plus whether it is the
+ * report the caller asked about.
+ *
+ * Deliberately shorter than {@link renderRow}: a thread answers "is this line
+ * finished, who holds which part, what happened last", and every field outside
+ * that is paid once per row. The flat listing stays the place for the full row.
+ * @param entry - the thread row.
+ * @returns the rendered line.
+ */
+export function renderThreadRow(entry: ThreadRow): string {
+  const last = entry.row.last === undefined ? '-' : entry.row.last
+  const task = entry.row.task === undefined ? '' : ` task=${entry.row.task}`
+  const anchor = entry.anchor ? '  <- requested' : ''
+  return `${'  '.repeat(entry.depth)}${entry.row.report} [${entry.row.status}] ${entry.row.subject}${task}`
+    + ` | from=${entry.row.from} hops=${entry.row.hops} last=${last}${anchor}`
 }

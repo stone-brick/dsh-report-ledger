@@ -910,6 +910,20 @@ interface AmendInput {
   /** Extra note appended to the recorded change summary. */
   readonly note?: string;
 }
+/**
+ * One windowed read of a body.
+ *
+ * Offsets count **body lines** — the unit the derived outline prints — so a
+ * caller can go from an outline row straight to a window without translating
+ * document lines. A read without either field returns the default view (the whole
+ * body when it is small, a head-and-tail excerpt with an outline when it is not).
+ */
+interface ReadOptions {
+  /** 1-based body line to start at. */
+  readonly offset?: number;
+  /** How many body lines to return. */
+  readonly limit?: number;
+}
 /** One row of a digest listing. */
 interface DigestRow {
   /** Report identifier. */
@@ -938,6 +952,29 @@ interface DigestRow {
   readonly last?: string;
   /** Last update time. */
   readonly updated: number;
+}
+/** One digest in a thread listing, with where it sits in the tree. */
+interface ThreadRow {
+  /** 0 for the root, one more for every level down. */
+  readonly depth: number;
+  /** The digest, projected exactly like a flat listing row. */
+  readonly row: DigestRow;
+  /** Whether this is the report the caller asked about. */
+  readonly anchor: boolean;
+}
+/**
+ * One line of reports around a single report: its root, and every descendant.
+ *
+ * Built from digests alone, so a listing costs one scan and records no hop: a
+ * thread is a map, and looking at a map is not reading any report on it.
+ */
+interface ThreadListing {
+  /** The root the walk started from — not necessarily the report that was asked for. */
+  readonly root: string;
+  /** Pre-order rows: each report immediately before its children. */
+  readonly rows: readonly ThreadRow[];
+  /** Why the listing is incomplete, when it had to be cut short. */
+  readonly note?: string;
 }
 /**
  * One hand-off the ledger still owes a session.
@@ -1058,11 +1095,16 @@ declare class ReportService {
   forward(report: string, actor: string, targets: readonly string[], mode: 'forward' | 'copy', note?: string): Promise<MutationResult>;
   /**
    * Read a report's digest, body, and complete transfer path.
+   *
+   * The body has three possible shapes: whole (a small body), a head-and-tail
+   * excerpt with a derived outline (a body over the inline limit), or an explicit
+   * line window when `offset`/`limit` is given. See {@link #renderBody}.
    * @param report - report identifier.
    * @param actor - reading session id.
+   * @param options - optional body window; omitted means the default view.
    * @returns the model-facing rendering.
    */
-  read(report: string, actor: string): Promise<string>;
+  read(report: string, actor: string, options?: ReadOptions): Promise<string>;
   /**
    * List report digests, optionally filtered to ones touching one session.
    * @param filter - listing filter.
@@ -1075,6 +1117,21 @@ declare class ReportService {
     worktree?: string;
     limit?: number;
   }): Promise<DigestRow[]>;
+  /**
+   * List one thread: the root of the line a report belongs to, plus every
+   * descendant, as digests.
+   *
+   * The ledger's tree is written from both ends — a report records `parent`, its
+   * parent records `children` — so the index is built from both directions. A
+   * hand edit that leaves the two sides disagreeing then still yields a complete
+   * tree instead of half of one, and a cycle makes the walk stop rather than
+   * hang. The walk goes up to the root first: a caller usually reaches a thread
+   * from one of its middle reports (an id in context, a task label), and a
+   * listing that started there would show a fragment.
+   * @param report - a report anywhere in the line.
+   * @returns the tree, or `undefined` when the report is not in the ledger.
+   */
+  thread(report: string): Promise<ThreadListing | undefined>;
   /**
    * Mark a report acknowledged by one recipient.
    * @param report - report identifier.

@@ -593,23 +593,31 @@ check('a copy owed on its own stays quiet',
 check('a copy after an answered hand-off stays quiet',
   pendingMode([...sentThenCopied, { at: 4, actor: 'session-a', action: 'delivered' as const, to: ['session-c'] }], 'session-c') === 'quiet')
 
-// ---- 20. an oversized body can be resumed by line --------------------------
+// ---- 20. an oversized body is excerpted safely and points at its file --------
+// One body line larger than the whole head budget is the case with no newline to
+// back up to: the cut must clip inside the line without splitting a surrogate
+// pair, and the tail must still carry the newest characters.
 const emojiBody = `${'y'.repeat(1199)}\u{1F600}${'z'.repeat(8000)}`
 const oversized = await service.author({ subject: 'oversized body', body: emojiBody, actor: 'session-a' })
 const oversizedRead = await service.read(oversized.front.report, 'session-a')
-const oversizedHead = oversizedRead.split('## body\n')[1].split('\n\n…')[0]
-check('a truncated head does not split a surrogate pair',
-  !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(oversizedHead), JSON.stringify(oversizedHead.slice(-4)))
-const resumeMatch = oversizedRead.match(/using offset=(\d+)/)
-check('the truncation pointer names a document line to resume from', resumeMatch !== null,
-  oversizedRead.slice(-160))
-if (resumeMatch !== null) {
-  const resumeLine = Number(resumeMatch[1])
+const oversizedBody = oversizedRead.split('\n## body')[1] ?? ''
+const oversizedHead = oversizedBody.split('\n').slice(1).find((line) => line !== '') ?? ''
+check('a clipped head backs off instead of splitting a surrogate pair',
+  oversizedHead === 'y'.repeat(1199), JSON.stringify(oversizedHead.slice(-4)))
+check('the excerpt keeps the newest characters of the body',
+  oversizedBody.includes('z'.repeat(100)), oversizedBody.slice(-120))
+check('an elided middle is named by body line',
+  oversizedBody.includes('characters elided inside body line 1'), oversizedBody.slice(0, 200))
+const startMatch = oversizedRead.match(/body line 1 is document line (\d+)/)
+check('the excerpt names the document line where the body starts', startMatch !== null,
+  oversizedRead.slice(-200))
+if (startMatch !== null) {
+  const startLine = Number(startMatch[1])
   const documentLines = (await readFile(reportPath(oversized.front.report), 'utf8')).split('\n')
-  check('the resume line exists in the document', resumeLine >= 1 && resumeLine <= documentLines.length,
-    `${resumeLine}/${documentLines.length}`)
-  check('the resume line is inside the body, not the front matter',
-    documentLines[resumeLine - 1]?.startsWith('yyy') === true, String(documentLines[resumeLine - 1]?.slice(0, 12)))
+  check('the named line exists in the document', startLine >= 1 && startLine <= documentLines.length,
+    `${startLine}/${documentLines.length}`)
+  check('the named line is inside the body, not the front matter',
+    documentLines[startLine - 1]?.startsWith('yyyy') === true, String(documentLines[startLine - 1]?.slice(0, 12)))
 }
 
 let failed = 0

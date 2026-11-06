@@ -24,7 +24,7 @@ import type { WorktreeRuntime } from './allocate.ts'
 import type { PeerService } from './peer.ts'
 import { DEFAULT_RECEIPT_MS, type PeerPermission, type PeerReceipt, type WorkspaceRegistration } from './peer.ts'
 import type { PreparedWorktree, ReportService, WorktreeOutcome } from './service.ts'
-import { renderRow } from './service.ts'
+import { renderRow, renderThreadRow } from './service.ts'
 import type { DeliveryOutcome } from './deliver.ts'
 
 /**
@@ -475,30 +475,57 @@ export function registerReportTools(
 
   disposers.push(ctx.tools.register(defineTool({
     name: 'report_read',
-    description: 'Read one report: its digest, its COMPLETE transfer path (every hop with actor and time, and any recipient the report is still owed to), and its body. Use it when a digest told you a report exists and you need the substance, or when you need to know exactly how a report travelled and who holds copies. Reading is itself recorded — as a `read` hop, counted in `reads` as well as in `hops`; a look is an audit fact and not activity, so the work signal is `hops - reads` and `last` never lands on a glance. The path opens with a per-action tally, so "how much of this was reading" never needs a pass over the ledger by hand.',
+    description: 'Read one report: its digest, its COMPLETE transfer path (every hop with actor and time, and any recipient the report is still owed to), and its body. Use it when a digest told you a report exists and you need the substance, or when you need to know exactly how a report travelled and who holds copies. A body over 8000 characters comes back as a head-and-tail excerpt with a derived outline (line-numbered headings, newest sections included) instead of a head that hides them; pass offset/limit to fetch any range by body line, which is the unit the outline prints. Reading is itself recorded — as a `read` hop, counted in `reads` as well as in `hops`; a look is an audit fact and not activity, so the work signal is `hops - reads` and `last` never lands on a glance. The path opens with a per-action tally, so "how much of this was reading" never needs a pass over the ledger by hand.',
     parameters: {
       report: { type: 'string', required: true, description: 'Report id to read, e.g. R-0007.' },
+      offset: { type: 'integer', description: 'Body line to start at (1-based, counted inside the body — the lines the outline prints). Omit for the default view: the whole body, or a head-and-tail excerpt when it is long.' },
+      limit: { type: 'integer', description: 'Body lines to return, default 120, capped at 400 (and 20000 characters).' },
     },
     output: stringOutput,
     execute: async (args, exec) => {
-      const input = args as { report: string }
-      return service.read(input.report, actorOf(exec as ExecLike))
+      const input = args as { report: string; offset?: number; limit?: number }
+      return service.read(input.report, actorOf(exec as ExecLike), {
+        ...(input.offset === undefined ? {} : { offset: input.offset }),
+        ...(input.limit === undefined ? {} : { limit: input.limit }),
+      })
     },
   })))
 
   disposers.push(ctx.tools.register(defineTool({
     name: 'report_list',
-    description: 'List report digests from the ledger — no bodies, so this is the cheap way to survey a long-running collaboration. Filter by `session` to see every report that touches one agent (authored, addressed, copied, or contributed to), by `status`, or by `task` to pull up one collaboration across every session it touched. The task label is matched case-insensitively and partially, so "payments" finds "payments-rework". `worktree` matches a working tree the report is or was bound to, by branch or path — a binding outlives a release, so this includes former leases. Use it to find the report id you need before reading it, or to check what a teammate is still waiting on.',
+    description: 'List report digests from the ledger — no bodies, so this is the cheap way to survey a long-running collaboration. Filter by `session` to see every report that touches one agent (authored, addressed, copied, or contributed to), by `status`, or by `task` to pull up one collaboration across every session it touched. The task label is matched case-insensitively and partially, so "payments" finds "payments-rework". `worktree` matches a working tree the report is or was bound to, by branch or path — a binding outlives a release, so this includes former leases. Pass `thread` with a report id instead to list the report\'s whole line — the root found by following `parent`, then every descendant by `children` — indented, with the requested report marked; that is the one call that answers "is this piece of work finished as a whole". `thread` is a selector, not a filter: call it alone. Use the listing to find the report id you need before reading it, or to check what a teammate is still waiting on.',
     parameters: {
       session: { type: 'string', description: 'Only reports touching this session id.' },
       status: { type: 'string', enum: ['open', 'acked', 'closed'], description: 'Only reports in this state.' },
       task: { type: 'string', description: 'Only reports carrying this collaboration label (partial match, case-insensitive).' },
       worktree: { type: 'string', description: 'Only reports bound to a working tree whose branch or path contains this text (partial match, case-insensitive).' },
-      limit: { type: 'integer', description: 'Maximum rows (default 50, capped at 200).' },
+      thread: { type: 'string', description: 'Report id anywhere in a line: list its root and every descendant as an indented tree. Cannot be combined with session/status/task/worktree/limit.' },
+      limit: { type: 'integer', description: 'Maximum rows (default 50, capped at 200). Not used with thread.' },
     },
     output: stringOutput,
     execute: async (args) => {
-      const input = args as { session?: string; status?: string; task?: string; worktree?: string; limit?: number }
+      const input = args as { session?: string; status?: string; task?: string; worktree?: string; thread?: string; limit?: number }
+      if (input.thread !== undefined) {
+        const anchor = input.thread.trim()
+        if (anchor === '') return 'report_list: thread= needs a report id'
+        // A tree and a flat filter ask different questions, and honouring one of
+        // them silently would answer the other: a filtered tree hides exactly the
+        // rows that show whether the line is closed.
+        if (input.session !== undefined || input.status !== undefined || input.task !== undefined
+          || input.worktree !== undefined || input.limit !== undefined) {
+          return 'report_list: thread= is a selector, not another filter — call it alone to see one line as a tree; '
+            + 'use session/status/task/worktree to filter across lines'
+        }
+        const listing = await service.thread(anchor)
+        if (listing === undefined) return `no report ${JSON.stringify(anchor)} in the ledger`
+        const where = listing.root === anchor ? '' : `; requested from ${anchor}`
+        const lines = [
+          `thread ${listing.root} (${listing.rows.length} report(s)${where})`,
+          ...listing.rows.map(renderThreadRow),
+        ]
+        if (listing.note !== undefined) lines.push(`note: ${listing.note}`)
+        return lines.join('\n')
+      }
       const rows = await service.list({
         ...(input.session === undefined ? {} : { session: input.session }),
         ...(input.status === undefined ? {} : { status: input.status }),

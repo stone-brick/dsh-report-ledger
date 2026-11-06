@@ -77,14 +77,14 @@ report_close(report="R-0007", note="已合并")               # 这件事结束�
 
 **改错了用修正，不要重开一份**：`report_amend` 改主题/任务标签/正文，改动会被逐字记进传递路径（重开会丢掉原有的收件人与路径）。**收件人永远不能在这里改**——它们由跳流派生，唯一途径是再追加一跳。
 
-需要纵览时用 `report_list({ task: "read-path" })` 把一次协作跨会话拉到一起；需要知道"还有谁在线、跟我什么关系"用 `peer_list`。
+需要纵览时用 `report_list({ task: "read-path" })` 把一次协作跨会话拉到一起，或用 `report_list({ thread: "R-0034" })` 看一份汇报所在的整条线（根、子项与各自状态）；需要知道"还有谁在线、跟我什么关系"用 `peer_list`。
 
 ## 它是怎么组织的
 
 **汇报是两层结构。**
 
 - **front matter 是缩略**：主题、收发、抄送、共写者、跳数／其中读取数、最后一条因果动作、状态。它是唯一进入模型上下文的部分，所以长期协作的上下文开销有界。
-- **正文留在账本里**，由 `report_read` 按需打开（正文超过 8000 字符时只返回约 1200 字符的头部与行号定位，模型用 `read` 从该行号分页取余下部分）。
+- **正文留在账本里**，由 `report_read` 按需打开。正文超过 8000 字符时给的是**大纲 + 头尾摘录**（约 1200 字符的头、2000 字符的尾，中间标出省略的行范围）——只看头会把正在进行的协作最需要的最新一节藏起来；需要某一段就用 `offset`/`limit` 按正文行号取（行号就是大纲列出的那些），或直接用 `read` 读原文件。
 
 **传递路径是权威的。** 每次操作都追加一跳（append-only JSONL）：
 
@@ -111,8 +111,8 @@ reports/R-0001.route.jsonl   append-only 传递路径，一行一跳
 | `report_send` | 主送给更多代理（唤醒）：向上回报、向下派发 |
 | `report_cc` | 抄送给更多代理（不唤醒）：让需要知情者持有副本 |
 | `report_forward` | 转呈下去，或 `mode:"copy"` 作为参考副本分发 |
-| `report_read` | 读缩略 + 完整传递路径（开头一行按动作计数）+ 正文（读取记为 `read`，计入 `hops` 也计入 `reads`，`hops - reads` 才是工作量；不推进 `updated`、不改变列表顺序） |
-| `report_list` | 只列缩略，可按 `session`、`status`、`task`、`worktree` 过滤，用于纵览长期协作；行里带 `authors=N`——回执说明有人确认收到，`authors=1` 说明**没人真的写过东西** |
+| `report_read` | 读缩略 + 完整传递路径（开头一行按动作计数）+ 正文；长正文给派生大纲与头+尾摘录，`offset`/`limit` 按正文行号取任意一段（读取记为 `read`，计入 `hops` 也计入 `reads`，`hops - reads` 才是工作量；不推进 `updated`、不改变列表顺序） |
+| `report_list` | 只列缩略，可按 `session`、`status`、`task`、`worktree` 过滤，用于纵览长期协作；用 `thread=<编号>` 把该汇报所在的整条线（`parent` 上溯到根、`children` 下递）列成缩进树，不读正文也不记跳——"这条线整体完了吗"一次回答。行里带 `authors=N`——回执说明有人确认收到，`authors=1` 说明**没人真的写过东西** |
 | `report_check` | 只读诊断：检查缩略与传递路径是否一致（可限定一份），列出 `stored -> derived`；**不写、不记跳**。修复不是工具，仍是人的动作：`pnpm repair`（可 `--dry-run`） |
 | `report_ack` | 回执，让发送方看到闭环 |
 | `report_amend` | 修正：改缩略字段或更正正文，仅发起者/共写者可改，改动会被记录 |
@@ -204,7 +204,7 @@ web profile 里多两处：
 ```sh
 pnpm build        # 三个产物：lib/index.js（宿主半）、lib/client.js（浏览器半）、
                   # dev/bundle/lib/index.js（开发者附加包，不发布）
-pnpm test         # 十六套确定性检查，1151 项断言（不需要 DSH，不碰真实账本）
+pnpm test         # 十六套确定性检查，1218 项断言（不需要 DSH，不碰真实账本）
 pnpm check        # 完整本地门禁：typecheck + test + test:tools
 ```
 
