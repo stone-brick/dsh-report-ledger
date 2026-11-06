@@ -5,9 +5,9 @@
 ```sh
 pnpm build        # 三个产物：lib/index.js（host 半）、lib/client.js（client 半）、
                   # dev/bundle/lib/index.js（开发者附加包，不发布、不在 files 白名单里）
-pnpm test         # 十六套确定性检查共 1237 项断言：账本内核与生命周期 143 + 提示词角色分流 84
+pnpm test         # 十六套确定性检查共 1231 项断言：账本内核与生命周期 143 + 提示词角色分流 84
                   # + 开发者名册 53 + 开发者归档 29 + 退役交接 30
-                  # + 读路径（前缀读/签名缓存/单趟投递/正文窗口与大纲/线程视图/时间戳与 created）120
+                  # + 读路径（前缀读/签名缓存/单趟投递/正文窗口与大纲/线程视图/时间戳与 created）114
                   # + 时间线装配与路由守卫 91
                   # + 时间线模型（筛选/线程/空状态/身份/正文/围栏）102
                   # + 卡片画布模型（分档尺寸/帧装箱/端口均分/通道布线/线程布线/同沟槽合并/相邻卡短跳/线程分行/帧内车道/箭头留空/帧边按端口加长/车道错位/车道按端口排序/为线让路/固定档位 fit/剔除/视口/拾取/填满宽度/下钻范围）150
@@ -19,7 +19,7 @@ pnpm test         # 十六套确定性检查共 1237 项断言：账本内核与
                   # + 两界面共选（画布 ↔ 汇报列表：悬停来源/打开状态/标签点击）15
                   # + 宿主桌面打开（可用性/应用列表/默认·指定·reveal/失败降级）13
                   #（不需要 DSH，不触碰真实账本，不启动服务器；worktree 相关的四套会在临时目录里建真仓库）
-pnpm test:tools   # 工作区工具面 + 宿主接线 + 同伴名册 272 项（84 + 71 + 117）—— 只能在有官方包层的地方跑，见下
+pnpm test:tools   # 工作区工具面 + 宿主接线 + 同伴名册 + 读路径工具面 278 项（84 + 71 + 117 + 6）—— 只能在有官方包层的地方跑，见下
 pnpm typecheck    # 对部署中的 harness 类型做全量类型检查
 pnpm check        # 以上三者的合并，也就是完整的本地门禁
 ```
@@ -31,10 +31,10 @@ pnpm check        # 以上三者的合并，也就是完整的本地门禁
 
 `scripts/worktree-tools-check.ts` 要运行期 import
 `src/report/tools.ts`，而后者运行期 import `@deepseek-ai/dsh-tools`；`scripts/workspace-check.ts`
-还要 import `src/index.ts`（`@deepseek-ai/dsh-workspace`）；`scripts/roster-check.ts` 的同伴创建测试也
-要 import `src/report/tools.ts`——三者都是**未在 package.json 里声明**的包：本机靠
-`node_modules/@deepseek-ai` 的 junction 解析，而 lockfile 里没有它们，所以 runner 上
-`pnpm install` 之后必然解析不到。这就是这三个脚本放在 `test:tools` 而不是 `test` 的原因：
+还要 import `src/index.ts`（`@deepseek-ai/dsh-workspace`）；`scripts/roster-check.ts` 的同伴创建测试
+与 `scripts/read-path-tools-check.ts` 的线程渲染测试也要 import `src/report/tools.ts`——四者都是**未在
+package.json 里声明**的包：本机靠 `node_modules/@deepseek-ai` 的 junction 解析，而 lockfile 里没有它们，
+所以 runner 上 `pnpm install` 之后必然解析不到。这就是这四个脚本放在 `test:tools` 而不是 `test` 的原因：
 可移植子集必须只依赖 `yaml` 与 Node 内置模块。
 
 这与 typecheck 面对的是同一个约束（CI 里没有官方包层），处理方式也刻意一致：**CI 跑它跑得了的

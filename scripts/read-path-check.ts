@@ -41,7 +41,6 @@ process.env.DSH_REPORT_LEDGER_ROOT = join(root, 'report-ledger')
 const { ReportService } = await import('../src/report/service.ts')
 const { allocateId, appendHop, clearReadCache, listReports, readHops, readReport, reportPath, reportsDir, routePath, writeReport } = await import('../src/report/ledger.ts')
 const { pendingTargets } = await import('../src/report/deliver.ts')
-const { registerReportTools } = await import('../src/report/tools.ts')
 
 /** Agents resident for this run, and how a digest reached each one. */
 const live = new Set<string>()
@@ -585,39 +584,6 @@ await writeDocument('R-7205', '---\nreport: "R-7205"\nsubject: "dangling child"\
 const dangling = await service.thread('R-7205')
 check('a listed child missing from the ledger is named', (dangling?.note ?? '').includes('R-9997'),
   String(dangling?.note))
-
-// ---- the tool surface for a thread ----------------------------------------
-// The service can produce a tree; the tool has to render it, mark the anchor and
-// refuse to pretend a filtered tree answers the same question.
-const captured = new Map<string, { name: string; execute(args: unknown, exec: unknown): Promise<string> }>()
-const fakeCtx = {
-  tools: {
-    register(definition: unknown): () => void {
-      const entry = definition as { name: string; execute(args: unknown, exec: unknown): Promise<string> }
-      captured.set(entry.name, entry)
-      return () => {}
-    },
-  },
-}
-registerReportTools(fakeCtx, service, {} as never, { enabled: false } as never)
-const callTool = async (name: string, args: unknown): Promise<string> => {
-  const entry = captured.get(name)
-  if (entry === undefined) throw new Error(`tool ${name} was not registered`)
-  return await entry.execute(args, {} as never)
-}
-const toolTree = await callTool('report_list', { thread: lineADetail.front.report })
-check('report_list renders the line as a tree and marks the requested report',
-  toolTree.includes(`thread ${threadRoot.front.report} (4 report(s); requested from ${lineADetail.front.report})`)
-  && toolTree.includes('<- requested'), toolTree)
-check('a grandchild is indented by two levels', toolTree.includes(`\n    ${lineADetail.front.report} [`), toolTree)
-check('a thread tree shows the subject and status of each row',
-  toolTree.includes(`[open] line A`) && toolTree.includes(`[open] thread root`), toolTree)
-const combined = await callTool('report_list', { thread: threadRoot.front.report, status: 'closed' })
-check('thread= refuses to be combined with a flat filter', combined.includes('selector'), combined)
-const missingThread = await callTool('report_list', { thread: 'R-9999' })
-check('thread= on a missing report names it', missingThread.includes('no report "R-9999"'), missingThread)
-const onRoot = await callTool('report_list', { thread: threadRoot.front.report })
-check('a thread requested from its root needs no "requested from" suffix', onRoot.startsWith(`thread ${threadRoot.front.report} (4 report(s))`), onRoot)
 
 // ---- time markers ---------------------------------------------------------
 // A reader of a long-lived report has to tell how old the original body is and

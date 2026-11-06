@@ -1,6 +1,6 @@
 {
   "name": "dsh-report-ledger-dev",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "private": true,
   "type": "module",
   "main": "lib/index.js",
