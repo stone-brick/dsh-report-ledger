@@ -24,7 +24,7 @@ npm publish         # ⚠ 本机 registry 若是镜像站，必须显式 --regis
 | `dsh.bundle.patch` 指向该 patch | `./cordis.patch.yml` |
 | `version` 已递增 | npm 不允许覆盖已发布版本 |
 
-发布后**在干净环境里验证**（0.2.1 线的 rc.2 / rc.3 / rc.4 已在隔离 prefix + 隔离 `DSH_HOME` 实测，见 [开发、构建与验证](dev-build.md#兼容性与依赖契约)；每次发布仍按下面两步再验一次）：
+发布后**在干净环境里验证**（0.2.1 线的 rc.2 / rc.3 / rc.4 与 `0.2.2-rc.3` 已在隔离 prefix + 隔离 `DSH_HOME` 实测，见 [开发、构建与验证](dev-build.md#兼容性与依赖契约)；每次发布仍按下面两步再验一次）：
 
 ```sh
 dsh plugin --profile demo add dsh-report-ledger   # 空 DSH_HOME 里
