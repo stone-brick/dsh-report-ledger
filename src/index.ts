@@ -772,6 +772,15 @@ function settledWithin(agent: { whenIdle(): Promise<void> }, timeoutMs: number):
 const SESSION_LISTING_TTL_MS = 15_000
 
 /**
+ * How often the delivery pump retries a hand-off that failed at the host boundary.
+ *
+ * The service owns the per-recipient backoff, so this cadence only decides how
+ * promptly a due retry is noticed; it is not an attempt rate. A sweep runs only
+ * while {@link ReportService.hasDeliveryTrouble} is true.
+ */
+const DELIVERY_RETRY_SWEEP_MS = 30_000
+
+/**
  * How long a title answered by the expensive path is reused, found or not.
  *
  * The cheap faces answer most reads, so this only bounds the deployments and the
@@ -1221,6 +1230,9 @@ function buildHost(ctx: Context): HostBundle {
     },
     deliveryState(sessionId: string, messageId: string): Promise<DeliveryState> {
       return deliveryStateOf(ctx, sessionId, messageId)
+    },
+    warn(message: string): void {
+      ctx.logger?.warn?.(message)
     },
     async describe(sessionId: string): Promise<string | undefined> {
       return (await readTitles([sessionId])).get(sessionId)
@@ -1776,6 +1788,30 @@ export function mountHost(ctx: Context, config?: Config): HostHalf {
       ctx.logger?.warn?.(`report-ledger: catch-up delivery failed: ${String(error)}`)
     })
   })
+
+  // Retry hand-offs that failed at the host boundary while their recipient
+  // stayed resident. `agent/created` covers a recipient that returns; nothing
+  // covers a transient failure against one that never left, so without this the
+  // owed hand-off would wait for the next restart. The service owns the backoff
+  // (2s doubling to a minute), so this cadence only notices due retries, and a
+  // sweep runs only while delivery trouble exists — the idle path costs nothing.
+  ctx.effect(() => {
+    let running = false
+    const retry = (): void => {
+      if (running || !service.hasDeliveryTrouble()) return
+      running = true
+      void service.retryFailedDeliveries()
+        .catch(() => {
+          // Per-recipient failures are recorded and reported once by the service.
+          // A sweep that logged every failed attempt would repeat the same warning
+          // until the operator learned to ignore it.
+        })
+        .finally(() => { running = false })
+    }
+    const timer = setInterval(retry, DELIVERY_RETRY_SWEEP_MS)
+    timer.unref?.()
+    return () => { clearInterval(timer) }
+  }, 'report-ledger: delivery retry sweep')
 
   if ((config?.announceToAgent ?? true) === false) return half
 

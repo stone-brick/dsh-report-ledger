@@ -76,6 +76,27 @@ const THREAD_MAX_ROWS = 400
 /** Deepest nesting a thread listing follows before it stops. */
 const THREAD_MAX_DEPTH = 64
 
+/** First delay before retrying a failed delivery to one recipient. */
+const DELIVERY_RETRY_BASE_MS = 2_000
+
+/** Ceiling of the exponential delivery retry delay. */
+const DELIVERY_RETRY_MAX_MS = 60_000
+
+/** Consecutive failures before a delivery problem is reported once. */
+const DELIVERY_FAILURES_BEFORE_WARN = 3
+
+/** One recipient's current delivery trouble, kept in memory only. */
+interface DeliveryFailure {
+  /** Consecutive failed attempts. */
+  attempts: number
+  /** When the next automatic retry may run, Unix epoch milliseconds. */
+  nextAttemptAt: number
+  /** The last error, quoted to the operator. */
+  lastError: string
+  /** Whether the failure threshold was already reported. */
+  warned: boolean
+}
+
 /** A subject is one line; a newline would forge a second row in report_list. */
 function oneLineSubject(subject: string): string {
   return subject.trim().replace(/\s*\r?\n\s*/g, ' ')
@@ -151,6 +172,14 @@ export interface ReportServiceHost {
    * @returns the observed state.
    */
   deliveryState?(sessionId: string, messageId: string): Promise<DeliveryState>
+  /**
+   * Record one delivery-health warning in the deployment log.
+   *
+   * Optional: a test or an embedding without a logger simply loses the notice,
+   * while the state behind it stays visible in `report_check`.
+   * @param message - the sentence to log.
+   */
+  warn?(message: string): void
 }
 
 /** Options accepted by {@link ReportService.author}. */
@@ -752,6 +781,21 @@ export interface DeliveryDiagnosticRow {
   readonly pending: boolean
   /** What the recipient's inbox and history say about the digest. */
   readonly state: DeliveryState
+  /**
+   * Current delivery trouble for this recipient, when the process has any.
+   *
+   * Orthogonal to `state`: a session can be resident (`inbox`) and still be the
+   * target of an attempt that keeps failing at the host boundary. In-memory only,
+   * so a restart forgets it — the owed hand-off is what survives.
+   */
+  readonly failing?: {
+    /** Consecutive failed attempts. */
+    readonly attempts: number
+    /** When the next automatic retry is allowed, Unix epoch milliseconds. */
+    readonly nextAttemptAt: number
+    /** The last error, quoted. */
+    readonly lastError: string
+  }
 }
 
 /** The whole delivery diagnostic, including whether it could be verified. */
@@ -771,6 +815,16 @@ export interface DeliveryDiagnostics {
 export class ReportService {
   readonly #host: ReportServiceHost
   readonly #locks = new Map<string, Promise<unknown>>()
+  /** When the service reads the clock; injectable so retry timing is testable. */
+  readonly #now: () => number
+  /**
+   * Delivery trouble per recipient, in memory only.
+   *
+   * Deliberately not persisted: what must survive a restart is the owed
+   * hand-off, which the hop stream already carries. "When may we try again" is
+   * scheduling, not ledger history — losing it just retries sooner.
+   */
+  readonly #deliveryFailures = new Map<string, DeliveryFailure>()
   /**
    * Mutexes keyed by shared git directory, for decisions that span reports.
    *
@@ -785,9 +839,59 @@ export class ReportService {
 
   /**
    * @param host - host capabilities (agent lookup, display names).
+   * @param options - `now` overrides the clock used for retry scheduling.
    */
-  constructor(host: ReportServiceHost) {
+  constructor(host: ReportServiceHost, options: { now?: () => number } = {}) {
     this.#host = host
+    this.#now = options.now ?? Date.now
+  }
+
+  /** Whether delivery to one recipient may be attempted now. */
+  #deliveryDue(target: string): boolean {
+    const failure = this.#deliveryFailures.get(target)
+    return failure === undefined || failure.nextAttemptAt <= this.#now()
+  }
+
+  /**
+   * Record one successful delivery, clearing any backoff.
+   *
+   * A recovery after the warning threshold is logged too: an operator who saw
+   * the problem needs to see it end, or the warning teaches them to ignore it.
+   */
+  #deliverySucceeded(target: string): void {
+    const previous = this.#deliveryFailures.get(target)
+    if (previous === undefined) return
+    this.#deliveryFailures.delete(target)
+    if (previous.warned) {
+      this.#host.warn?.(`report-ledger: delivery to ${target} recovered after ${previous.attempts} failed attempt(s)`)
+    }
+  }
+
+  /**
+   * Record one failed delivery and schedule the next attempt.
+   *
+   * The delay doubles from {@link DELIVERY_RETRY_BASE_MS} to
+   * {@link DELIVERY_RETRY_MAX_MS}. The first threshold crossing is logged once;
+   * later failures stay visible in `report_check` instead of filling the log.
+   */
+  #deliveryFailed(target: string, error: string): void {
+    const previous = this.#deliveryFailures.get(target)
+    const attempts = (previous?.attempts ?? 0) + 1
+    const delay = Math.min(DELIVERY_RETRY_MAX_MS, DELIVERY_RETRY_BASE_MS * 2 ** Math.min(attempts - 1, 5))
+    const failure: DeliveryFailure = {
+      attempts,
+      nextAttemptAt: this.#now() + delay,
+      lastError: error,
+      warned: previous?.warned ?? false,
+    }
+    this.#deliveryFailures.set(target, failure)
+    if (!failure.warned && attempts >= DELIVERY_FAILURES_BEFORE_WARN) {
+      failure.warned = true
+      this.#host.warn?.(
+        `report-ledger: delivery to ${target} has failed ${attempts} times in a row; `
+        + `next attempt in ${Math.round(delay / 1000)}s. Last error: ${error}`,
+      )
+    }
   }
 
   /** Run one task under a key's mutex. */
@@ -873,7 +977,13 @@ export class ReportService {
   }
 
   /** Deliver a digest and record one arrival hop per recipient that received it. */
-  async #deliver(front: ReportFrontMatter, targets: readonly string[], mode: DeliveryMode, actor: string): Promise<DeliveryOutcome[]> {
+  async #deliver(
+    front: ReportFrontMatter,
+    targets: readonly string[],
+    mode: DeliveryMode,
+    actor: string,
+    respectBackoff = false,
+  ): Promise<DeliveryOutcome[]> {
     // One target at a time: a failing steer/inject must not discard the arrivals
     // that already happened earlier in the batch. The caller gets an aggregate
     // error naming both sides instead of a blanket "send failed".
@@ -888,10 +998,24 @@ export class ReportService {
     const outcomes: DeliveryOutcome[] = []
     const failures: string[] = []
     for (const target of new Set(targets)) {
+      // An automatic retry waits out its backoff; an explicit send does not, so
+      // a person or an agent asking for delivery now is never silently deferred.
+      if (respectBackoff && !this.#deliveryDue(target)) continue
       try {
-        outcomes.push(...await deliver(this.#host, front, reportPath(front.report), [target], mode, ids))
+        const results = await deliver(this.#host, front, reportPath(front.report), [target], mode, ids)
+        outcomes.push(...results)
+        if (results.some((result) => result.status === 'delivered')) {
+          this.#deliverySucceeded(target)
+        } else if (results.some((result) => result.status === 'queued')) {
+          // The recipient vanished between residency and the hand-off. That is not
+          // host trouble, so no backoff: the held hand-off is retried when it
+          // returns, by the explicit flush that returning triggers.
+          this.#deliveryFailures.delete(target)
+        }
       } catch (error) {
-        failures.push(`${target} (${error instanceof Error ? error.message : String(error)})`)
+        const message = error instanceof Error ? error.message : String(error)
+        failures.push(`${target} (${message})`)
+        this.#deliveryFailed(target, message)
       }
     }
     const arrivals = outcomes.filter((outcome) => outcome.status === 'delivered')
@@ -2444,7 +2568,24 @@ export class ReportService {
         const state = this.#host.deliveryState === undefined
           ? 'unknown'
           : await this.#host.deliveryState(target, messageId)
-        rows.push({ report: front.report, status: front.status, target, pending: owed, state })
+        // A failure is host-boundary trouble while the recipient is resident. Once
+        // it is absent there is nothing to retry, and the pending hand-off says
+        // everything a reader needs.
+        const failure = state === 'absent' ? undefined : this.#deliveryFailures.get(target)
+        rows.push({
+          report: front.report,
+          status: front.status,
+          target,
+          pending: owed,
+          state,
+          ...(failure === undefined ? {} : {
+            failing: {
+              attempts: failure.attempts,
+              nextAttemptAt: failure.nextAttemptAt,
+              lastError: failure.lastError,
+            },
+          }),
+        })
       }
     }
     return {
@@ -2455,6 +2596,34 @@ export class ReportService {
       reports: new Set(rows.map((row) => row.report)).size,
       persistence: this.#host.deliveryState !== undefined,
     }
+  }
+
+  /** Whether any recipient currently has a failed delivery awaiting retry. */
+  hasDeliveryTrouble(): boolean {
+    return this.#deliveryFailures.size > 0
+  }
+
+  /**
+   * Retry hand-offs to recipients that failed while staying resident.
+   *
+   * This is the only path that retries without a fresh `agent/created`: a
+   * transient host-boundary failure against a session that never left would
+   * otherwise wait for the next restart. Backoff lives in this service, so the
+   * sweep may run more often than an individual recipient is retried.
+   *
+   * Failures for recipients that are no longer resident are forgotten first: the
+   * hand-off is still owed, but retrying is the job of the explicit flush that a
+   * return triggers, not of a sweep that can never reach it.
+   * @throws an `AggregateError` when any report failed, as {@link flushSessions} does.
+   */
+  async retryFailedDeliveries(): Promise<void> {
+    if (this.#deliveryFailures.size === 0) return
+    for (const target of [...this.#deliveryFailures.keys()]) {
+      if (this.#host.getAgent(target) === undefined) this.#deliveryFailures.delete(target)
+    }
+    const targets = [...this.#deliveryFailures.keys()]
+    if (targets.length === 0) return
+    await this.flushSessions(targets, { respectBackoff: true })
   }
 
   /**
@@ -2488,10 +2657,11 @@ export class ReportService {
    *  - each report still fails in isolation, because `agent/created` fires once
    *    and one malformed record must not abandon every later hand-off.
    * @param sessions - the sessions that just became resident.
+   * @param options - `respectBackoff` skips recipients whose retry is not due yet.
    * @returns the deliveries that succeeded.
    * @throws an `AggregateError` when any report failed, naming how many.
    */
-  async flushSessions(sessions: readonly string[]): Promise<readonly DeliveryOutcome[]> {
+  async flushSessions(sessions: readonly string[], options: { respectBackoff?: boolean } = {}): Promise<readonly DeliveryOutcome[]> {
     const wanted = new Set(sessions.filter((session) => session !== ''))
     const outcomes: DeliveryOutcome[] = []
     if (wanted.size === 0) return outcomes
@@ -2521,8 +2691,8 @@ export class ReportService {
           // either lose a wake or disturb a session for a carbon copy.
           const wake = still.filter((target) => pendingMode(hops, target) === 'wakeup')
           const quiet = still.filter((target) => pendingMode(hops, target) === 'quiet')
-          if (wake.length > 0) outcomes.push(...await this.#deliver(current.front, wake, 'wakeup', 'report-ledger'))
-          if (quiet.length > 0) outcomes.push(...await this.#deliver(current.front, quiet, 'quiet', 'report-ledger'))
+          if (wake.length > 0) outcomes.push(...await this.#deliver(current.front, wake, 'wakeup', 'report-ledger', options.respectBackoff === true))
+          if (quiet.length > 0) outcomes.push(...await this.#deliver(current.front, quiet, 'quiet', 'report-ledger', options.respectBackoff === true))
         })
       } catch (error) {
         errors.push(error)

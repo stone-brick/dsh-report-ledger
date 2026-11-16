@@ -87,6 +87,10 @@ const live = new Set<string>(['session-a', 'session-b', 'session-e'])
 const held = new Set<string>()
 const taken = new Set<string>()
 const steersByTarget = new Map<string, number>()
+const attemptsByTarget = new Map<string, number>()
+const broken = new Set<string>()
+const warnings: string[] = []
+let clock = 1_000_000
 let flushCalls = 0
 let flushError: Error | undefined
 
@@ -94,12 +98,19 @@ const service = new ReportService({
   getAgent(sessionId) {
     if (!live.has(sessionId)) return undefined
     const record = (): void => { steersByTarget.set(sessionId, (steersByTarget.get(sessionId) ?? 0) + 1) }
-    return {
-      id: sessionId,
+    const attempt = (): void => { attemptsByTarget.set(sessionId, (attemptsByTarget.get(sessionId) ?? 0) + 1) }
+    const accept = (message: { id: string }): void => {
+      attempt()
       // The fake inbox keeps what it was handed, which is exactly what `holds`
       // consults — so the recovery path is exercised end to end.
-      steer: (message) => { record(); held.add(message.id) },
-      inject: (message) => { record(); held.add(message.id) },
+      if (broken.has(sessionId)) throw new Error('agent refused the digest')
+      record()
+      held.add(message.id)
+    }
+    return {
+      id: sessionId,
+      steer: accept,
+      inject: accept,
     }
   },
   describe: async (sessionId) => `name-of-${sessionId}`,
@@ -113,7 +124,10 @@ const service = new ReportService({
     if (held.has(messageId)) return 'inbox'
     return taken.has(messageId) ? 'taken' : 'stranded'
   },
-})
+  warn(message: string) {
+    warnings.push(message)
+  },
+}, { now: () => clock })
 
 const firstReport = await service.author({ subject: 'first', body: 'b', actor: 'session-a', to: ['session-b'] })
 const firstId = deliveryId(firstReport.front.report, await readHops(firstReport.front.report), 'session-b')
@@ -191,6 +205,89 @@ check('an absent recipient is absent and still owed',
   JSON.stringify(rowOf(absentAgain.front.report, 'session-ghost')))
 check('a scan can be limited to one report',
   (await service.deliveryDiagnostics({ report: strandedReport.front.report })).rows.every((row) => row.report === strandedReport.front.report))
+
+// ---- 7. a host-boundary failure backs off, warns once, and recovers --------
+live.add('session-f1')
+broken.add('session-f1')
+const f1Report = await service.author({ subject: 'f1', body: 'b', actor: 'session-a' })
+let f1Failure = ''
+try {
+  await service.send(f1Report.front.report, 'session-a', ['session-f1'])
+} catch (error) {
+  f1Failure = error instanceof Error ? error.message : String(error)
+}
+check('a host-boundary failure is reported', f1Failure.includes('agent refused the digest'), f1Failure)
+check('the failed hand-off is not recorded as an arrival',
+  !(await readFile(routePath(f1Report.front.report), 'utf8')).includes('"delivered"'))
+check('the failed hand-off is still owed',
+  pendingTargets(await readHops(f1Report.front.report)).includes('session-f1'))
+
+const f1Row = (await service.deliveryDiagnostics({ report: f1Report.front.report })).rows
+  .find((row) => row.target === 'session-f1')
+check('the failure is visible with its attempt count', f1Row?.failing?.attempts === 1, JSON.stringify(f1Row))
+check('the first retry is scheduled two seconds out', f1Row?.failing?.nextAttemptAt === clock + 2_000,
+  String(f1Row?.failing?.nextAttemptAt))
+
+await service.flushSessions(['session-f1'], { respectBackoff: true })
+check('a retry before its window is skipped', (attemptsByTarget.get('session-f1') ?? 0) === 1,
+  String(attemptsByTarget.get('session-f1') ?? 0))
+
+clock += 2_000
+let f1RetryFailed = false
+try {
+  await service.flushSessions(['session-f1'], { respectBackoff: true })
+} catch {
+  f1RetryFailed = true
+}
+check('a due retry tries again', (attemptsByTarget.get('session-f1') ?? 0) === 2 && f1RetryFailed,
+  `${attemptsByTarget.get('session-f1') ?? 0} attempts, failed=${f1RetryFailed}`)
+
+// A recipient that leaves is not retried by a sweep that can never reach it;
+// the hand-off stays owed for the explicit flush its return triggers.
+live.delete('session-f1')
+await service.retryFailedDeliveries()
+check('a failure for a session that left is forgotten', service.hasDeliveryTrouble() === false)
+check('the hand-off survives the forgotten failure',
+  pendingTargets(await readHops(f1Report.front.report)).includes('session-f1'))
+
+live.add('session-f2')
+broken.add('session-f2')
+const f2Report = await service.author({ subject: 'f2', body: 'b', actor: 'session-a' })
+try {
+  await service.send(f2Report.front.report, 'session-a', ['session-f2'])
+} catch {
+  // expected: this is the first failure
+}
+for (const wait of [2_000, 4_000]) {
+  clock += wait
+  try {
+    await service.flushSessions(['session-f2'], { respectBackoff: true })
+  } catch {
+    // expected until the recipient is repaired
+  }
+}
+check('the failure count reaches three', (attemptsByTarget.get('session-f2') ?? 0) === 3,
+  String(attemptsByTarget.get('session-f2') ?? 0))
+check('the third consecutive failure is reported once',
+  warnings.filter((warning) => warning.includes('session-f2') && warning.includes('failed 3 times in a row')).length === 1,
+  warnings.join(' | '))
+check('the warning names the next delay',
+  warnings.some((warning) => warning.includes('session-f2') && warning.includes('next attempt in 8s')),
+  warnings.join(' | '))
+const f2Row = (await service.deliveryDiagnostics({ report: f2Report.front.report })).rows
+  .find((row) => row.target === 'session-f2')
+check('the diagnostic carries the third failure', f2Row?.failing?.attempts === 3, JSON.stringify(f2Row))
+
+broken.delete('session-f2')
+clock += 8_000
+await service.flushSessions(['session-f2'], { respectBackoff: true })
+check('a recovered delivery clears the trouble', service.hasDeliveryTrouble() === false)
+check('recovery is reported once',
+  warnings.some((warning) => warning.includes('session-f2') && warning.includes('recovered after 3 failed attempt(s)')),
+  warnings.join(' | '))
+const f2Recovered = (await service.deliveryDiagnostics({ report: f2Report.front.report })).rows
+  .find((row) => row.target === 'session-f2')
+check('the recovered row no longer reports failing', f2Recovered?.failing === undefined, JSON.stringify(f2Recovered))
 
 let failed = 0
 for (const [label, ok, detail] of checks) {

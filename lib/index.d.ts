@@ -828,6 +828,14 @@ interface ReportServiceHost {
    * @returns the observed state.
    */
   deliveryState?(sessionId: string, messageId: string): Promise<DeliveryState>;
+  /**
+   * Record one delivery-health warning in the deployment log.
+   *
+   * Optional: a test or an embedding without a logger simply loses the notice,
+   * while the state behind it stays visible in `report_check`.
+   * @param message - the sentence to log.
+   */
+  warn?(message: string): void;
 }
 /** Options accepted by {@link ReportService.author}. */
 interface AuthorInput {
@@ -1055,6 +1063,18 @@ interface DeliveryDiagnosticRow {
   readonly pending: boolean;
   /** What the recipient's inbox and history say about the digest. */
   readonly state: DeliveryState;
+  /**
+   * Current delivery trouble for this recipient, when the process has any.
+   *
+   * Orthogonal to `state`: a session can be resident (`inbox`) and still be the
+   * target of an attempt that keeps failing at the host boundary. In-memory only,
+   * so a restart forgets it — the owed hand-off is what survives.
+   */
+  readonly failing?: {
+    /** Consecutive failed attempts. */readonly attempts: number; /** When the next automatic retry is allowed, Unix epoch milliseconds. */
+    readonly nextAttemptAt: number; /** The last error, quoted. */
+    readonly lastError: string;
+  };
 }
 /** The whole delivery diagnostic, including whether it could be verified. */
 interface DeliveryDiagnostics {
@@ -1073,8 +1093,11 @@ declare class ReportService {
   #private;
   /**
    * @param host - host capabilities (agent lookup, display names).
+   * @param options - `now` overrides the clock used for retry scheduling.
    */
-  constructor(host: ReportServiceHost);
+  constructor(host: ReportServiceHost, options?: {
+    now?: () => number;
+  });
   /**
    * Create a report and optionally hand it to its first recipients.
    * @param input - authoring input.
@@ -1417,6 +1440,22 @@ declare class ReportService {
   deliveryDiagnostics(filter?: {
     report?: string;
   }): Promise<DeliveryDiagnostics>;
+  /** Whether any recipient currently has a failed delivery awaiting retry. */
+  hasDeliveryTrouble(): boolean;
+  /**
+   * Retry hand-offs to recipients that failed while staying resident.
+   *
+   * This is the only path that retries without a fresh `agent/created`: a
+   * transient host-boundary failure against a session that never left would
+   * otherwise wait for the next restart. Backoff lives in this service, so the
+   * sweep may run more often than an individual recipient is retried.
+   *
+   * Failures for recipients that are no longer resident are forgotten first: the
+   * hand-off is still owed, but retrying is the job of the explicit flush that a
+   * return triggers, not of a sweep that can never reach it.
+   * @throws an `AggregateError` when any report failed, as {@link flushSessions} does.
+   */
+  retryFailedDeliveries(): Promise<void>;
   /**
    * Deliver every held hand-off owed to one session that just became resident.
    * @param sessionId - the session that became resident.
@@ -1445,10 +1484,13 @@ declare class ReportService {
    *  - each report still fails in isolation, because `agent/created` fires once
    *    and one malformed record must not abandon every later hand-off.
    * @param sessions - the sessions that just became resident.
+   * @param options - `respectBackoff` skips recipients whose retry is not due yet.
    * @returns the deliveries that succeeded.
    * @throws an `AggregateError` when any report failed, naming how many.
    */
-  flushSessions(sessions: readonly string[]): Promise<readonly DeliveryOutcome[]>;
+  flushSessions(sessions: readonly string[], options?: {
+    respectBackoff?: boolean;
+  }): Promise<readonly DeliveryOutcome[]>;
 }
 //#endregion
 //#region src/index.d.ts

@@ -201,7 +201,7 @@ function renderDeliveryDiagnostics(result: DeliveryDiagnostics): string[] {
     lines.push('delivery: no hand-off is outstanding or unacknowledged on the reports scanned')
     return lines
   }
-  const byState: Record<DeliveryState, { report: string; target: string; pending: boolean }[]> = {
+  const byState: Record<DeliveryState, DeliveryDiagnostics['rows'][number][]> = {
     absent: [], inbox: [], taken: [], stranded: [], unknown: [],
   }
   for (const row of result.rows) byState[row.state].push(row)
@@ -213,10 +213,24 @@ function renderDeliveryDiagnostics(result: DeliveryDiagnostics): string[] {
     // The healthy and merely-waiting states stay as counts; naming every one of
     // them would turn a diagnostic into a directory.
     if (state === 'taken' || state === 'absent') continue
-    for (const row of rows.slice(0, 12)) {
+    // Rows with a current failure are detailed in their own section below; naming
+    // them here too would say the same thing twice.
+    const detailed = rows.filter((row) => row.failing === undefined)
+    for (const row of detailed.slice(0, 12)) {
       lines.push(`    ${row.report} -> ${row.target}${row.pending ? ' (still owed)' : ''}`)
     }
-    if (rows.length > 12) lines.push(`    … and ${rows.length - 12} more`)
+    if (detailed.length > 12) lines.push(`    … and ${detailed.length - 12} more`)
+  }
+  const failing = result.rows.filter((row) => row.failing !== undefined)
+  if (failing.length > 0) {
+    lines.push(`  failing ${failing.length} — a delivery attempt failed at the host boundary; automatic retries back off up to a minute`)
+    for (const row of failing.slice(0, 12)) {
+      const failure = row.failing
+      if (failure === undefined) continue
+      const wait = Math.max(0, Math.round((failure.nextAttemptAt - Date.now()) / 1000))
+      lines.push(`    ${row.report} -> ${row.target}: ${failure.attempts} failure(s), next retry in ~${wait}s — ${failure.lastError}`)
+    }
+    if (failing.length > 12) lines.push(`    … and ${failing.length - 12} more`)
   }
   return lines
 }
@@ -613,7 +627,7 @@ export function registerReportTools(
 
   disposers.push(ctx.tools.register(defineTool({
     name: 'report_check',
-    description: 'Check whether each report\'s digest still agrees with its transfer path — read-only: nothing is written and no hop is recorded. The front matter is a cache of the append-only path, so a crash between a hop and the digest rewrite, a hand edit, or a version that changed what the digest derives can leave a report whose counters, recipients or co-authors no longer match its history. Omit `report` to sweep the whole ledger (one stat plus one sidecar read per report); pass it to check one. Each disagreement is printed as `stored -> derived`; a record that cannot be parsed or read is reported as `could not be checked` rather than silently omitted. `status` is state, not a projection of the transfer path (an ack after a close does not reopen), so this check does not compare it. `delivery: true` adds a second, read-only pass over the recipients\' own inboxes and session histories: absent (not resident, still held), inbox (arrived but no step has taken it), taken (in the history), stranded (the ledger recorded an arrival the session has no trace of), or unknown (no session persistence to verify with). Repair is deliberately NOT a tool: a sweep rewrites every digest, so it stays with the human who can see whether the ledger is being written right now (`pnpm repair`, optionally `--dry-run`).',
+    description: 'Check whether each report\'s digest still agrees with its transfer path — read-only: nothing is written and no hop is recorded. The front matter is a cache of the append-only path, so a crash between a hop and the digest rewrite, a hand edit, or a version that changed what the digest derives can leave a report whose counters, recipients or co-authors no longer match its history. Omit `report` to sweep the whole ledger (one stat plus one sidecar read per report); pass it to check one. Each disagreement is printed as `stored -> derived`; a record that cannot be parsed or read is reported as `could not be checked` rather than silently omitted. `status` is state, not a projection of the transfer path (an ack after a close does not reopen), so this check does not compare it. `delivery: true` adds a second, read-only pass over the recipients\' own inboxes and session histories: absent (not resident, still held), inbox (arrived but no step has taken it), taken (in the history), stranded (the ledger recorded an arrival the session has no trace of), or unknown (no session persistence to verify with); a recipient whose delivery keeps failing at the host boundary is also listed as `failing`, with its attempt count, next retry and last error. Repair is deliberately NOT a tool: a sweep rewrites every digest, so it stays with the human who can see whether the ledger is being written right now (`pnpm repair`, optionally `--dry-run`).',
     parameters: {
       report: { type: 'string', description: 'Check this report only. Omit to sweep the whole ledger.' },
       delivery: { type: 'boolean', description: 'Also report what became of each hand-off, from the recipients\' inboxes and session histories. Read-only; needs session persistence to verify consumption.' },
