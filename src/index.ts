@@ -47,7 +47,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 // separators, a symlink or an 8.3 short name.
 import { realpathNormalize } from '@deepseek-ai/dsh-workspace'
 import type { AgentLike } from './report/deliver.ts'
-import { pendingTargets } from './report/deliver.ts'
+import { isDeliveryId, pendingTargets, type DeliveryState } from './report/deliver.ts'
 import { PARTNERSHIP_SECTION_ORDER, SECTION_ORDER, partnershipText, protocolText } from './report/guidance.ts'
 import { listReports, readHops, readReport, reportPath } from './report/ledger.ts'
 import { resolveWorktree, type WorktreeConfig, type WorktreeRuntime } from './report/allocate.ts'
@@ -811,6 +811,147 @@ interface TitleMemo {
   readonly title?: string
 }
 
+/** The slice of session persistence the delivery probe reads. */
+interface SessionPersistenceLike {
+  /** Flush every acknowledged append; the durability barrier. */
+  flush?(): Promise<void>
+  /** Open one session log for reading. */
+  open(id: never, access: 'read'): Promise<PersistenceHandleLike>
+}
+
+/** One read handle onto a stored session log. */
+interface PersistenceHandleLike {
+  /** Read a contiguous slice of the event log. */
+  read(offset?: number, length?: number): Promise<{ readonly events: readonly PersistedEventLike[] }>
+  /** Release the handle. */
+  close(): Promise<void>
+}
+
+/** The two event fields the digest scan needs. */
+interface PersistedEventLike {
+  /** Event type; only `user/message` carries a digest id. */
+  readonly type: string
+  /** The event payload, read only for `id`. */
+  readonly data?: unknown
+}
+
+/** Digest ids observed in one session, and the scan that is filling them. */
+interface DigestIdCache {
+  /** Every `report-ledger:` message id seen for this session. */
+  readonly ids: Set<string>
+  /** The one running history scan, shared by concurrent probes. */
+  loading?: Promise<void>
+}
+
+/**
+ * Digest ids already seen per session.
+ *
+ * Keyed by the plugin context so a re-mount starts clean, and bounded by the
+ * number of sessions that ever received a report. It stores ids only — never
+ * message text — because its only job is to answer "was this hand-off already
+ * taken?" without reading a session log twice.
+ */
+const digestIdCaches = new WeakMap<Context, Map<string, DigestIdCache>>()
+
+/** The cache map for one plugin context. */
+function digestIdCache(ctx: Context): Map<string, DigestIdCache> {
+  let cache = digestIdCaches.get(ctx)
+  if (cache === undefined) {
+    cache = new Map()
+    digestIdCaches.set(ctx, cache)
+  }
+  return cache
+}
+
+/**
+ * Every digest id in one session's persisted history, or `undefined` when the
+ * deployment composes no session persistence (or the log cannot be read).
+ *
+ * Scanned once per session and then maintained by `session/event`, because the
+ * alternative — reading a full log on every delivery probe — would make the
+ * crash-recovery path the most expensive thing in the plugin.
+ * @param ctx - the plugin context.
+ * @param sessionId - the session whose history is scanned.
+ * @returns the ids, or `undefined` when consumption cannot be verified.
+ */
+async function digestIdsOf(ctx: Context, sessionId: string): Promise<ReadonlySet<string> | undefined> {
+  const persistence = ctx.get('sessionPersistence') as SessionPersistenceLike | undefined
+  if (persistence?.open === undefined) return undefined
+  const cache = digestIdCache(ctx)
+  let entry = cache.get(sessionId)
+  if (entry === undefined) {
+    const created: DigestIdCache = { ids: new Set() }
+    cache.set(sessionId, created)
+    entry = created
+  }
+  const record = entry
+  if (record.loading === undefined) {
+    record.loading = (async (): Promise<void> => {
+      // Flush first: an append is only visible to cross-handle reads after its
+      // backend admits it, and the barrier is what makes this scan see a message
+      // the plugin itself delivered moments ago.
+      await persistence.flush?.()
+      const handle = await persistence.open(sessionId as never, 'read')
+      try {
+        for (let offset = 0; ;) {
+          const { events } = await handle.read(offset, 512)
+          if (events.length === 0) break
+          for (const event of events) {
+            if (event.type !== 'user/message') continue
+            const id = (event.data as { readonly id?: unknown } | null | undefined)?.id
+            if (typeof id === 'string' && isDeliveryId(id)) record.ids.add(id)
+          }
+          offset += events.length
+        }
+      } finally {
+        await handle.close()
+      }
+    })().catch((error: unknown) => {
+      // A failed scan must not be cached as "this session has no history": drop
+      // the entry so the next probe tries again.
+      cache.delete(sessionId)
+      throw error
+    })
+  }
+  try {
+    await record.loading
+  } catch {
+    return undefined
+  }
+  return record.ids
+}
+
+/** Remember one digest id the moment it enters a session's history. */
+function rememberDigestId(ctx: Context, sessionId: string, messageId: string): void {
+  digestIdCaches.get(ctx)?.get(sessionId)?.ids.add(messageId)
+}
+
+/** Drop a session's cached ids, so the next probe rescans its log. */
+function forgetDigestIds(ctx: Context, sessionId: string): void {
+  digestIdCaches.get(ctx)?.delete(sessionId)
+}
+
+/**
+ * What the recipient's own inbox and history say about one digest.
+ *
+ * `absent` is not an error — the session is simply not resident and the hand-off
+ * is still held. `stranded` is the one state that is always a defect: the ledger
+ * recorded an arrival that the recipient has no trace of.
+ * @param ctx - the plugin context.
+ * @param sessionId - recipient session id.
+ * @param messageId - the hand-off's stable message id.
+ * @returns the observed state, or `unknown` without session persistence.
+ */
+async function deliveryStateOf(ctx: Context, sessionId: string, messageId: string): Promise<DeliveryState> {
+  const agent = ctx.agents.get(sessionId as never)
+  if (agent === undefined) return 'absent'
+  const inbox = [...agent.inbox.nextTurn, ...agent.inbox.nextStep]
+  if (inbox.some((message) => String(message.id) === messageId)) return 'inbox'
+  const history = await digestIdsOf(ctx, sessionId)
+  if (history === undefined) return 'unknown'
+  return history.has(messageId) ? 'taken' : 'stranded'
+}
+
 /**
  * Build every host capability this plugin consumes.
  *
@@ -1066,6 +1207,20 @@ function buildHost(ctx: Context): HostBundle {
         steer: (message) => { agent.steer(message as never) },
         inject: (message) => { agent.inject(message as never) },
       }
+    },
+    async holds(sessionId: string, messageId: string): Promise<boolean> {
+      // Only the two "the recipient has it" states count. `stranded` deliberately
+      // does not: the ledger thinks it arrived, the session says otherwise, and
+      // the durable-mailbox answer is to deliver again.
+      const state = await deliveryStateOf(ctx, sessionId, messageId)
+      return state === 'inbox' || state === 'taken'
+    },
+    async flushSessionPersistence(): Promise<void> {
+      const persistence = ctx.get('sessionPersistence') as SessionPersistenceLike | undefined
+      await persistence?.flush?.()
+    },
+    deliveryState(sessionId: string, messageId: string): Promise<DeliveryState> {
+      return deliveryStateOf(ctx, sessionId, messageId)
     },
     async describe(sessionId: string): Promise<string | undefined> {
       return (await readTitles([sessionId])).get(sessionId)
@@ -1513,6 +1668,9 @@ export function mountHost(ctx: Context, config?: Config): HostHalf {
   ctx.on('agent/created', (payload: { agent: { id: unknown } }): undefined => {
     const sessionId = String(payload?.agent?.id ?? '')
     if (sessionId === '') return undefined
+    // The session may have been resumed, cleared or forked since the last probe;
+    // whatever digest ids the cache remembers belong to the previous log.
+    forgetDigestIds(ctx, sessionId)
     // A resident id is exactly what the corpus cache cannot have seen yet, so
     // drop it before the tab can ask for that session's timeline.
     host.invalidateSessionListing?.()
@@ -1520,6 +1678,15 @@ export function mountHost(ctx: Context, config?: Config): HostHalf {
       ctx.logger?.warn?.(`report-ledger: deferred delivery to ${sessionId} failed: ${String(error)}`)
     })
     return undefined
+  })
+
+  // Keep the digest-id cache current without rescanning a log. Only ids this
+  // plugin minted matter, and only when they enter history — an inbox message
+  // that no step ever takes is precisely what the cache must not claim.
+  ctx.on('session/event', (session, event) => {
+    if (event.type !== 'user/message') return
+    const messageId = String(event.data.id)
+    if (isDeliveryId(messageId)) rememberDigestId(ctx, String(session.id), messageId)
   })
 
   // The browser tab's read surface.

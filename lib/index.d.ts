@@ -298,6 +298,8 @@ interface AgentLike {
   /** Queue model-facing context without waking the driver. */
   inject(message: OutboundMessage): void;
 }
+/** What became of one digest after it was addressed to a session. */
+type DeliveryState = 'absent' | 'inbox' | 'taken' | 'stranded' | 'unknown';
 /** Where one hand-off went. */
 interface DeliveryOutcome {
   /** Target session id. */
@@ -313,6 +315,12 @@ interface DeliveryOutcome {
    * observation for a peer's first turn).
    */
   readonly status: 'delivered' | 'queued';
+  /**
+   * True when the recipient already held this hand-off and it was recorded
+   * without steering again: the recovery path for a crash between `steer` and
+   * the `delivered` hop.
+   */
+  readonly recovered?: boolean;
 }
 //#endregion
 //#region src/report/timeline.d.ts
@@ -790,6 +798,36 @@ interface ReportServiceHost {
    * @returns the display name, or `undefined`.
    */
   describe(sessionId: string): Promise<string | undefined>;
+  /**
+   * Whether one session already holds a digest under its stable message id.
+   *
+   * Optional: a test transport or a deployment without session persistence has
+   * no way to answer, and delivery then degrades to plain at-least-once. The
+   * live host answers from the agent's inbox and its persisted history.
+   * @param sessionId - recipient session id.
+   * @param messageId - the hand-off's stable message id.
+   * @returns true when the recipient already holds it.
+   */
+  holds?(sessionId: string, messageId: string): Promise<boolean>;
+  /**
+   * The durability barrier for session logs.
+   *
+   * Called after a digest is handed to its recipients and before the arrival is
+   * recorded, so the ledger never claims an arrival the session store could lose
+   * in a crash. Optional because a deployment may compose no persistence.
+   * @returns fulfillment once acknowledged session appends are durable.
+   */
+  flushSessionPersistence?(): Promise<void>;
+  /**
+   * What the recipient's inbox and history say about one digest.
+   *
+   * Optional; absent means consumption cannot be verified and diagnostics report
+   * `unknown`. The live host answers `inbox`, `taken`, `stranded` or `absent`.
+   * @param sessionId - recipient session id.
+   * @param messageId - the hand-off's stable message id.
+   * @returns the observed state.
+   */
+  deliveryState?(sessionId: string, messageId: string): Promise<DeliveryState>;
 }
 /** Options accepted by {@link ReportService.author}. */
 interface AuthorInput {
@@ -1004,6 +1042,31 @@ interface DigestRepair {
   readonly derived: string;
   /** Why it was left unwritten, when it was. */
   readonly skipped?: string;
+}
+/** One recipient's observed delivery state, as the read-only diagnostics report it. */
+interface DeliveryDiagnosticRow {
+  /** Report the hand-off belongs to. */
+  readonly report: string;
+  /** The report's lifecycle state at scan time. */
+  readonly status: ReportStatus;
+  /** Recipient session id. */
+  readonly target: string;
+  /** Whether the report still owes this recipient a hand-off. */
+  readonly pending: boolean;
+  /** What the recipient's inbox and history say about the digest. */
+  readonly state: DeliveryState;
+}
+/** The whole delivery diagnostic, including whether it could be verified. */
+interface DeliveryDiagnostics {
+  /** One row per recipient of every live report. */
+  readonly rows: readonly DeliveryDiagnosticRow[];
+  /** How many reports were considered. */
+  readonly reports: number;
+  /**
+   * Whether the host could answer the consumption question. False means every
+   * row's state is `unknown`: the ledger's own arrival record is all there is.
+   */
+  readonly persistence: boolean;
 }
 /** The report service. */
 declare class ReportService {
@@ -1340,6 +1403,20 @@ declare class ReportService {
     dryRun?: boolean;
     report?: string;
   }): Promise<DigestRepair[]>;
+  /**
+   * Report what became of every digest a live report handed out.
+   *
+   * Read-only and deliberately separate from the digest check: the digest check
+   * compares the ledger with itself, while this compares the ledger with the
+   * recipients' own session logs. The interesting rows are the ones the ledger
+   * alone cannot see — a digest still in an inbox that no step has taken, or an
+   * arrival the ledger recorded that the session has no trace of.
+   * @param filter - limit the scan to one report.
+   * @returns one row per recipient, plus whether consumption could be verified.
+   */
+  deliveryDiagnostics(filter?: {
+    report?: string;
+  }): Promise<DeliveryDiagnostics>;
   /**
    * Deliver every held hand-off owed to one session that just became resident.
    * @param sessionId - the session that became resident.

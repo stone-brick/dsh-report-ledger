@@ -23,7 +23,7 @@ import { basename } from 'node:path'
 import { mentions } from './assets.ts'
 import { planAllocation, type StaleBinding, type WorktreeSettings } from './allocate.ts'
 import type { AgentLike } from './deliver.ts'
-import { deliver, pendingMode, pendingTargets, type DeliveryOutcome } from './deliver.ts'
+import { deliver, deliveryId, pendingMode, pendingTargets, type DeliveryOutcome, type DeliveryState } from './deliver.ts'
 import { evaluateLease, leaseState } from './lease.ts'
 import { allocateId, appendHop, appendReportBody, bodyStartLine, discardUnwrittenId, isValidReportId, listReports, listReportIds, readDigestOf, readHops, readReport, reportExists, reportPath, routePath, writeReport } from './ledger.ts'
 import {
@@ -121,6 +121,36 @@ export interface ReportServiceHost {
    * @returns the display name, or `undefined`.
    */
   describe(sessionId: string): Promise<string | undefined>
+  /**
+   * Whether one session already holds a digest under its stable message id.
+   *
+   * Optional: a test transport or a deployment without session persistence has
+   * no way to answer, and delivery then degrades to plain at-least-once. The
+   * live host answers from the agent's inbox and its persisted history.
+   * @param sessionId - recipient session id.
+   * @param messageId - the hand-off's stable message id.
+   * @returns true when the recipient already holds it.
+   */
+  holds?(sessionId: string, messageId: string): Promise<boolean>
+  /**
+   * The durability barrier for session logs.
+   *
+   * Called after a digest is handed to its recipients and before the arrival is
+   * recorded, so the ledger never claims an arrival the session store could lose
+   * in a crash. Optional because a deployment may compose no persistence.
+   * @returns fulfillment once acknowledged session appends are durable.
+   */
+  flushSessionPersistence?(): Promise<void>
+  /**
+   * What the recipient's inbox and history say about one digest.
+   *
+   * Optional; absent means consumption cannot be verified and diagnostics report
+   * `unknown`. The live host answers `inbox`, `taken`, `stranded` or `absent`.
+   * @param sessionId - recipient session id.
+   * @param messageId - the hand-off's stable message id.
+   * @returns the observed state.
+   */
+  deliveryState?(sessionId: string, messageId: string): Promise<DeliveryState>
 }
 
 /** Options accepted by {@link ReportService.author}. */
@@ -710,6 +740,33 @@ const MISSING_PATH = 'its transfer path is missing, so the digest cannot be rebu
  */
 const EMPTY_PATH = 'its transfer path is empty or unreadable, so the digest cannot be rebuilt from it'
 
+/** One recipient's observed delivery state, as the read-only diagnostics report it. */
+export interface DeliveryDiagnosticRow {
+  /** Report the hand-off belongs to. */
+  readonly report: string
+  /** The report's lifecycle state at scan time. */
+  readonly status: ReportStatus
+  /** Recipient session id. */
+  readonly target: string
+  /** Whether the report still owes this recipient a hand-off. */
+  readonly pending: boolean
+  /** What the recipient's inbox and history say about the digest. */
+  readonly state: DeliveryState
+}
+
+/** The whole delivery diagnostic, including whether it could be verified. */
+export interface DeliveryDiagnostics {
+  /** One row per recipient of every live report. */
+  readonly rows: readonly DeliveryDiagnosticRow[]
+  /** How many reports were considered. */
+  readonly reports: number
+  /**
+   * Whether the host could answer the consumption question. False means every
+   * row's state is `unknown`: the ledger's own arrival record is all there is.
+   */
+  readonly persistence: boolean
+}
+
 /** The report service. */
 export class ReportService {
   readonly #host: ReportServiceHost
@@ -820,22 +877,49 @@ export class ReportService {
     // One target at a time: a failing steer/inject must not discard the arrivals
     // that already happened earlier in the batch. The caller gets an aggregate
     // error naming both sides instead of a blanket "send failed".
+    //
+    // The ids come from the transfer path as it stands now. Every target of this
+    // call shares the hop that addressed it, so a retry after a crash names the
+    // same message the recipient may already hold; `holds` then turns the retry
+    // into a recorded arrival instead of a second digest.
+    const hops = await readHops(front.report)
+    const ids: Record<string, string> = {}
+    for (const target of new Set(targets)) ids[target] = deliveryId(front.report, hops, target)
     const outcomes: DeliveryOutcome[] = []
     const failures: string[] = []
     for (const target of new Set(targets)) {
       try {
-        outcomes.push(...await deliver(this.#host, front, reportPath(front.report), [target], mode))
+        outcomes.push(...await deliver(this.#host, front, reportPath(front.report), [target], mode, ids))
       } catch (error) {
         failures.push(`${target} (${error instanceof Error ? error.message : String(error)})`)
       }
     }
     const arrivals = outcomes.filter((outcome) => outcome.status === 'delivered')
     if (arrivals.length > 0) {
-      const at = Date.now()
-      for (const arrival of arrivals) {
-        await appendHop(front.report, { at, actor, action: 'delivered', to: [arrival.targetId], note: mode })
+      // The arrival is only claimed once the session log is durable. A crash
+      // between the inbox splice and this barrier used to leave the ledger and
+      // the recipient disagreeing; now the unrecorded hand-off stays pending and
+      // the next sweep reconciles it through `holds`.
+      let durable = true
+      try {
+        await this.#host.flushSessionPersistence?.()
+      } catch (error) {
+        durable = false
+        failures.push(`session persistence (${error instanceof Error ? error.message : String(error)})`)
       }
-      await this.#sync(front.report)
+      if (durable) {
+        const at = Date.now()
+        for (const arrival of arrivals) {
+          await appendHop(front.report, {
+            at,
+            actor,
+            action: 'delivered',
+            to: [arrival.targetId],
+            note: arrival.recovered === true ? `${mode} (recovered)` : mode,
+          })
+        }
+        await this.#sync(front.report)
+      }
     }
     if (failures.length > 0) {
       const delivered = arrivals.map((arrival) => arrival.targetId).join(', ') || 'nobody'
@@ -2315,6 +2399,62 @@ export class ReportService {
       repairs.push({ report, changed: true, stored, derived, ...(skipped === undefined ? {} : { skipped }) })
     }
     return repairs
+  }
+
+  /**
+   * Report what became of every digest a live report handed out.
+   *
+   * Read-only and deliberately separate from the digest check: the digest check
+   * compares the ledger with itself, while this compares the ledger with the
+   * recipients' own session logs. The interesting rows are the ones the ledger
+   * alone cannot see — a digest still in an inbox that no step has taken, or an
+   * arrival the ledger recorded that the session has no trace of.
+   * @param filter - limit the scan to one report.
+   * @returns one row per recipient, plus whether consumption could be verified.
+   */
+  async deliveryDiagnostics(filter: { report?: string } = {}): Promise<DeliveryDiagnostics> {
+    let fronts: readonly ReportFrontMatter[]
+    if (filter.report === undefined) {
+      fronts = await listReports()
+    } else {
+      const single = await readReport(filter.report)
+      fronts = single === undefined ? [] : [single.front]
+    }
+    const rows: DeliveryDiagnosticRow[] = []
+    for (const front of fronts) {
+      const hops = await readHops(front.report)
+      const pending = new Set(pendingTargets(hops))
+      // Recipients come from the project of the path, not from the digest: a
+      // stale digest is exactly the case this tool is often run after, and it
+      // must not hide the recipient it has not caught up with.
+      const projected = projectRoute(hops)
+      const recipients = [...new Set([...projected.to, ...projected.cc])]
+      // A report nobody handed out has nothing to diagnose. A closed one is kept
+      // only while it still owes something: that combination is exactly the
+      // hand-off a later reader would otherwise assume had landed.
+      if (recipients.length === 0) continue
+      if (front.status === 'closed' && pending.size === 0) continue
+      const acked = new Set(hops.filter((hop) => hop.action === 'acked').map((hop) => hop.actor))
+      for (const target of recipients) {
+        const owed = pending.has(target)
+        // A receipt already closes the loop from the recipient's own side, and a
+        // still-owed hand-off is reported whether or not an older one was acked.
+        if (!owed && acked.has(target)) continue
+        const messageId = deliveryId(front.report, hops, target)
+        const state = this.#host.deliveryState === undefined
+          ? 'unknown'
+          : await this.#host.deliveryState(target, messageId)
+        rows.push({ report: front.report, status: front.status, target, pending: owed, state })
+      }
+    }
+    return {
+      rows,
+      // Count only reports that contributed a hand-off: the scan may walk the
+      // whole ledger, but "N hand-offs across M reports" must not be read as M
+      // reports having hand-offs.
+      reports: new Set(rows.map((row) => row.report)).size,
+      persistence: this.#host.deliveryState !== undefined,
+    }
   }
 
   /**

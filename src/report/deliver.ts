@@ -55,7 +55,25 @@ export interface AgentLike {
   inject(message: OutboundMessage): void
 }
 
-/** The host capability this module consumes: resolving a resident agent. */
+/** What became of one digest after it was addressed to a session. */
+export type DeliveryState = 'absent' | 'inbox' | 'taken' | 'stranded' | 'unknown'
+
+/**
+ * Every delivery message id starts with this prefix.
+ *
+ * The id is the ledger's half of at-most-once delivery: it is derived from the
+ * hand-off that caused it, so a retry after a crash names the same message the
+ * recipient may already hold. The prefix is what lets a later diagnostic pick
+ * these messages back out of a session history without re-deriving every id.
+ */
+export const DELIVERY_ID_PREFIX = 'report-ledger:'
+
+/** Whether a message id names a digest this plugin delivered. */
+export function isDeliveryId(id: string): boolean {
+  return id.startsWith(DELIVERY_ID_PREFIX)
+}
+
+/** The host capability this module consumes. */
 export interface DeliveryHost {
   /**
    * Resolve one live agent.
@@ -63,6 +81,19 @@ export interface DeliveryHost {
    * @returns the live agent, or `undefined` when it is not resident.
    */
   getAgent(sessionId: string): AgentLike | undefined
+  /**
+   * Whether the target already holds the digest under this id.
+   *
+   * Optional because it is supplied by the live host only: a harness without
+   * session persistence, or a test transport, degrades to plain delivery. When
+   * present it is the crash-recovery half of idempotent delivery — a re-send
+   * whose id is already in the inbox or history records the arrival the crashed
+   * attempt never recorded, instead of delivering the same digest twice.
+   * @param targetId - recipient session id.
+   * @param messageId - the hand-off's stable message id.
+   * @returns true when the recipient already has it.
+   */
+  holds?(targetId: string, messageId: string): Promise<boolean>
 }
 
 /** Where one hand-off went. */
@@ -80,6 +111,12 @@ export interface DeliveryOutcome {
    * observation for a peer's first turn).
    */
   readonly status: 'delivered' | 'queued'
+  /**
+   * True when the recipient already held this hand-off and it was recorded
+   * without steering again: the recovery path for a crash between `steer` and
+   * the `delivered` hop.
+   */
+  readonly recovered?: boolean
 }
 
 /**
@@ -91,9 +128,11 @@ export interface DeliveryOutcome {
  * @param front - the report digest.
  * @param path - absolute path of the report document, offered as the on-demand body.
  * @param mode - how this recipient received it.
+ * @param id - stable message id for this hand-off; random only when a caller that
+ * cannot name one still needs a message.
  * @returns the outbound message.
  */
-export function renderDigest(front: ReportFrontMatter, path: string, mode: DeliveryMode): OutboundMessage {
+export function renderDigest(front: ReportFrontMatter, path: string, mode: DeliveryMode, id: string = randomUUID()): OutboundMessage {
   const audience = mode === 'wakeup' ? 'addressed to you' : 'copied to you'
   const lines = [
     `[report ${front.report} — ${audience}] ${front.subject}`,
@@ -106,11 +145,44 @@ export function renderDigest(front: ReportFrontMatter, path: string, mode: Deliv
   lines.push(`body=${path}`)
   lines.push(`Read the body on demand; use report_list to see other reports and report_ack to close your loop.`)
   return {
-    id: randomUUID(),
+    id,
     role: 'user',
     content: [{ type: 'text', text: lines.join('\n') }],
     source: { kind: 'plugin:report-ledger', form: 'relay' },
   }
+}
+
+/**
+ * The stable message id of one hand-off to one target.
+ *
+ * Derived from the transfer path, not from wall-clock randomness: the last hop
+ * that addressed the target IS the hand-off, so its index is a name that every
+ * retry of the same obligation reproduces. A later send or transfer creates a
+ * new hand-off and therefore a new id — which is correct, because it carries new
+ * information for the recipient. The index is the hop's position in the path,
+ * which is append-only for the life of the report.
+ * @param report - report identifier.
+ * @param hops - the complete transfer path, oldest first.
+ * @param target - the recipient this hand-off is owed to.
+ * @returns the message id; ends in `:-1` only if the target was never addressed,
+ * which callers derive from {@link pendingTargets} and so never pass.
+ */
+export function deliveryId(report: string, hops: readonly RouteHop[], target: string): string {
+  let handoff = -1
+  hops.forEach((hop, index) => {
+    if (addressedBy(hop, target)) handoff = index
+  })
+  return `${DELIVERY_ID_PREFIX}${report}:${handoff}`
+}
+
+/** Whether one hop created the hand-off the target currently holds. */
+function addressedBy(hop: RouteHop, target: string): boolean {
+  if (!hop.to.includes(target)) return false
+  return hop.action === 'sent'
+    || hop.action === 'cc'
+    || hop.action === 'forwarded'
+    || hop.action === 'copied'
+    || hop.action === 'transferred'
 }
 
 /**
@@ -119,11 +191,18 @@ export function renderDigest(front: ReportFrontMatter, path: string, mode: Deliv
  * Transport only: this function never touches the ledger. The caller records the
  * arrival hops, which keeps the audit trail's writer in one place and lets the
  * same transport serve a first hand-off and a deferred one.
- * @param host - agent resolution.
+ *
+ * **Idempotent when the host can answer.** Each delivery carries a stable id
+ * (see {@link deliveryId}); if the host reports the recipient already holds that
+ * id, the arrival is reported without steering again. That is what makes a crash
+ * between `steer` and the `delivered` hop harmless: the retry reconciles instead
+ * of duplicating.
+ * @param host - agent resolution, and the optional holds probe.
  * @param front - the report digest.
  * @param path - absolute path of the report document.
  * @param targets - recipient session ids.
  * @param mode - wake policy for this hand-off.
+ * @param ids - the stable message id per target, when the caller has the hop path.
  * @returns one outcome per distinct target.
  */
 export async function deliver(
@@ -132,6 +211,7 @@ export async function deliver(
   path: string,
   targets: readonly string[],
   mode: DeliveryMode,
+  ids: Readonly<Record<string, string>> = {},
 ): Promise<DeliveryOutcome[]> {
   const outcomes: DeliveryOutcome[] = []
   const seen = new Set<string>()
@@ -143,7 +223,23 @@ export async function deliver(
       outcomes.push({ targetId, status: 'queued' })
       continue
     }
-    const message = renderDigest(front, path, mode)
+    const id = ids[targetId] ?? randomUUID()
+    if (host.holds !== undefined) {
+      let held = false
+      try {
+        held = await host.holds(targetId, id)
+      } catch {
+        // A probe that cannot answer must not turn delivery into a refusal: the
+        // durable pending set is still the authority, and a duplicate digest is
+        // cheaper than a lost hand-off.
+        held = false
+      }
+      if (held) {
+        outcomes.push({ targetId, status: 'delivered', recovered: true })
+        continue
+      }
+    }
+    const message = renderDigest(front, path, mode, id)
     if (mode === 'wakeup') agent.steer(message)
     else agent.inject(message)
     outcomes.push({ targetId, status: 'delivered' })

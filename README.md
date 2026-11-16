@@ -113,7 +113,7 @@ reports/R-0001.route.jsonl   append-only 传递路径，一行一跳
 | `report_forward` | 转呈下去，或 `mode:"copy"` 作为参考副本分发 |
 | `report_read` | 读缩略 + 完整传递路径（开头一行按动作计数）+ 正文；长正文给派生大纲与头+尾摘录，`offset`/`limit` 按正文行号取任意一段（读取记为 `read`，计入 `hops` 也计入 `reads`，`hops - reads` 才是工作量；不推进 `updated`、不改变列表顺序） |
 | `report_list` | 只列缩略，可按 `session`、`status`、`task`、`worktree` 过滤，用于纵览长期协作；用 `thread=<编号>` 把该汇报所在的整条线（`parent` 上溯到根、`children` 下递）列成缩进树，不读正文也不记跳——"这条线整体完了吗"一次回答。行里带 `authors=N`——回执说明有人确认收到，`authors=1` 说明**没人真的写过东西** |
-| `report_check` | 只读诊断：检查缩略与传递路径是否一致（可限定一份），列出 `stored -> derived`；**不写、不记跳**。修复不是工具，仍是人的动作：`pnpm repair`（可 `--dry-run`） |
+| `report_check` | 只读诊断：检查缩略与传递路径是否一致（可限定一份），列出 `stored -> derived`；**不写、不记跳**。加 `delivery:true` 再做一次投递诊断：对每个收件人区分 `absent`（未驻留、仍欠着）/ `inbox`（已到达但没被 step 取用）/ `taken`（进入过会话历史）/ `stranded`（账本记了到达、会话里没有）/ `unknown`（部署无会话持久化）。修复不是工具，仍是人的动作：`pnpm repair`（可 `--dry-run`） |
 | `report_ack` | 回执，让发送方看到闭环 |
 | `report_amend` | 修正：改缩略字段或更正正文，仅发起者/共写者可改，改动会被记录 |
 | `report_close` | 结案：事情的终结，仅发起者/共写者可关；**从未有过贡献的汇报必须带 `note`**（交代做到了哪，或为什么没写），否则拒绝；同时**交还**它持有的工作区 |
@@ -176,6 +176,7 @@ web profile 里多两处：
 
 - **单进程假设。** 每个汇报的写操作——**包括 `report_read` 记跳与延迟投递泵**——都由进程内按汇报的互斥锁串行化。跨进程共享同一账本需要租约协议，这与 harness 自身延期的工作相同。工作区的**占用判定**另有一把按仓库为键的锁（跨报告抢同一支分支是单报告锁看不见的），但它同样只在本进程内有效。
 - **正文并发覆盖。** 跳流 append-only 永不丢跳，**单进程内**整份重写的写入点都已进锁；**两个进程**同时改写同一份正文仍是后写者胜（`report_contribute` 用追加，规避了常见路径）。
+- **投递是 at-least-once，不是 exactly-once。** 幂等靠"由跳流派生的消息 id + 收件人 inbox/历史查重"实现，依赖会话持久化；部署没有 `sessionPersistence` 时退化为可能重复投递，历史被 `clear` 或压缩后也可能重复一次。重复的代价是一条摘要，不是数据损坏；`report_check({ delivery: true })` 会写明消费状态无法验证（`unknown`）。
 - **同伴名额是终身的。** `maxPeersPerAgent`（默认 8）数的是**本会话启动过的不同同伴会话数**（`peers.jsonl` 的行先按 `startedBy` 过滤、再按 `sessionId` 去重，所以重复行不会多占名额），不区分同伴是否还在、是否首轮就死；**没有任何工具能回收名额**——`report_handover` 只搬账本资产，不碰名册行。回收是人工动作：备份后从 `$DSH_HOME/report-ledger/peers.jsonl` 删掉已结束同伴的行。
 - **`fromName` 是会话标题**，即"会话名"而非"代理名"。
 - **汇报页无法隐藏 composer。** `conversation.view` 的契约没有 composer 可见性维度，外壳在视图下方无条件渲染输入区，所以汇报页底部始终有输入框。视图侧唯一能整块替换它的是 `conversation.composer` 链（审批/提问面板用的同一机制），拿它隐藏属于偏用：该页会同时失去输入、发送、停止、模型/权限控件与队列/待办 dock。等上游给 view 定义提供正式开关后再做。
@@ -189,6 +190,7 @@ web profile 里多两处：
 | 文档 | 什么时候读 |
 |---|---|
 | [设计](docs/design.md) | 账本布局、读路径的性能模型、修正与生命周期的理由、退役交接、提示词协议 |
+| [Super-agent 笔记](docs/super-agent-notes.md) | 从另一个 Agent 架构借鉴生命周期与消息传递：哪些值得搬、哪些会破坏账本的不变量 |
 | [工作区](docs/worktree.md) | 要用 git 检出隔离，或想知道"独立"到底独立了什么 |
 | [界面](docs/ui.md) | 时间线标签页的交互规则、数据通路、HTTP 守卫与信任假设 |
 | [画布](docs/ui-canvas.md) | 卡片图的几何、为什么一个图库都不引、每项决定的实测数字 |

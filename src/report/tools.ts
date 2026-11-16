@@ -22,8 +22,8 @@ import type { WorktreeRuntime } from './allocate.ts'
 import type { PeerService } from './peer.ts'
 import { DEFAULT_RECEIPT_MS, type PeerPermission, type PeerReceipt, type WorkspaceRegistration } from './peer.ts'
 import type { PreparedWorktree, ReportService, WorktreeOutcome } from './service.ts'
-import { renderRow, renderThreadRow } from './service.ts'
-import type { DeliveryOutcome } from './deliver.ts'
+import { renderRow, renderThreadRow, type DeliveryDiagnostics } from './service.ts'
+import type { DeliveryOutcome, DeliveryState } from './deliver.ts'
 
 /**
  * The `worktree` parameter a tool advertises, or nothing at all.
@@ -171,6 +171,54 @@ function renderMutation(front: { report: string; status: string; subject: string
   }
   if (prepared !== undefined) lines.push(...renderProvision(prepared))
   return lines.join('\n')
+}
+
+/** One line of explanation per observed delivery state. */
+const DELIVERY_STATE_LABEL: Record<DeliveryState, string> = {
+  absent: 'recipient not resident; the hand-off is still held',
+  inbox: 'arrived in the inbox, but no step has taken it',
+  taken: 'entered the recipient\'s history',
+  stranded: 'the ledger recorded an arrival the session has no trace of',
+  unknown: 'the host cannot verify consumption',
+}
+
+/**
+ * Render the read-only delivery diagnostic.
+ *
+ * The states that need a human are listed by report and recipient; `taken` and
+ * `absent` are summed, because one is the healthy end and the other is an
+ * ordinary wait, and a listing that repeats them buries the two that are neither.
+ * @param result - the scan.
+ * @returns lines to append to the check output.
+ */
+function renderDeliveryDiagnostics(result: DeliveryDiagnostics): string[] {
+  const lines: string[] = []
+  if (!result.persistence) {
+    lines.push('delivery: this host composes no session persistence, so consumption cannot be verified; '
+      + 'a delivered hop is still the only arrival record the ledger has')
+  }
+  if (result.rows.length === 0) {
+    lines.push('delivery: no hand-off is outstanding or unacknowledged on the reports scanned')
+    return lines
+  }
+  const byState: Record<DeliveryState, { report: string; target: string; pending: boolean }[]> = {
+    absent: [], inbox: [], taken: [], stranded: [], unknown: [],
+  }
+  for (const row of result.rows) byState[row.state].push(row)
+  lines.push(`delivery: ${result.rows.length} hand-off(s) across ${result.reports} report(s)`)
+  for (const state of ['stranded', 'inbox', 'unknown', 'taken', 'absent'] as const) {
+    const rows = byState[state]
+    if (rows.length === 0) continue
+    lines.push(`  ${state} ${rows.length} — ${DELIVERY_STATE_LABEL[state]}`)
+    // The healthy and merely-waiting states stay as counts; naming every one of
+    // them would turn a diagnostic into a directory.
+    if (state === 'taken' || state === 'absent') continue
+    for (const row of rows.slice(0, 12)) {
+      lines.push(`    ${row.report} -> ${row.target}${row.pending ? ' (still owed)' : ''}`)
+    }
+    if (rows.length > 12) lines.push(`    … and ${rows.length - 12} more`)
+  }
+  return lines
 }
 
 /** Derive a concise report subject from a task description. */
@@ -565,13 +613,14 @@ export function registerReportTools(
 
   disposers.push(ctx.tools.register(defineTool({
     name: 'report_check',
-    description: 'Check whether each report\'s digest still agrees with its transfer path — read-only: nothing is written and no hop is recorded. The front matter is a cache of the append-only path, so a crash between a hop and the digest rewrite, a hand edit, or a version that changed what the digest derives can leave a report whose counters, recipients or co-authors no longer match its history. Omit `report` to sweep the whole ledger (one stat plus one sidecar read per report); pass it to check one. Each disagreement is printed as `stored -> derived`; a record that cannot be parsed or read is reported as `could not be checked` rather than silently omitted. `status` is state, not a projection of the transfer path (an ack after a close does not reopen), so this check does not compare it. Repair is deliberately NOT a tool: a sweep rewrites every digest, so it stays with the human who can see whether the ledger is being written right now (`pnpm repair`, optionally `--dry-run`).',
+    description: 'Check whether each report\'s digest still agrees with its transfer path — read-only: nothing is written and no hop is recorded. The front matter is a cache of the append-only path, so a crash between a hop and the digest rewrite, a hand edit, or a version that changed what the digest derives can leave a report whose counters, recipients or co-authors no longer match its history. Omit `report` to sweep the whole ledger (one stat plus one sidecar read per report); pass it to check one. Each disagreement is printed as `stored -> derived`; a record that cannot be parsed or read is reported as `could not be checked` rather than silently omitted. `status` is state, not a projection of the transfer path (an ack after a close does not reopen), so this check does not compare it. `delivery: true` adds a second, read-only pass over the recipients\' own inboxes and session histories: absent (not resident, still held), inbox (arrived but no step has taken it), taken (in the history), stranded (the ledger recorded an arrival the session has no trace of), or unknown (no session persistence to verify with). Repair is deliberately NOT a tool: a sweep rewrites every digest, so it stays with the human who can see whether the ledger is being written right now (`pnpm repair`, optionally `--dry-run`).',
     parameters: {
       report: { type: 'string', description: 'Check this report only. Omit to sweep the whole ledger.' },
+      delivery: { type: 'boolean', description: 'Also report what became of each hand-off, from the recipients\' inboxes and session histories. Read-only; needs session persistence to verify consumption.' },
     },
     output: stringOutput,
     execute: async (args) => {
-      const input = args as { report?: string }
+      const input = args as { report?: string; delivery?: boolean }
       const repairs = await service.repairDigests({
         dryRun: true,
         ...(input.report === undefined ? {} : { report: input.report }),
@@ -579,23 +628,30 @@ export function registerReportTools(
       if (input.report !== undefined && repairs.length === 0) {
         return `no report ${JSON.stringify(input.report)} in the ledger`
       }
+      const lines: string[] = []
       const stale = repairs.filter((repair) => repair.changed)
       const skipped = repairs.filter((repair) => repair.skipped !== undefined)
       if (stale.length === 0 && skipped.length === 0) {
-        return `${repairs.length} report(s) checked; every digest agrees with its transfer path`
+        lines.push(`${repairs.length} report(s) checked; every digest agrees with its transfer path`)
+      } else {
+        lines.push(`${repairs.length} report(s) checked;`)
+        if (stale.length > 0) lines.push(`${stale.length} digest(s) disagree with their transfer path:`)
+        lines.push(...stale.map((repair) => [
+          `  ${repair.report}  ${repair.stored}  ->  ${repair.derived}`,
+          ...(repair.skipped === undefined ? [] : [`    left alone: ${repair.skipped}`]),
+        ].join('\n')))
+        if (skipped.length > 0) {
+          lines.push(`${skipped.length} record(s) could not be checked:`)
+          lines.push(...skipped.map((repair) => `  ${repair.report}  ${repair.skipped ?? 'skipped'}`))
+        }
+        if (stale.some((repair) => repair.skipped === undefined)) {
+          lines.push('repair with `pnpm repair` (optionally --dry-run).')
+        }
       }
-      const lines = [`${repairs.length} report(s) checked;`]
-      if (stale.length > 0) lines.push(`${stale.length} digest(s) disagree with their transfer path:`)
-      lines.push(...stale.map((repair) => [
-        `  ${repair.report}  ${repair.stored}  ->  ${repair.derived}`,
-        ...(repair.skipped === undefined ? [] : [`    left alone: ${repair.skipped}`]),
-      ].join('\n')))
-      if (skipped.length > 0) {
-        lines.push(`${skipped.length} record(s) could not be checked:`)
-        lines.push(...skipped.map((repair) => `  ${repair.report}  ${repair.skipped ?? 'skipped'}`))
-      }
-      if (stale.some((repair) => repair.skipped === undefined)) {
-        lines.push('repair with `pnpm repair` (optionally --dry-run).')
+      if (input.delivery === true) {
+        lines.push(...renderDeliveryDiagnostics(await service.deliveryDiagnostics(
+          input.report === undefined ? {} : { report: input.report },
+        )))
       }
       return lines.join('\n')
     },
