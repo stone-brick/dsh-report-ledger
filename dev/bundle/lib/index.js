@@ -70,6 +70,7 @@ const HOP_ACTIONS = [
 	"copied",
 	"read",
 	"acked",
+	"attention",
 	"leased",
 	"released",
 	"reclaimed",
@@ -241,6 +242,27 @@ function toWorktree(value) {
 	};
 }
 /**
+* Read the optional attention block.
+*
+* A hand-edited block without a question is dropped whole: an attention that
+* asks nothing would show as "waiting" forever and could never be answered.
+* @param value - the raw front-matter value.
+* @returns the attention, or `undefined` when no question was recorded.
+*/
+function toAttention(value) {
+	if (value === null || typeof value !== "object" || Array.isArray(value)) return void 0;
+	const record = value;
+	const question = str(record.question);
+	if (question === void 0) return void 0;
+	const options = strList(record.options);
+	return {
+		question,
+		...options.length === 0 ? {} : { options },
+		by: str(record.by) ?? "unknown",
+		at: time(record.at, 0)
+	};
+}
+/**
 * Normalize a raw front-matter mapping into the report schema.
 *
 * Every field is optional on the way in: a missing recipient list becomes empty,
@@ -257,6 +279,7 @@ function toFrontMatter(data) {
 	const created = time(data.created, 0);
 	const updated = time(data.updated, created);
 	const worktree = toWorktree(data.worktree);
+	const attention = toAttention(data.attention);
 	const lastRaw = data.last;
 	let last;
 	if (lastRaw !== null && typeof lastRaw === "object" && !Array.isArray(lastRaw)) {
@@ -284,6 +307,7 @@ function toFrontMatter(data) {
 		...str(data.parent) === void 0 ? {} : { parent: str(data.parent) },
 		children: strList(data.children),
 		...str(data.task) === void 0 ? {} : { task: str(data.task) },
+		...attention === void 0 ? {} : { attention },
 		...worktree === void 0 ? {} : { worktree },
 		artifacts: strList(data.artifacts),
 		hops: num(data.hops) ?? 0,

@@ -15,7 +15,7 @@
 
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
 import { HOP_ACTIONS, REPORT_STATUSES } from './types.ts'
-import type { Report, ReportFrontMatter, ReportWorktree } from './types.ts'
+import type { Report, ReportAttention, ReportFrontMatter, ReportWorktree } from './types.ts'
 
 /** The front-matter fence. */
 const FENCE = '---'
@@ -202,6 +202,28 @@ function toWorktree(value: unknown): ReportWorktree | undefined {
 }
 
 /**
+ * Read the optional attention block.
+ *
+ * A hand-edited block without a question is dropped whole: an attention that
+ * asks nothing would show as "waiting" forever and could never be answered.
+ * @param value - the raw front-matter value.
+ * @returns the attention, or `undefined` when no question was recorded.
+ */
+function toAttention(value: unknown): ReportAttention | undefined {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  const question = str(record.question)
+  if (question === undefined) return undefined
+  const options = strList(record.options)
+  return {
+    question,
+    ...(options.length === 0 ? {} : { options }),
+    by: str(record.by) ?? 'unknown',
+    at: time(record.at, 0),
+  }
+}
+
+/**
  * Normalize a raw front-matter mapping into the report schema.
  *
  * Every field is optional on the way in: a missing recipient list becomes empty,
@@ -220,6 +242,7 @@ export function toFrontMatter(data: Record<string, unknown>): ReportFrontMatter 
   const created = time(data.created, 0)
   const updated = time(data.updated, created)
   const worktree = toWorktree(data.worktree)
+  const attention = toAttention(data.attention)
 
   const lastRaw = data.last
   let last: ReportFrontMatter['last']
@@ -247,6 +270,7 @@ export function toFrontMatter(data: Record<string, unknown>): ReportFrontMatter 
     ...(str(data.parent) === undefined ? {} : { parent: str(data.parent) as string }),
     children: strList(data.children),
     ...(str(data.task) === undefined ? {} : { task: str(data.task) as string }),
+    ...(attention === undefined ? {} : { attention }),
     ...(worktree === undefined ? {} : { worktree }),
     artifacts: strList(data.artifacts),
     hops: num(data.hops) ?? 0,
@@ -293,6 +317,16 @@ export function frontMatterYaml(front: ReportFrontMatter): string {
   if (front.parent !== undefined) ordered.parent = front.parent
   ordered.children = [...front.children]
   if (front.task !== undefined) ordered.task = front.task
+  if (front.attention !== undefined) {
+    // Same shape as the interface: options stay absent rather than empty, so a
+    // question with no choices reads as one line.
+    ordered.attention = {
+      question: front.attention.question,
+      ...(front.attention.options === undefined ? {} : { options: [...front.attention.options] }),
+      by: front.attention.by,
+      at: front.attention.at,
+    }
+  }
   if (front.worktree !== undefined) {
     // Key order mirrors the interface, and absent optionals stay absent, so a
     // binding with only a path stays a one-line mapping a human can read.
@@ -350,6 +384,8 @@ export function parseHop(raw: string): (import('./types.ts').RouteHop) | undefin
   const from = str(record.from)
   const note = str(record.note)
   const actorName = str(record.actorName)
+  const question = str(record.question)
+  const options = strList(record.options)
   return {
     at: time(record.at, 0),
     actor,
@@ -358,5 +394,7 @@ export function parseHop(raw: string): (import('./types.ts').RouteHop) | undefin
     ...(actorName === undefined ? {} : { actorName }),
     ...(from === undefined ? {} : { from }),
     ...(note === undefined ? {} : { note }),
+    ...(question === undefined ? {} : { question }),
+    ...(options.length === 0 ? {} : { options }),
   }
 }

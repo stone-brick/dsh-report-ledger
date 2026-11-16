@@ -209,6 +209,7 @@ const HOP_TONE: Readonly<Record<HopAction, { readonly colour: string; readonly e
   copied: { colour: 'var(--dsw-alias-label-caption, #70757d)', emphasis: 'hollow' },
   read: { colour: 'var(--dsw-alias-label-caption, #70757d)', emphasis: 'hollow' },
   acked: { colour: 'var(--dsw-alias-state-success-primary, #1f9254)', emphasis: 'filled' },
+  attention: { colour: 'var(--dsw-alias-state-warn-primary, #c77700)', emphasis: 'filled' },
   leased: { colour: 'var(--dsw-alias-label-tertiary, #9aa0a8)', emphasis: 'hollow' },
   released: { colour: 'var(--dsw-alias-label-tertiary, #9aa0a8)', emphasis: 'hollow' },
   reclaimed: { colour: 'var(--dsw-alias-label-tertiary, #9aa0a8)', emphasis: 'hollow' },
@@ -563,6 +564,9 @@ export function ReportDetailView(props: ReportDetailViewProps): ReactElement {
   const digest = (front: ReportDetail['front']): ReactElement => (
     <span style={digestLine}>
       <Tag tone={STATUS_TONE[front.status]}>{t(STATUS_LABEL[front.status])}</Tag>
+      {front.attention === undefined ? null : (
+        <Tag tone="warning">{fill(t('detail.attention'), { question: front.attention.question })}</Tag>
+      )}
       <span>{'from='}{idRef(front.from)}</span>
       {front.to.length === 0 ? null : (
         <span>

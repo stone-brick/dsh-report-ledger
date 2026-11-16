@@ -62,6 +62,7 @@ export const HOP_ACTIONS = [
   'copied',
   'read',
   'acked',
+  'attention',
   'leased',
   'released',
   'reclaimed',
@@ -96,6 +97,35 @@ export interface RouteHop {
   readonly to: readonly string[]
   /** Free-text explanation supplied by the actor. */
   readonly note?: string
+  /**
+   * The question this hop put to the report, on an `attention` hop.
+   *
+   * Absent on an `attention` hop is meaningful: it CLEARS whatever question was
+   * active. Every other action leaves it unset.
+   */
+  readonly question?: string
+  /** Answer options offered with the question, when the asker supplied any. */
+  readonly options?: readonly string[]
+}
+
+/**
+ * One open question waiting for a person or another agent.
+ *
+ * Derived from the latest `attention` hop, so it is exactly as durable and as
+ * auditable as the rest of the transfer path; a later `closed` hop clears it
+ * without erasing the question from history. It is not a block on the ledger:
+ * other work may continue, and the question is advisory state that the listing
+ * and the panel surface.
+ */
+export interface ReportAttention {
+  /** The question, one line. */
+  readonly question: string
+  /** Answer options, when the asker named any. */
+  readonly options?: readonly string[]
+  /** Session that asked. */
+  readonly by: string
+  /** When it was asked, Unix epoch milliseconds. */
+  readonly at: number
 }
 
 /** How a report is handed to one recipient. */
@@ -181,6 +211,14 @@ export interface ReportFrontMatter {
   readonly children: readonly string[]
   /** Free-form task/thread label grouping reports of one collaboration. */
   readonly task?: string
+  /**
+   * The question this report is currently waiting on, when one is open.
+   *
+   * Derived from the transfer path: the latest `attention` hop that carries a
+   * question and is not followed by a `closed` hop. Absent means nobody is
+   * waiting on an answer.
+   */
+  readonly attention?: ReportAttention
   /** Working tree this report is bound to, when one is in use. */
   readonly worktree?: ReportWorktree
   /** Referenced artifacts (paths, commit ids, report ids). */

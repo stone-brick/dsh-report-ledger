@@ -1,7 +1,7 @@
 /**
  * The model-facing tools of the report ledger.
  *
- * Seventeen tools are registered by default and eighteen when the worktree
+ * Eighteen tools are registered by default and nineteen when the worktree
  * feature is on: author, co-author, address, copy, forward, read, list, check,
  * acknowledge, amend, close and release, plus discovery (peer_list), creation
  * (peer_start) and revival (peer_wake) — and report_lease, which exists only with
@@ -557,18 +557,19 @@ export function registerReportTools(
 
   disposers.push(ctx.tools.register(defineTool({
     name: 'report_list',
-    description: 'List report digests from the ledger — no bodies, so this is the cheap way to survey a long-running collaboration. Filter by `session` to see every report that touches one agent (authored, addressed, copied, or contributed to), by `status`, or by `task` to pull up one collaboration across every session it touched. The task label is matched case-insensitively and partially, so "payments" finds "payments-rework". `worktree` matches a working tree the report is or was bound to, by branch or path — a binding outlives a release, so this includes former leases. Pass `thread` with a report id instead to list the report\'s whole line — the root found by following `parent`, then every descendant by `children` — indented, with the requested report marked; that is the one call that answers "is this piece of work finished as a whole". `thread` is a selector, not a filter: call it alone. Use the listing to find the report id you need before reading it, or to check what a teammate is still waiting on.',
+    description: 'List report digests from the ledger — no bodies, so this is the cheap way to survey a long-running collaboration. Filter by `session` to see every report that touches one agent (authored, addressed, copied, or contributed to), by `status`, or by `task` to pull up one collaboration across every session it touched. The task label is matched case-insensitively and partially, so "payments" finds "payments-rework". `worktree` matches a working tree the report is or was bound to, by branch or path — a binding outlives a release, so this includes former leases. `attention: true` keeps only reports with an open question (someone is waiting on an answer). Pass `thread` with a report id instead to list the report\'s whole line — the root found by following `parent`, then every descendant by `children` — indented, with the requested report marked; that is the one call that answers "is this piece of work finished as a whole". `thread` is a selector, not a filter: call it alone. Use the listing to find the report id you need before reading it, or to check what a teammate is still waiting on.',
     parameters: {
       session: { type: 'string', description: 'Only reports touching this session id.' },
       status: { type: 'string', enum: ['open', 'acked', 'closed'], description: 'Only reports in this state.' },
       task: { type: 'string', description: 'Only reports carrying this collaboration label (partial match, case-insensitive).' },
       worktree: { type: 'string', description: 'Only reports bound to a working tree whose branch or path contains this text (partial match, case-insensitive).' },
-      thread: { type: 'string', description: 'Report id anywhere in a line: list its root and every descendant as an indented tree. Cannot be combined with session/status/task/worktree/limit.' },
+      attention: { type: 'boolean', description: 'Only reports with an open question waiting for an answer.' },
+      thread: { type: 'string', description: 'Report id anywhere in a line: list its root and every descendant as an indented tree. Cannot be combined with session/status/task/worktree/attention/limit.' },
       limit: { type: 'integer', description: 'Maximum rows (default 50, capped at 200). Not used with thread.' },
     },
     output: stringOutput,
     execute: async (args) => {
-      const input = args as { session?: string; status?: string; task?: string; worktree?: string; thread?: string; limit?: number }
+      const input = args as { session?: string; status?: string; task?: string; worktree?: string; attention?: boolean; thread?: string; limit?: number }
       if (input.thread !== undefined) {
         const anchor = input.thread.trim()
         if (anchor === '') return 'report_list: thread= needs a report id'
@@ -576,9 +577,9 @@ export function registerReportTools(
         // them silently would answer the other: a filtered tree hides exactly the
         // rows that show whether the line is closed.
         if (input.session !== undefined || input.status !== undefined || input.task !== undefined
-          || input.worktree !== undefined || input.limit !== undefined) {
+          || input.worktree !== undefined || input.attention !== undefined || input.limit !== undefined) {
           return 'report_list: thread= is a selector, not another filter — call it alone to see one line as a tree; '
-            + 'use session/status/task/worktree to filter across lines'
+            + 'use session/status/task/worktree/attention to filter across lines'
         }
         const listing = await service.thread(anchor)
         if (listing === undefined) return `no report ${JSON.stringify(anchor)} in the ledger`
@@ -595,6 +596,7 @@ export function registerReportTools(
         ...(input.status === undefined ? {} : { status: input.status }),
         ...(input.task === undefined ? {} : { task: input.task }),
         ...(input.worktree === undefined ? {} : { worktree: input.worktree }),
+        ...(input.attention === undefined ? {} : { attention: input.attention }),
         ...(input.limit === undefined ? {} : { limit: input.limit }),
       })
       if (rows.length === 0) {
@@ -604,6 +606,7 @@ export function registerReportTools(
         if (input.worktree !== undefined && input.worktree.trim() !== '') {
           return `no reports are bound to a working tree matching ${JSON.stringify(input.worktree)}`
         }
+        if (input.attention === true) return 'no report has an open question waiting for an answer'
         return input.task === undefined ? 'no reports match' : `no reports carry a task matching ${JSON.stringify(input.task)}`
       }
       const lines = [`${rows.length} report(s):`, ...rows.map(renderRow)]
@@ -683,6 +686,31 @@ export function registerReportTools(
       const input = args as { report: string; note?: string }
       const result = await service.acknowledge(input.report, actorOf(exec as ExecLike), input.note)
       return renderMutation(result.front, result.outcomes)
+    },
+  })))
+
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'report_attention',
+    description: 'Ask or withdraw the one question a report is waiting on — "方案 A 还是 B", "这段能不能合并", "谁负责 X". Any participant may do it (originator, co-author, addressed or copied recipient); a bystander may not. The question is derived state, not a lock: the report may keep moving, `report_list({ attention: true })` finds open ones, and closing the report withdraws it automatically (the question stays in the transfer path). Asking on a closed report reopens it. Omit `question` to withdraw the open one; supply `options` only when the asker wants to name the acceptable answers.',
+    parameters: {
+      report: { type: 'string', required: true, description: 'Report id to put the question on.' },
+      question: { type: 'string', description: 'The one-line question. Omit (alone) to withdraw the open one.' },
+      options: { type: 'array', items: { type: 'string' }, description: 'Answer choices, at most 8. Only meaningful with a question.' },
+    },
+    output: stringOutput,
+    execute: async (args, exec) => {
+      const input = args as { report: string; question?: string; options?: string[] }
+      const result = await service.attention(input.report, actorOf(exec as ExecLike), {
+        ...(input.question === undefined ? {} : { question: input.question }),
+        ...(input.options === undefined ? {} : { options: input.options }),
+      })
+      const lines = [renderMutation(result.front, result.outcomes)]
+      const attention = result.front.attention
+      lines.push(attention === undefined
+        ? 'no open question'
+        : `waiting on an answer from anyone: ${attention.question}`
+          + (attention.options === undefined ? '' : ` (options: ${attention.options.join(' | ')})`))
+      return lines.join('\n')
     },
   })))
 

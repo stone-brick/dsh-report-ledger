@@ -76,6 +76,15 @@ const THREAD_MAX_ROWS = 400
 /** Deepest nesting a thread listing follows before it stops. */
 const THREAD_MAX_DEPTH = 64
 
+/** Longest question one `report_attention` accepts. */
+const ATTENTION_MAX_QUESTION_CHARS = 500
+
+/** Most answer options one attention may offer. */
+const ATTENTION_MAX_OPTIONS = 8
+
+/** Longest single answer option. */
+const ATTENTION_MAX_OPTION_CHARS = 120
+
 /** First delay before retrying a failed delivery to one recipient. */
 const DELIVERY_RETRY_BASE_MS = 2_000
 
@@ -341,6 +350,8 @@ export interface DigestRow {
   readonly task?: string
   /** Compact label of the bound working tree, when one is bound. */
   readonly worktree?: string
+  /** The question the report is waiting on, when one is open. */
+  readonly attention?: { readonly question: string; readonly by: string }
   /** Last recorded hop, when any. */
   readonly last?: string
   /** Last update time. */
@@ -621,6 +632,9 @@ function renderFrontLine(front: ReportFrontMatter, created?: number): string {
     ...(created === undefined ? [] : [`created=${formatTime(created)}`]),
   ]
   if (front.task !== undefined) parts.push(`task=${front.task}`)
+  if (front.attention !== undefined) {
+    parts.push(`attention=${JSON.stringify(front.attention.question)}@${front.attention.by}`)
+  }
   if (front.worktree !== undefined) parts.push(`worktree=${worktreeLabel(front.worktree)}@${front.worktree.path}`)
   if (front.parent !== undefined) parts.push(`parent=${front.parent}`)
   if (front.children.length > 0) parts.push(`children=${front.children.join(',')}`)
@@ -664,7 +678,7 @@ function tallyHops(hops: readonly RouteHop[]): string {
  *    reports on this machine showed `last=read@…`, i.e. a glance masqueraded as
  *    activity.
  */
-function projectRoute(hops: readonly RouteHop[]): Pick<ReportFrontMatter, 'to' | 'cc' | 'authors' | 'hops' | 'reads' | 'last'> {
+function projectRoute(hops: readonly RouteHop[]): Pick<ReportFrontMatter, 'to' | 'cc' | 'authors' | 'hops' | 'reads' | 'last' | 'attention'> {
   const authors: string[] = []
   const to: string[] = []
   const cc: string[] = []
@@ -688,19 +702,36 @@ function projectRoute(hops: readonly RouteHop[]): Pick<ReportFrontMatter, 'to' |
   }
   let reads = 0
   let tail: RouteHop | undefined
-  for (const hop of hops) {
+  let attentionIndex = -1
+  let closedIndex = -1
+  for (const [index, hop] of hops.entries()) {
+    if (hop.action === 'closed') closedIndex = index
+    if (hop.action === 'attention') attentionIndex = index
     if (hop.action === 'read') {
       reads += 1
       continue
     }
     tail = hop
   }
+  // A conclusion withdraws a question it outlived; a question asked after the
+  // last conclusion (which also reopened the report) is the live one. A later
+  // attention hop with no question is an explicit withdrawal.
+  const asked = attentionIndex > closedIndex ? hops[attentionIndex] : undefined
+  const attention = asked?.question === undefined
+    ? undefined
+    : {
+        question: asked.question,
+        ...(asked.options === undefined ? {} : { options: asked.options }),
+        by: asked.actor,
+        at: asked.at,
+      }
   return {
     to,
     cc,
     authors,
     hops: hops.length,
     reads,
+    attention,
     ...(tail === undefined ? {} : { last: { at: tail.at, action: tail.action, actor: tail.actor } }),
   }
 }
@@ -749,10 +780,13 @@ export interface DigestRepair {
  * @returns one line naming every derived field, so a dry run reads like the
  * real thing.
  */
-function digestProjection(front: Pick<ReportFrontMatter, 'to' | 'cc' | 'authors' | 'hops' | 'reads'> & { readonly last?: ReportFrontMatter['last'] }): string {
+function digestProjection(front: Pick<ReportFrontMatter, 'to' | 'cc' | 'authors' | 'hops' | 'reads' | 'attention'> & { readonly last?: ReportFrontMatter['last'] }): string {
   const ids = (list: readonly string[]): string => (list.length === 0 ? '-' : list.join(','))
   const last = front.last === undefined ? '-' : `${front.last.action}@${front.last.actor}@${front.last.at}`
-  return `to=${ids(front.to)} cc=${ids(front.cc)} authors=${ids(front.authors)} hops=${front.hops} reads=${front.reads} last=${last}`
+  const attention = front.attention === undefined
+    ? '-'
+    : `${front.attention.question}@${front.attention.by}@${front.attention.at}`
+  return `to=${ids(front.to)} cc=${ids(front.cc)} authors=${ids(front.authors)} hops=${front.hops} reads=${front.reads} last=${last} attention=${attention}`
 }
 
 /** Why a digest cannot be rebuilt, when its transfer path is gone. */
@@ -1219,6 +1253,26 @@ export class ReportService {
   }
 
   /**
+   * Throw unless the actor takes part in the report.
+   *
+   * A question is something a participant asks or withdraws; a bystander who
+   * merely saw the listing may not put words in the collaboration's mouth.
+   * @param front - the report digest.
+   * @param actor - the session attempting the act.
+   * @param verb - the act, in the imperative, for the sentence.
+   * @param gerund - the same act as a noun phrase.
+   * @throws when the actor is not an originator, author, or recipient.
+   */
+  #assertParticipant(front: ReportFrontMatter, actor: string, verb: string, gerund: string): void {
+    const participants = new Set([front.from, ...front.authors, ...front.to, ...front.cc])
+    if (participants.has(actor)) return
+    throw new Error(
+      `report-ledger: ${actor} may not ${verb} ${front.report} — ${gerund} is a participant's act, not a bystander's. `
+      + `It involves: ${[...participants].join(', ')}`,
+    )
+  }
+
+  /**
    * Return a closed report to life because fresh activity arrived.
    *
    * `closed` is a state, not a lock. If someone contributes to, sends, copies, or
@@ -1607,7 +1661,7 @@ export class ReportService {
    * @param filter - listing filter.
    * @returns one row per matching report, newest first.
    */
-  async list(filter: { session?: string; status?: string; task?: string; worktree?: string; limit?: number } = {}): Promise<DigestRow[]> {
+  async list(filter: { session?: string; status?: string; task?: string; worktree?: string; attention?: boolean; limit?: number } = {}): Promise<DigestRow[]> {
     const all = await listReports()
     const session = filter.session
     const task = filter.task?.trim().toLowerCase()
@@ -1627,6 +1681,7 @@ export class ReportService {
         const haystack = `${front.worktree.branch ?? ''} ${front.worktree.path}`.toLowerCase()
         if (!haystack.includes(worktree)) return false
       }
+      if (filter.attention === true && front.attention === undefined) return false
       if (session === undefined) return true
       return front.from === session
         || front.to.includes(session)
@@ -1742,6 +1797,60 @@ export class ReportService {
         await writeReport({ front: { ...front, status: 'acked', updated: Date.now() }, body: current.body }, report)
       }
       return { front: (await this.#load(report)).front, outcomes: [] }
+    })
+  }
+
+  /**
+   * Ask or withdraw the one question a report is waiting on.
+   *
+   * A question is derived state, not a lock: the report may keep moving, and a
+   * later conclusion withdraws it without erasing it from the path. Asking on a
+   * concluded report reopens it (the matter is demonstrably live again); a
+   * withdrawal is only meaningful while a question is open.
+   * @param report - report identifier.
+   * @param actor - the participant asking or withdrawing.
+   * @param input - the question and its optional answer choices; an omitted
+   * question means "withdraw the open one".
+   * @returns the refreshed digest.
+   */
+  async attention(report: string, actor: string, input: { question?: string; options?: readonly string[] }): Promise<MutationResult> {
+    const raw = input.question
+    const question = raw === undefined ? undefined : oneLineSubject(raw)
+    if (question === '') {
+      throw new Error('report-ledger: report_attention needs a non-empty question; omit it to withdraw the open one')
+    }
+    if (question !== undefined && question.length > ATTENTION_MAX_QUESTION_CHARS) {
+      throw new Error(`report-ledger: the question is longer than ${ATTENTION_MAX_QUESTION_CHARS} characters`)
+    }
+    if (question === undefined && (input.options?.length ?? 0) > 0) {
+      throw new Error('report-ledger: answer options need a question; omit both to withdraw')
+    }
+    const options = [...new Set((input.options ?? []).map((option) => option.trim()).filter((option) => option !== ''))]
+    if (options.length > ATTENTION_MAX_OPTIONS) {
+      throw new Error(`report-ledger: at most ${ATTENTION_MAX_OPTIONS} answer options are supported`)
+    }
+    for (const option of options) {
+      if (option.length > ATTENTION_MAX_OPTION_CHARS) {
+        throw new Error(`report-ledger: option ${JSON.stringify(option)} is longer than ${ATTENTION_MAX_OPTION_CHARS} characters`)
+      }
+    }
+    return await this.#withLock(report, async () => {
+      const current = await this.#load(report)
+      this.#assertParticipant(current.front, actor, 'ask or withdraw a question on', 'asking or withdrawing a question')
+      if (question === undefined && current.front.attention === undefined) {
+        throw new Error(`report-ledger: ${report} has no open question to withdraw`)
+      }
+      if (question !== undefined) await this.#reopenIfClosed(report, actor)
+      const front = await this.#record(report, {
+        at: Date.now(),
+        actor,
+        action: 'attention',
+        to: [],
+        ...(question === undefined
+          ? { note: 'question withdrawn' }
+          : { question, ...(options.length === 0 ? {} : { options }) }),
+      })
+      return { front, outcomes: [] }
     })
   }
 
@@ -2729,6 +2838,7 @@ function toDigestRow(front: ReportFrontMatter): DigestRow {
     hops: front.hops,
     reads: front.reads,
     ...(front.task === undefined ? {} : { task: front.task }),
+    ...(front.attention === undefined ? {} : { attention: { question: front.attention.question, by: front.attention.by } }),
     ...(front.worktree === undefined ? {} : { worktree: worktreeLabel(front.worktree) }),
     ...(front.last === undefined ? {} : { last: `${front.last.action}@${front.last.actor}` }),
     updated: front.updated,
@@ -2742,12 +2852,15 @@ export function renderRow(row: DigestRow): string {
   // reader scans for, and a listing that hides it forces a second call per report.
   const task = row.task === undefined ? '' : ` task=${row.task}`
   const worktree = row.worktree === undefined ? '' : ` wt=${row.worktree}`
+  const attention = row.attention === undefined
+    ? ''
+    : ` attention=${JSON.stringify(row.attention.question)}@${row.attention.by}`
   // The co-author count is rendered for the same reason the transfer path shows
   // who wrote what: `acked` says a recipient confirmed receipt, and a row that
   // shows one author next to three recipients says nobody actually wrote anything —
   // the difference a receipt cannot express and a reader has to be able to see
   // without opening the body.
-  return `${row.report} [${row.status}] ${row.subject}${task}${worktree} | from=${row.from} to=${row.to.length === 0 ? '-' : row.to.join(',')} cc=${row.cc.length === 0 ? '-' : row.cc.join(',')} authors=${row.authors.length} hops=${row.hops} reads=${row.reads} last=${last}`
+  return `${row.report} [${row.status}] ${row.subject}${task}${worktree}${attention} | from=${row.from} to=${row.to.length === 0 ? '-' : row.to.join(',')} cc=${row.cc.length === 0 ? '-' : row.cc.join(',')} authors=${row.authors.length} hops=${row.hops} reads=${row.reads} last=${last}`
 }
 
 /**
@@ -2763,7 +2876,8 @@ export function renderRow(row: DigestRow): string {
 export function renderThreadRow(entry: ThreadRow): string {
   const last = entry.row.last === undefined ? '-' : entry.row.last
   const task = entry.row.task === undefined ? '' : ` task=${entry.row.task}`
+  const attention = entry.row.attention === undefined ? '' : ' attention'
   const anchor = entry.anchor ? '  <- requested' : ''
-  return `${'  '.repeat(entry.depth)}${entry.row.report} [${entry.row.status}] ${entry.row.subject}${task}`
+  return `${'  '.repeat(entry.depth)}${entry.row.report} [${entry.row.status}] ${entry.row.subject}${task}${attention}`
     + ` | from=${entry.row.from} hops=${entry.row.hops} last=${last}${anchor}`
 }

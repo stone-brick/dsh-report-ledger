@@ -82,9 +82,28 @@ type ReportStatus = (typeof REPORT_STATUSES)[number];
  * merely unlikely; it happened once already, when `leased` and `released`
  * reached the union before the array.
  */
-declare const HOP_ACTIONS: readonly ["authored", "contributed", "sent", "delivered", "cc", "forwarded", "copied", "read", "acked", "leased", "released", "reclaimed", "amended", "closed", "reopened", "transferred"];
+declare const HOP_ACTIONS: readonly ["authored", "contributed", "sent", "delivered", "cc", "forwarded", "copied", "read", "acked", "attention", "leased", "released", "reclaimed", "amended", "closed", "reopened", "transferred"];
 /** What happened in one hop. */
 type HopAction = (typeof HOP_ACTIONS)[number];
+/**
+ * One open question waiting for a person or another agent.
+ *
+ * Derived from the latest `attention` hop, so it is exactly as durable and as
+ * auditable as the rest of the transfer path; a later `closed` hop clears it
+ * without erasing the question from history. It is not a block on the ledger:
+ * other work may continue, and the question is advisory state that the listing
+ * and the panel surface.
+ */
+interface ReportAttention {
+  /** The question, one line. */
+  readonly question: string;
+  /** Answer options, when the asker named any. */
+  readonly options?: readonly string[];
+  /** Session that asked. */
+  readonly by: string;
+  /** When it was asked, Unix epoch milliseconds. */
+  readonly at: number;
+}
 /** How a report is handed to one recipient. */
 type DeliveryMode = 'wakeup' | 'quiet';
 /**
@@ -158,6 +177,14 @@ interface ReportFrontMatter {
   readonly children: readonly string[];
   /** Free-form task/thread label grouping reports of one collaboration. */
   readonly task?: string;
+  /**
+   * The question this report is currently waiting on, when one is open.
+   *
+   * Derived from the transfer path: the latest `attention` hop that carries a
+   * question and is not followed by a `closed` hop. Absent means nobody is
+   * waiting on an answer.
+   */
+  readonly attention?: ReportAttention;
   /** Working tree this report is bound to, when one is in use. */
   readonly worktree?: ReportWorktree;
   /** Referenced artifacts (paths, commit ids, report ids). */
@@ -994,6 +1021,11 @@ interface DigestRow {
   readonly task?: string;
   /** Compact label of the bound working tree, when one is bound. */
   readonly worktree?: string;
+  /** The question the report is waiting on, when one is open. */
+  readonly attention?: {
+    readonly question: string;
+    readonly by: string;
+  };
   /** Last recorded hop, when any. */
   readonly last?: string;
   /** Last update time. */
@@ -1201,6 +1233,7 @@ declare class ReportService {
     status?: string;
     task?: string;
     worktree?: string;
+    attention?: boolean;
     limit?: number;
   }): Promise<DigestRow[]>;
   /**
@@ -1226,6 +1259,23 @@ declare class ReportService {
    * @returns the refreshed digest.
    */
   acknowledge(report: string, actor: string, note?: string): Promise<MutationResult>;
+  /**
+   * Ask or withdraw the one question a report is waiting on.
+   *
+   * A question is derived state, not a lock: the report may keep moving, and a
+   * later conclusion withdraws it without erasing it from the path. Asking on a
+   * concluded report reopens it (the matter is demonstrably live again); a
+   * withdrawal is only meaningful while a question is open.
+   * @param report - report identifier.
+   * @param actor - the participant asking or withdrawing.
+   * @param input - the question and its optional answer choices; an omitted
+   * question means "withdraw the open one".
+   * @returns the refreshed digest.
+   */
+  attention(report: string, actor: string, input: {
+    question?: string;
+    options?: readonly string[];
+  }): Promise<MutationResult>;
   /**
    * Conclude a report: the owner's act, recorded as a hop.
    *

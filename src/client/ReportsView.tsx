@@ -594,7 +594,18 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
                 }}
               />
               <span style={{ flex: '1 1 auto', minWidth: 0 }}>
-                <span style={tagRow}><Tag tone={STATUS_TONE[front.status]}>{t(STATUS_LABEL[front.status])}</Tag></span>
+                <span style={tagRow}>
+                  <Tag tone={STATUS_TONE[front.status]}>{t(STATUS_LABEL[front.status])}</Tag>
+                  {/* A question changes what the row means: a healthy `open`
+                      report that is waiting on a person needs a different action
+                      from one that is merely being worked on. The tooltip carries
+                      the question because the row keeps one line. */}
+                  {front.attention === undefined ? null : (
+                    <Tooltip label={front.attention.question} side="bottom" delayMs={300}>
+                      <Tag tone="warning">{t('row.attention')}</Tag>
+                    </Tooltip>
+                  )}
+                </span>
                 <strong>{front.report}</strong> {front.subject}
                 {/* The task chip is a filter shortcut, not decoration: clicking it
                     reuses the search box, so grouping by collaboration needs no

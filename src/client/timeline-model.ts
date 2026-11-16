@@ -216,6 +216,8 @@ function reportHaystack(front: ReportFrontMatter): string {
     // text the search actually looks at.
     front.worktree?.branch ?? '',
     front.worktree?.path ?? '',
+    front.attention?.question ?? '',
+    front.attention?.by ?? '',
   ].join('\n').toLowerCase()
 }
 

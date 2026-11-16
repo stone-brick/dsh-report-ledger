@@ -115,6 +115,7 @@ reports/R-0001.route.jsonl   append-only 传递路径，一行一跳
 | `report_list` | 只列缩略，可按 `session`、`status`、`task`、`worktree` 过滤，用于纵览长期协作；用 `thread=<编号>` 把该汇报所在的整条线（`parent` 上溯到根、`children` 下递）列成缩进树，不读正文也不记跳——"这条线整体完了吗"一次回答。行里带 `authors=N`——回执说明有人确认收到，`authors=1` 说明**没人真的写过东西** |
 | `report_check` | 只读诊断：检查缩略与传递路径是否一致（可限定一份），列出 `stored -> derived`；**不写、不记跳**。加 `delivery:true` 再做一次投递诊断：对每个收件人区分 `absent`（未驻留、仍欠着）/ `inbox`（已到达但没被 step 取用）/ `taken`（进入过会话历史）/ `stranded`（账本记了到达、会话里没有）/ `unknown`（部署无会话持久化），并把宿主边界反复失败的目标列为 `failing`（次数、下次重试、最后错误）。修复不是工具，仍是人的动作：`pnpm repair`（可 `--dry-run`） |
 | `report_ack` | 回执，让发送方看到闭环 |
+| `report_attention` | 提出／撤回一份汇报当前在等回答的那个问题（可带选项）；任何参与者可做，结案自动撤回。它是派生状态，不是锁：不影响其他活动；`report_list({ attention: true })` 能找到全部在等回答的汇报 |
 | `report_amend` | 修正：改缩略字段或更正正文，仅发起者/共写者可改，改动会被记录 |
 | `report_close` | 结案：事情的终结，仅发起者/共写者可关；**从未有过贡献的汇报必须带 `note`**（交代做到了哪，或为什么没写），否则拒绝；同时**交还**它持有的工作区 |
 | `report_lease` | 认领一个**已存在**的检出（仅工作区功能开启时暴露） |
@@ -207,7 +208,7 @@ web profile 里多两处：
 ```sh
 pnpm build        # 三个产物：lib/index.js（宿主半）、lib/client.js（浏览器半）、
                   # dev/bundle/lib/index.js（开发者附加包，不发布）
-pnpm test         # 十六套确定性检查，1231 项断言（不需要 DSH，不碰真实账本）
+pnpm test         # 十八套确定性检查，1313 项断言（不需要 DSH，不碰真实账本）
 pnpm check        # 完整本地门禁：typecheck + test + test:tools
 ```
 
