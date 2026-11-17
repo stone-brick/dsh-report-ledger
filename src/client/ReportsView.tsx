@@ -598,12 +598,14 @@ export function ReportsView(props: ReportsViewProps): ReactElement {
                   <Tag tone={STATUS_TONE[front.status]}>{t(STATUS_LABEL[front.status])}</Tag>
                   {/* A question changes what the row means: a healthy `open`
                       report that is waiting on a person needs a different action
-                      from one that is merely being worked on. The tooltip carries
-                      the question because the row keeps one line. */}
+                      from one that is merely being worked on. The native title
+                      carries the question: the shell's `Tag` renders a span and
+                      does not forward the handlers a Tooltip trigger needs, so a
+                      wrapper span owns both the title and the hover target. */}
                   {front.attention === undefined ? null : (
-                    <Tooltip label={front.attention.question} side="bottom" delayMs={300}>
+                    <span title={front.attention.question}>
                       <Tag tone="warning">{t('row.attention')}</Tag>
-                    </Tooltip>
+                    </span>
                   )}
                 </span>
                 <strong>{front.report}</strong> {front.subject}
