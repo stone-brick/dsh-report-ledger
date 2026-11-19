@@ -208,7 +208,7 @@ web profile 里多两处：
 ```sh
 pnpm build        # 三个产物：lib/index.js（宿主半）、lib/client.js（浏览器半）、
                   # dev/bundle/lib/index.js（开发者附加包，不发布）
-pnpm test         # 十八套确定性检查，1313 项断言（不需要 DSH，不碰真实账本）
+pnpm test         # 十八套确定性检查，1319 项断言（不需要 DSH，不碰真实账本）
 pnpm check        # 完整本地门禁：typecheck + test + test:tools
 ```
 

@@ -5,8 +5,8 @@
 ```sh
 pnpm build        # 三个产物：lib/index.js（host 半）、lib/client.js（client 半）、
                   # dev/bundle/lib/index.js（开发者附加包，不发布、不在 files 白名单里）
-pnpm test         # 十八套确定性检查共 1313 项断言：账本内核与生命周期 143 + 提示词角色分流 85
-                  # + 投递幂等与送达诊断 47 + attention 结构化提问 33 + 开发者名册 53 + 开发者归档 29
+pnpm test         # 十八套确定性检查共 1319 项断言：账本内核与生命周期 143 + 提示词角色分流 85
+                  # + 投递幂等与送达诊断 53 + attention 结构化提问 33 + 开发者名册 53 + 开发者归档 29
                   # + 退役交接 30
                   # + 读路径（前缀读/签名缓存/单趟投递/正文窗口与大纲/线程视图/时间戳与 created）114
                   # + 时间线装配与路由守卫 91
@@ -132,7 +132,9 @@ package.json 里声明**的包：本机靠 `node_modules/@deepseek-ai` 的 junct
     - 手工删掉唯一一条 `delivered` 跳后再 `flushForAgent`：返回 `delivered, recovered: true`，路径**只**新增一条 `wakeup (recovered)`，pending 归零——幂等恢复在真实宿主成立，而不是只在假宿主上。
     - 汇报页渲染 3 份汇报、`进行中` + `等回答` 徽标（原生 title 为问题）、详情「等待回答：…」、路径「提问」；免 token 的 `/api/report-ledger/timeline?scope=all` 与 `report?id=R-0001` 返回同一事实；干净加载后控制台 **0 errors / 0 warnings**；`pnpm test:tools` 对官方包层 278 项全绿。
     - 验证中修掉一处面板问题：shell 的 `Tag` 不转发 `Tooltip` 触发器所需的事件，attention 徽标改用 wrapper `span` 的原生 `title`。
-    - 限制：隔离环境没有模型凭据，未跑模型回合与工具调用；失败退避的真实故障没有造出，仍由确定性断言覆盖。
+    - **失败退避的真机验证**：探针把活 Agent 的 `steer` 临时替换为抛错函数，再走真实 `service.send` / `retryFailedDeliveries`。第一次失败后 `failing.attempts=1`、`pending=true`；窗口内 sweep 不尝试（次数仍为 1）；2s 后第二次、4s 后第三次，次数依次 2/3，退避时间随次数后移。恢复 `steer`、等过 8s 后 sweep 成功：`pending=false`、`hasDeliveryTrouble()=false`、路径只新增一条 `delivered`（不是 `recovered`，因为失败的注入从未把消息放进 inbox）。故障是注入的，但 catch → 退避 → 重试 → 恢复走的是真实宿主与真实 service。
+    - **顺带修掉一处缺口**：持久化屏障（`sessionPersistence.flush()`）失败原先只让欠账停在 pending，不进失败表，重试扫描因此不会启动；现在每个已 steer 的 arrival 记一次失败，按同一退避表重试，`report_check` 的 `failing` 也能看到（`delivery-check` 覆盖窗口内跳过与到期恢复）。
+    - 限制：隔离环境没有模型凭据，未跑模型回合与工具调用；真实 dispose 竞态没有专门构造（注入替代）。
 - **宿主半的运行时外部依赖有三条**：`@deepseek-ai/dsh-tools` 与 `@deepseek-ai/dsh-workspace`（都由 profile 提供，**不在 package.json 里声明**），以及 `yaml`（声明在 `dependencies` 里，由包管理器安装；front matter 的 YAML 编解码用它）。`lib/` 随源码提交，固定 Commit 里就带着可运行的构建产物。
 - **浏览器半 require** `react`、`react/jsx-runtime` 与 `@deepseek-ai/dsh-client-ui-primitives`（面板里的按钮、芯片、悬停、状态点、输入框与正文渲染全部用它，与内置的 Chat / 轨迹视图同一套），其余全部内联。宿主半在 headless profile 里同样可用（没有 web server 时只是少了那三个只读端点）。
 - ⚠️ 于是浏览器半多了一条硬依赖：**shell 的冻结模块表里必须有 `dsh-client-ui-primitives`**。它自带的对话视图就依赖它，所以缺了它意味着那个 shell 本身已经坏了；真缺的话失败模式是「汇报标签页不出现」而不是整个 GUI 崩。

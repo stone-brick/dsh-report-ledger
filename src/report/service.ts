@@ -1063,7 +1063,13 @@ export class ReportService {
         await this.#host.flushSessionPersistence?.()
       } catch (error) {
         durable = false
-        failures.push(`session persistence (${error instanceof Error ? error.message : String(error)})`)
+        const message = `session persistence flush failed: ${error instanceof Error ? error.message : String(error)}`
+        failures.push(message)
+        // A barrier that failed is a delivery failure for every arrival it was
+        // supposed to make durable. Without this the hand-off stayed pending with
+        // no backoff and no health entry, so the retry sweep never picked it up
+        // and `report_check` showed nothing wrong.
+        for (const arrival of arrivals) this.#deliveryFailed(arrival.targetId, message)
       }
       if (durable) {
         const at = Date.now()

@@ -169,14 +169,31 @@ check('the failed attempt is not recorded as an arrival',
   !(await readFile(routePath(flushFailureReport.front.report), 'utf8')).includes('"delivered"'))
 check('the hand-off stays pending', pendingTargets(await readHops(flushFailureReport.front.report)).includes('session-e'))
 check('the inbox did receive it', held.has(failedId))
+const flushFailureRow = (await service.deliveryDiagnostics({ report: flushFailureReport.front.report })).rows
+  .find((row) => row.target === 'session-e')
+check('a failed durability barrier enters the backoff table', flushFailureRow?.failing?.attempts === 1,
+  JSON.stringify(flushFailureRow))
+check('the barrier failure schedules a retry', flushFailureRow?.failing?.nextAttemptAt === clock + 2_000,
+  String(flushFailureRow?.failing?.nextAttemptAt))
+check('the barrier failure counts as delivery trouble', service.hasDeliveryTrouble() === true)
 
+// The automatic retry respects the backoff: before the window it attempts
+// nothing, so the message is neither steered again nor recorded as an arrival.
 flushError = undefined
-const retried = await service.flushForAgent('session-e')
-check('the retry reconciles instead of delivering twice',
-  retried.some((outcome) => outcome.targetId === 'session-e' && outcome.recovered === true), JSON.stringify(retried))
+await service.retryFailedDeliveries()
+check('the retry sweep skips a barrier failure before its window',
+  pendingTargets(await readHops(flushFailureReport.front.report)).includes('session-e'))
+check('the skipped sweep makes no second attempt', (steersByTarget.get('session-e') ?? 0) === 1,
+  String(steersByTarget.get('session-e') ?? 0))
+
+clock += 2_000
+await service.retryFailedDeliveries()
+check('the due sweep reconciles instead of delivering twice',
+  (await readFile(routePath(flushFailureReport.front.report), 'utf8')).includes('wakeup (recovered)'))
 check('the recipient was steered exactly once', (steersByTarget.get('session-e') ?? 0) === 1,
   String(steersByTarget.get('session-e') ?? 0))
 check('the retry records the arrival', pendingTargets(await readHops(flushFailureReport.front.report)).length === 0)
+check('the recovered barrier failure clears the trouble', service.hasDeliveryTrouble() === false)
 
 // ---- 6. the diagnostic distinguishes the four delivery states -------------
 // R-0001's digest is in the recipient's history now: taken.
