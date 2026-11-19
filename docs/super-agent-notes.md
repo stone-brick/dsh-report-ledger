@@ -23,6 +23,8 @@
 
 ## 2. 值得吸收的四点
 
+> 下面四点的“建议改法”均已落地（见文首状态与第 5 节）；保留原始措辞，方便回看当时的取舍与验收标准。
+
 ### 2.1 确定性消息 id：投递幂等（P0）
 
 **原型怎么做**（`src/app/delivery.ts`）：每条要投递的消息都带一个由请求 id 派生的稳定消息 id（`dsh-superagent:<requestId>`），重试时不变；投递前先查目标会话的历史与会话内待收箱（`agent.inbox.nextTurn/nextStep`），命中就不投；投递后 `sessionPersistence.flush()` 落盘，才向生产者确认。于是「重试」不等于「重复」，崩溃也不会让确认早于持久化。
@@ -136,22 +138,22 @@ attention:
 
 ## 5. 落地顺序
 
-| 顺序 | 改动 | 涉及 | 风险 |
-|---|---|---|---|
-| P0-1 | 确定性投递 id + inbox/历史去重 + flush 后记 `delivered` | `src/report/deliver.ts`、`service.#deliver` | 中：新增历史读取路径，需缓存与上限 |
-| P0-2 | `report_check` 投递诊断（absent/inbox/taken/stranded/failing） | `src/report/service.ts`、`tools.ts` | 低：只读 |
-| P1-1 | 内存退避 + 连续失败告警 | `service` 扫描、`index.ts` | 低 |
-| P1-2 | `attention` 字段 + 工具 + 列表/面板 | front matter、跳词表、UI | 高：新概念，需要先定权限与清除规则 |
-| P2 | `closed` 的 `outcome`、`taken` 跳 | 跳词表、repair、计数口径 | 中：改派生投影的定义，要迁移 |
+| 顺序 | 改动 | 状态 |
+|---|---|---|
+| P0-1 | 确定性投递 id + inbox/历史去重 + flush 后记 `delivered` | 已落地（`c80b7ef`） |
+| P0-2 | `report_check` 投递诊断（absent/inbox/taken/stranded/failing） | 已落地（`c80b7ef`、`c1700cc`） |
+| P1-1 | 内存退避 + 连续失败告警 + 只在有失败时运行的重试扫描 | 已落地（`c1700cc`）；`flush` 屏障失败也计入失败（`84fec23`） |
+| P1-2 | `attention` 字段 + 工具 + 列表/面板 | 已落地（`2306fa6`、`93f98c7`） |
+| P2 | `closed` 的 `outcome`、`taken` 跳 | 未做 |
 
-测试落在现有的确定性检查里：投递相关加进 `scripts/smoke.ts` 与 `scripts/read-path-check.ts`，诊断加进 `scripts/read-path-tools-check.ts`；新增跳动作要同步 `HOP_ACTIONS`、`parseHop`、`projectRoute` 与 `scripts/repair-digests.ts`。
+测试落在现有的确定性检查里：投递相关进 `scripts/delivery-check.ts` 与 `scripts/smoke.ts`，attention 进 `scripts/attention-check.ts`；新增跳动作要同步 `HOP_ACTIONS`、`parseHop`、`projectRoute` 与 `scripts/repair-digests.ts`。
 
-## 6. 需要先定夺的问题
+## 6. 定夺结果
 
-1. **幂等键取「最新投递跳的序号」还是「该收件人第 n 次欠账」**：前者从跳流免费得到、随账本变化稳定；后者需要在投影里多存一个计数。推荐前者。
-2. **历史查不到时投还是不投**：压缩/clear 可能抹掉旧消息，扫不到 id 时再投一次会产生重复。建议「扫不到就投」并在文档里写明 at-least-once，而不是为了 at-most-once 把交接卡住。
-3. **`taken` 是否值得成为第一种「由宿主事件触发的跳」**：它会让传递路径第一次包含「不是任何工具调用产生」的因果事实；如果诊断已经够用，就不加。
-4. **attention 的清除权**：只有提问者能清（防止「我觉得答了」），还是任何收件人都能清（防止提问者消失后永远挂着）？这决定了它是状态还是待办。
+1. **幂等键取「最新投递跳的序号」**：从跳流免费得到、随账本变化稳定，已实现。
+2. **历史查不到就投**：接受 at-least-once，宁可重复一次也不把交接卡住；边界写进 README 已知限制。
+3. **`taken` 暂不成为跳**：`report_check` 的只读诊断已经能回答同一问题，等它真的不够用再加。
+4. **attention 的清除权给了所有参与者**：谁都能提问或撤回，结案自动撤回；没有单独的“回答”事件，回答就是一次贡献/回执/结案。
 
 ---
 
