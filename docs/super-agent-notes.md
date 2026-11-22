@@ -44,7 +44,7 @@ export function deliveryId(report: string, hops: readonly RouteHop[], target: st
 }
 ```
 
-投递前用这个 id 查 `agent.inbox.nextTurn/nextStep`（命中即跳过），再查目标会话历史（`sessionPersistence.open(id, 'read')` 扫 `user/message` 的 id）；投递后先 `ctx.sessionPersistence.flush()` 再记 `delivered`。本机 0.2.2-rc.3 的 `@deepseek-ai/dsh-agent` 类型与 `sessionPersistence` 服务目录里这两样都在，不需要新造 API。
+投递前用这个 id 查 `agent.inbox.nextTurn/nextStep`（命中即跳过），再查目标会话历史（`sessionPersistence.open(id, 'read')` 扫 `user/message` 的 id）；投递后先 `ctx.sessionPersistence.flush()` 再记 `delivered`。本机 0.2.2（rc.3 / rc.5）的 `@deepseek-ai/dsh-agent` 类型与 `sessionPersistence` 服务目录里这两样都在，不需要新造 API。
 
 **代价**：一次投递多一次历史扫描（只在该收件人有欠账时发生，可按会话缓存）；历史被压缩后可能查不到旧 id，退化为「再投一次」——这是 at-least-once 的已知边界，写进限制即可。
 

@@ -135,6 +135,12 @@ package.json 里声明**的包：本机靠 `node_modules/@deepseek-ai` 的 junct
     - **失败退避的真机验证**：探针把活 Agent 的 `steer` 临时替换为抛错函数，再走真实 `service.send` / `retryFailedDeliveries`。第一次失败后 `failing.attempts=1`、`pending=true`；窗口内 sweep 不尝试（次数仍为 1）；2s 后第二次、4s 后第三次，次数依次 2/3，退避时间随次数后移。恢复 `steer`、等过 8s 后 sweep 成功：`pending=false`、`hasDeliveryTrouble()=false`、路径只新增一条 `delivered`（不是 `recovered`，因为失败的注入从未把消息放进 inbox）。故障是注入的，但 catch → 退避 → 重试 → 恢复走的是真实宿主与真实 service。
     - **顺带修掉一处缺口**：持久化屏障（`sessionPersistence.flush()`）失败原先只让欠账停在 pending，不进失败表，重试扫描因此不会启动；现在每个已 steer 的 arrival 记一次失败，按同一退避表重试，`report_check` 的 `failing` 也能看到（`delivery-check` 覆盖窗口内跳过与到期恢复）。
     - 限制：隔离环境没有模型凭据，未跑模型回合与工具调用；真实 dispose 竞态没有专门构造（注入替代）。
+- **DSH 0.2.2-rc.5 已实测（2026-11-22）**：`npm i @deepseek-ai/dsh@0.2.2-rc.5 --prefix <scratch>` 得到官方包层，junction 到仓库 `node_modules/@deepseek-ai` 后：
+  - **类型面**：`pnpm typecheck` 通过，客户端与服务端都对照该版本官方 `.d.ts`。
+  - **确定性测试**：`pnpm test`（1319 项）、`pnpm test:tools`（278 项）与 `pnpm build` 全绿；构建产物与源码一致。
+  - **升级指南**：rc.3 → rc.5 之间只有两条 guide——`v0.2.2-rc.3` 的 DeepSeek 内容拒绝错误码（`MALFORMED_RESPONSE` → `CONTENT_REFUSED`）与 `v0.2.2-rc.4` 的网页搜索默认值（改用旧版 Messages 搜索）；本插件不消费前者，也没有搜索配置，均不适用。`v0.2.2-rc.5` 没有 guide 目录。
+  - **隔离 web profile**：插件 host 半正常挂载，免 token 的 `/api/report-ledger/timeline?scope=all` 与 `report?id=R-0001` 返回带 `attention` 的账本（2 份汇报、详情 4 跳）。浏览器半本次没有做有效的交互验证：隔离环境没有模型凭据，无法创建可渲染的会话视图；客户端类型面由 typecheck 覆盖。
+  - **兼容记录**：`package.json` 的 `dshReleases` 补 `0.2.2-rc.5: compatible`。
 - **宿主半的运行时外部依赖有三条**：`@deepseek-ai/dsh-tools` 与 `@deepseek-ai/dsh-workspace`（都由 profile 提供，**不在 package.json 里声明**），以及 `yaml`（声明在 `dependencies` 里，由包管理器安装；front matter 的 YAML 编解码用它）。`lib/` 随源码提交，固定 Commit 里就带着可运行的构建产物。
 - **浏览器半 require** `react`、`react/jsx-runtime` 与 `@deepseek-ai/dsh-client-ui-primitives`（面板里的按钮、芯片、悬停、状态点、输入框与正文渲染全部用它，与内置的 Chat / 轨迹视图同一套），其余全部内联。宿主半在 headless profile 里同样可用（没有 web server 时只是少了那三个只读端点）。
 - ⚠️ 于是浏览器半多了一条硬依赖：**shell 的冻结模块表里必须有 `dsh-client-ui-primitives`**。它自带的对话视图就依赖它，所以缺了它意味着那个 shell 本身已经坏了；真缺的话失败模式是「汇报标签页不出现」而不是整个 GUI 崩。

@@ -2,7 +2,7 @@
 
 这份文件是 **0.2.4 / 0.2.6 发布前审计中确认、且有意识地暂缓** 的问题清单。它不是 bug 总表，也不是路线图：只收那些「证据已经成立、但修复成本/收益或依赖关系还不适合当时动手」的项。
 
-- **最后复核**：2026-11-06（0.2.6 发布前复核；本机 DSH `0.2.1-rc.2`）。
+- **审计基线**：2026-11-06（0.2.6 发布前审计；本机 DSH `0.2.1-rc.2`）。0.2.8 发布前未重审这五项。
 - **证据报告**：审计报告在账本 `$DSH_HOME/report-ledger/reports/R-xxxx.md` 里；这份文档是仓库内、可版本化的摘要。报告 ID 保留，方便回看原始证据与探针。
 - **修一项时**：补测试 → 更新本文件的状态 → 在 `task:deferred-s3` 的跟踪报告里落一笔。
 
@@ -77,7 +77,7 @@
 - **孤儿检出警告**：`R-0064` 覆盖 `report_close`；`R-0065` 覆盖 `report_release` 与 `report_handover`。都只警告、不阻塞。
 - **V10 `getJson` 无 abort/超时**：已在 `R-0059` S3 批次修复。
 - **相邻箭头、`fittedTransform`、`pick` 1px 边框、`blur()` 死分支**：已在 `R-0059` S3 批次修复。
-- **兼容性 records（原第 5 项）**：`dshReleases` 已补 `0.2.1-rc.2` / `rc.3` / `rc.4`——每个版本都在隔离 prefix + 隔离 `DSH_HOME` 里装 `@deepseek-ai/dsh@<ver>` 实测。宿主半：工具调用与落盘、投递、非驻留挂账、`peer_wake` 经 `ctx.agents.resume` 恢复并补投、权限继承；浏览器半：隔离 web profile 里「汇报」标签页与「汇报画布」胶囊都正常渲染（含 `reads` 的显示）。类型面另逐字核过：`defineTool`、`realpathNormalize`、`SESSION_FORMAT_VERSION = 4`（投递消息的 producer source kind 未变）、`agents.resume` 整块未动。`dshOperations` 仍缺，但那只在投 DSH STORE 时才是材料缺口，不是运行时缺陷。
+- **兼容性 records（原第 5 项）**：`dshReleases` 已补 `0.2.1-rc.2` / `rc.3` / `rc.4` 与 `0.2.2-rc.3` / `rc.5`——每个版本都在隔离 prefix + 隔离 `DSH_HOME` 里装 `@deepseek-ai/dsh@<ver>` 实测。宿主半：工具调用与落盘、投递、非驻留挂账、`peer_wake` 经 `ctx.agents.resume` 恢复并补投、权限继承；浏览器半：隔离 web profile 里「汇报」标签页与「汇报画布」胶囊都正常渲染（含 `reads` 的显示）。类型面另逐字核过：`defineTool`、`realpathNormalize`、`SESSION_FORMAT_VERSION = 4`（投递消息的 producer source kind 未变）、`agents.resume` 整块未动。`dshOperations` 仍缺，但那只在投 DSH STORE 时才是材料缺口，不是运行时缺陷。
 
 ## 相关但不在本清单的项
 
